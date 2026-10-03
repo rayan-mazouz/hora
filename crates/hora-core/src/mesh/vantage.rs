@@ -4,8 +4,9 @@
 //! page reads to render "80 ms from EU, 220 ms from US" on each card.
 //!
 //! Strictly read-only and fail-open: an unreachable, slow or misconfigured
-//! peer just drops out of the map until the next round; page builds never
-//! wait on the network (they read the last snapshot).
+//! peer keeps its last answer for a few rounds (one lost poll must not make
+//! its column vanish), then drops out of the map until it answers again; page
+//! builds never wait on the network (they read the last snapshot).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,6 +27,10 @@ const POLL_INTERVAL: Duration = Duration::from_mins(1);
 
 /// Per-request deadline; a peer slower than this has nothing fresh to say.
 const POLL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How many polls in a row a peer may miss before its last answer is
+/// dropped: a blip keeps the view, a peer gone for minutes loses it.
+const MAX_MISSED_POLLS: u32 = 3;
 
 /// Cap on a peer's response body: a mesh member is trusted, but a compromised
 /// one must not be able to balloon this node's memory.
@@ -84,25 +89,57 @@ pub fn spawn_poller(
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(POLL_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut kept = Kept::new();
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
                 _ = shutdown.changed() => break,
             }
             let snapshot = config.borrow().clone();
-            let fresh = poll_once(&client, &snapshot).await;
-            map.store(Arc::new(fresh));
+            let answers = poll_once(&client, &snapshot).await;
+            map.store(Arc::new(fold_round(&mut kept, answers)));
         }
     })
 }
 
-/// One polling round: every peer with an API origin is asked concurrently;
-/// failures just leave that peer out of the fresh map.
-async fn poll_once(client: &Client, config: &Config) -> HashMap<String, Vec<PeerVantage>> {
-    let mut map: HashMap<String, Vec<PeerVantage>> = HashMap::new();
+/// Each peer's last answer and how many polls it has missed since.
+type Kept = HashMap<String, (PeerMonitors, u32)>;
+
+/// Fold one round's answers (peer name, answer; in configuration order) into
+/// the kept answers and build the map from them: a peer that missed this poll
+/// keeps its last answer for [`MAX_MISSED_POLLS`] rounds; a peer no longer
+/// asked (removed from the config) is forgotten.
+fn fold_round(
+    kept: &mut Kept,
+    answers: Vec<(String, Option<PeerMonitors>)>,
+) -> HashMap<String, Vec<PeerVantage>> {
+    kept.retain(|peer, _| answers.iter().any(|(name, _)| name == peer));
+    let mut map = HashMap::new();
+    for (peer_name, answer) in answers {
+        if let Some(answer) = answer {
+            kept.insert(peer_name.clone(), (answer, 0));
+        } else {
+            tracing::debug!(peer = %peer_name, "vantage poll failed or peer unreachable");
+            if let Some((_, missed)) = kept.get_mut(&peer_name) {
+                *missed += 1;
+                if *missed > MAX_MISSED_POLLS {
+                    kept.remove(&peer_name);
+                }
+            }
+        }
+        if let Some((answer, _)) = kept.get(&peer_name) {
+            merge_peer(&mut map, &peer_name, answer);
+        }
+    }
+    map
+}
+
+/// One polling round: every peer with an API origin is asked concurrently.
+/// Returns each one's answer (`None` on any failure), in configuration order.
+async fn poll_once(client: &Client, config: &Config) -> Vec<(String, Option<PeerMonitors>)> {
     let Some(from) = config.health.as_ref().map(|health| health.id.clone()) else {
         // Without an identity the peers cannot authenticate us: nothing to ask.
-        return map;
+        return Vec::new();
     };
 
     let from = &from;
@@ -119,14 +156,7 @@ async fn poll_once(client: &Client, config: &Config) -> HashMap<String, Vec<Peer
             (peer.name.clone(), answer)
         })
     });
-    for (peer_name, answer) in futures_util::future::join_all(asks).await {
-        let Some(answer) = answer else {
-            tracing::debug!(peer = %peer_name, "vantage poll failed or peer unreachable");
-            continue;
-        };
-        merge_peer(&mut map, &peer_name, &answer);
-    }
-    map
+    futures_util::future::join_all(asks).await
 }
 
 /// Fold one peer's disclosure into the map (kept separate so the merge is
@@ -180,6 +210,50 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_missed_poll_keeps_the_peer_for_a_few_rounds() {
+        let mut kept = Kept::new();
+        let round = |b: Option<PeerMonitors>| {
+            vec![
+                ("Hora B".to_owned(), b),
+                (
+                    "Hora C".to_owned(),
+                    Some(answer(&[("db:5432", "up", Some(85))])),
+                ),
+            ]
+        };
+        let db = |map: &HashMap<String, Vec<PeerVantage>>| {
+            map[&key(Kind::Tcp, "db:5432")]
+                .iter()
+                .map(|vantage| vantage.peer.clone())
+                .collect::<Vec<_>>()
+        };
+        let map = fold_round(
+            &mut kept,
+            round(Some(answer(&[("db:5432", "up", Some(220))]))),
+        );
+        assert_eq!(db(&map), ["Hora B", "Hora C"]);
+        // B misses polls: its last view stays for MAX_MISSED_POLLS rounds...
+        for _ in 0..MAX_MISSED_POLLS {
+            assert_eq!(
+                db(&fold_round(&mut kept, round(None))),
+                ["Hora B", "Hora C"]
+            );
+        }
+        // ...then goes.
+        assert_eq!(db(&fold_round(&mut kept, round(None))), ["Hora C"]);
+        // A peer removed from the config is forgotten at once.
+        fold_round(
+            &mut kept,
+            round(Some(answer(&[("db:5432", "up", Some(220))]))),
+        );
+        let only_c = vec![(
+            "Hora C".to_owned(),
+            Some(answer(&[("db:5432", "up", Some(85))])),
+        )];
+        assert_eq!(db(&fold_round(&mut kept, only_c)), ["Hora C"]);
     }
 
     #[test]
