@@ -16,8 +16,8 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
 
 use hora_core::config::{Config, Kind, Monitor};
 use hora_core::db::{self, Point};
+use hora_core::mesh::wire::{HealthReport, PeerSeen};
 use hora_core::notifications::{AlertSeverity, Event};
-use hora_core::peer::{HealthReport, PeerSeen};
 
 use crate::auth::{Operator, QueryTokenAuth, Viewer, authorize_peer, ct_eq, push_token};
 use crate::error::AppError;
@@ -84,10 +84,10 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         AlertRequest,
         AlertResponse,
         EventResponse,
-        hora_core::confirm::ProbeRequest,
-        hora_core::confirm::ProbeResponse,
-        hora_core::confirm::PeerMonitors,
-        hora_core::confirm::PeerMonitor,
+        hora_core::mesh::wire::ProbeRequest,
+        hora_core::mesh::wire::ProbeResponse,
+        hora_core::mesh::wire::PeerMonitors,
+        hora_core::mesh::wire::PeerMonitor,
         crate::summary::VantageView
     ))
 )]
@@ -124,7 +124,7 @@ impl utoipa::Modify for SecuritySchemes {
 )]
 pub(crate) async fn healthz(State(state): State<AppState>) -> Response {
     let config = state.config.borrow().clone();
-    let report = hora_core::peer::report(&state.pool, &config, &state.last_tick).await;
+    let report = hora_core::mesh::peer::report(&state.pool, &config, &state.last_tick).await;
     // A degraded node answers 503 so plain health checks (Docker's
     // HEALTHCHECK, a load balancer) notice; the body is unchanged for the
     // peers and keyword monitors that read it.
@@ -776,10 +776,10 @@ pub(crate) async fn latency_json(
 #[utoipa::path(
     post,
     path = "/api/peer/probe",
-    request_body = hora_core::confirm::ProbeRequest,
+    request_body = hora_core::mesh::wire::ProbeRequest,
     security(("push_token" = [])),
     responses(
-        (status = 200, description = "This vantage's verdict on the target", body = hora_core::confirm::ProbeResponse),
+        (status = 200, description = "This vantage's verdict on the target", body = hora_core::mesh::wire::ProbeResponse),
         (status = 400, description = "Exec and push monitors are not network probes"),
         (status = 401, description = "Unknown requesting peer, or missing/wrong X-Push-Token"),
         (status = 404, description = "The target is not in this node's configuration")
@@ -788,8 +788,8 @@ pub(crate) async fn latency_json(
 pub(crate) async fn peer_probe(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<hora_core::confirm::ProbeRequest>,
-) -> Result<Json<hora_core::confirm::ProbeResponse>, AppError> {
+    Json(request): Json<hora_core::mesh::wire::ProbeRequest>,
+) -> Result<Json<hora_core::mesh::wire::ProbeResponse>, AppError> {
     let config = state.config.borrow().clone();
     // Probing is strictly more sensitive than a push heartbeat: the peer must
     // be known here with a listen_token, and the header must match.
@@ -830,20 +830,20 @@ pub(crate) async fn peer_probe(
         )
         .map_err(|err| AppError::Internal(err.into()))?;
     let outcome = match tokio::time::timeout(
-        hora_core::confirm::PROBE_DEADLINE,
+        hora_core::mesh::confirm::PROBE_DEADLINE,
         hora_core::probe::run(&client, &probe_monitor),
     )
     .await
     {
         Ok(outcome) => outcome,
         Err(_elapsed) => {
-            return Ok(Json(hora_core::confirm::ProbeResponse {
+            return Ok(Json(hora_core::mesh::wire::ProbeResponse {
                 up: false,
                 error: Some("probe timed out at this vantage".to_owned()),
             }));
         }
     };
-    Ok(Json(hora_core::confirm::ProbeResponse {
+    Ok(Json(hora_core::mesh::wire::ProbeResponse {
         up: outcome.up,
         // Bounded: the reason crosses the wire into another node's logs.
         error: outcome.error.map(|error| error.chars().take(200).collect()),
@@ -862,7 +862,7 @@ pub(crate) struct PeerMonitorsQuery {
     params(("from" = String, Query, description = "The requesting peer's [health].id")),
     security(("push_token" = [])),
     responses(
-        (status = 200, description = "This node's probeable monitors, with its own view of each (status, 24h median)", body = hora_core::confirm::PeerMonitors),
+        (status = 200, description = "This node's probeable monitors, with its own view of each (status, 24h median)", body = hora_core::mesh::wire::PeerMonitors),
         (status = 401, description = "Unknown requesting peer, or missing/wrong X-Push-Token")
     )
 )]
@@ -870,7 +870,7 @@ pub(crate) async fn peer_monitors(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<PeerMonitorsQuery>,
-) -> Result<Json<hora_core::confirm::PeerMonitors>, AppError> {
+) -> Result<Json<hora_core::mesh::wire::PeerMonitors>, AppError> {
     let config = state.config.borrow().clone();
     // Same strict authentication as /api/peer/probe.
     authorize_peer(&config, &headers, &query.from)?;
@@ -894,7 +894,7 @@ pub(crate) async fn peer_monitors(
     let percentiles = crate::summary::or_empty(percentiles, "latency percentiles");
     let monitors = shared
         .iter()
-        .map(|monitor| hora_core::confirm::PeerMonitor {
+        .map(|monitor| hora_core::mesh::wire::PeerMonitor {
             kind: monitor.kind,
             target: monitor.target.clone(),
             status: recent.get(&monitor.id).map_or_else(
@@ -904,7 +904,7 @@ pub(crate) async fn peer_monitors(
             p50_ms: percentiles.get(&monitor.id).map(|(p50, _, _)| *p50),
         })
         .collect();
-    Ok(Json(hora_core::confirm::PeerMonitors { monitors }))
+    Ok(Json(hora_core::mesh::wire::PeerMonitors { monitors }))
 }
 
 #[utoipa::path(

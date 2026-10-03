@@ -1194,7 +1194,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let verdict: hora_core::confirm::ProbeResponse =
+        let verdict: hora_core::mesh::wire::ProbeResponse =
             serde_json::from_str(&body_text(res).await).unwrap();
         assert!(verdict.up);
 
@@ -1206,7 +1206,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let verdict: hora_core::confirm::ProbeResponse =
+        let verdict: hora_core::mesh::wire::ProbeResponse =
             serde_json::from_str(&body_text(res).await).unwrap();
         assert!(!verdict.up);
         assert!(verdict.error.is_some());
@@ -1250,7 +1250,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let answer: hora_core::confirm::PeerMonitors =
+        let answer: hora_core::mesh::wire::PeerMonitors =
             serde_json::from_str(&body_text(res).await).unwrap();
         let targets: Vec<&str> = answer
             .monitors
@@ -1298,7 +1298,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let peer: hora_core::confirm::PeerMonitors =
+        let peer: hora_core::mesh::wire::PeerMonitors =
             serde_json::from_str(&body_text(res).await).unwrap();
         let res = app
             .oneshot(get("/api/summary?token=0123456789abcdef"))
@@ -1355,7 +1355,7 @@ mod tests {
 
         let client = hora_core::http::client(None).expect("client");
         let url = format!("http://{addr_b}/api/peer/monitors");
-        let answer = hora_core::vantage::fetch_peer_monitors(
+        let answer = hora_core::mesh::vantage::fetch_peer_monitors(
             &client,
             &url,
             "hora-a",
@@ -1368,7 +1368,8 @@ mod tests {
 
         // A wrong token fails closed into None, never a panic or a partial read.
         let refused =
-            hora_core::vantage::fetch_peer_monitors(&client, &url, "hora-a", Some("wrong")).await;
+            hora_core::mesh::vantage::fetch_peer_monitors(&client, &url, "hora-a", Some("wrong"))
+                .await;
         assert!(refused.is_none());
     }
 
@@ -1420,7 +1421,7 @@ mod tests {
 
         // Disagreement: A thinks it is down, B still reaches it.
         let verdict =
-            hora_core::confirm::confirm_with_peers(&client, &config_a, &config_a.monitors[0])
+            hora_core::mesh::confirm::confirm_with_peers(&client, &config_a, &config_a.monitors[0])
                 .await
                 .expect("peers were asked");
         assert!(verdict.contains("seen UP by Hora B"), "{verdict}");
@@ -1429,7 +1430,7 @@ mod tests {
         // Real outage: the service is gone for B too.
         drop(service);
         let verdict =
-            hora_core::confirm::confirm_with_peers(&client, &config_a, &config_a.monitors[0])
+            hora_core::mesh::confirm::confirm_with_peers(&client, &config_a, &config_a.monitors[0])
                 .await
                 .expect("peers were asked");
         assert_eq!(verdict, "confirmed down from 2/2 vantage points");
@@ -1458,20 +1459,26 @@ mod tests {
             "#
         ))
         .expect("config bad");
-        let verdict =
-            hora_core::confirm::confirm_with_peers(&client, &config_bad, &config_bad.monitors[0])
-                .await
-                .expect("peers were asked");
+        let verdict = hora_core::mesh::confirm::confirm_with_peers(
+            &client,
+            &config_bad,
+            &config_bad.monitors[0],
+        )
+        .await
+        .expect("peers were asked");
         assert!(verdict.contains("no peer vantage reachable"), "{verdict}");
 
         // Fail open: a peer that is not even listening behaves the same.
         config_bad.peers[0].ping_url = Some(hora_core::config::Secret(
             "http://127.0.0.1:9/api/push/hora-a".to_owned(),
         ));
-        let verdict =
-            hora_core::confirm::confirm_with_peers(&client, &config_bad, &config_bad.monitors[0])
-                .await
-                .expect("peers were asked");
+        let verdict = hora_core::mesh::confirm::confirm_with_peers(
+            &client,
+            &config_bad,
+            &config_bad.monitors[0],
+        )
+        .await
+        .expect("peers were asked");
         assert!(verdict.contains("no peer vantage reachable"), "{verdict}");
     }
 

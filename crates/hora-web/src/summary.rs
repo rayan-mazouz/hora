@@ -227,7 +227,7 @@ pub(crate) async fn build_summary(
     config: &Config,
     visibility: &Visibility<'_>,
     channel_health: &[ChannelHealthEntry],
-    vantage: &HashMap<String, Vec<hora_core::vantage::PeerVantage>>,
+    vantage: &HashMap<String, Vec<hora_core::mesh::vantage::PeerVantage>>,
 ) -> Summary {
     let now = Utc::now();
     let timestamp = now.timestamp();
@@ -571,7 +571,7 @@ pub(crate) struct MonitorData<'a> {
     /// Event markers overlaying every sparkline (empty in the public view).
     events: &'a [db::EventMarker],
     /// The peers' view of shared targets, from the daemon's vantage poller.
-    vantage: &'a HashMap<String, Vec<hora_core::vantage::PeerVantage>>,
+    vantage: &'a HashMap<String, Vec<hora_core::mesh::vantage::PeerVantage>>,
 }
 
 /// Build a monitor's view from the pre-fetched batch maps. Pure: a monitor with
@@ -676,10 +676,10 @@ pub(crate) fn build_monitor_view(
 /// The per-vantage line of a card: each peer's view of this target, with a
 /// pre-formatted label ("Hora B: 220ms", "Hora C: down").
 fn vantage_views(
-    map: &HashMap<String, Vec<hora_core::vantage::PeerVantage>>,
+    map: &HashMap<String, Vec<hora_core::mesh::vantage::PeerVantage>>,
     monitor: &Monitor,
 ) -> Vec<VantageView> {
-    hora_core::vantage::for_monitor(map, monitor)
+    hora_core::mesh::vantage::for_monitor(map, monitor)
         .into_iter()
         .map(|view| {
             let label = match (view.status.as_str(), view.p50_ms) {

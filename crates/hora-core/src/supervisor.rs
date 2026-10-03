@@ -30,8 +30,8 @@ use tracing::{error, info, warn};
 
 use crate::coalesce::{self, AlertMsg};
 use crate::config::{self, Config, Monitor, Peer};
+use crate::mesh::peer::spawn_watch;
 use crate::notifications::{self, Notifiers};
-use crate::peer::spawn_watch;
 use crate::scheduler::{self, AlertCell};
 
 /// A running task and the spec (monitor or peer) it was spawned for.

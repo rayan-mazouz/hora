@@ -19,8 +19,7 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
-
+use super::wire::{ProbeRequest, ProbeResponse};
 use crate::config::{Config, Kind, Monitor};
 
 /// Hard per-peer deadline for one confirmation probe. The responder bounds
@@ -35,47 +34,6 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 
 /// How many peer names are spelled out in the annotation before "…".
 const MAX_NAMED_PEERS: usize = 3;
-
-/// What one node asks another to probe. The responder matches `kind` +
-/// `target` against its own monitors and refuses anything else.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct ProbeRequest {
-    /// The requesting node's `[health].id`; the responder authenticates it
-    /// against that peer's `listen_token`.
-    pub from: String,
-    pub kind: Kind,
-    pub target: String,
-}
-
-/// The vantage's verdict on one probe.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct ProbeResponse {
-    pub up: bool,
-    /// The failure reason when not up, bounded by the responder.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// What a node discloses to an authenticated peer on `GET /api/peer/monitors`:
-/// its probeable monitors with their live view - enough for `hora peers diff`
-/// (are our configs aligned?) and the per-vantage latency display, and
-/// nothing else (no names, notes or credentials).
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct PeerMonitors {
-    pub monitors: Vec<PeerMonitor>,
-}
-
-/// One probeable monitor as seen from a peer's vantage.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct PeerMonitor {
-    pub kind: Kind,
-    pub target: String,
-    /// `up` | `degraded` | `down` | `unknown`, from that node's view.
-    pub status: String,
-    /// That node's 24h median latency to the target, when it has one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub p50_ms: Option<i64>,
-}
 
 /// One peer's view of the target, from the requester's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

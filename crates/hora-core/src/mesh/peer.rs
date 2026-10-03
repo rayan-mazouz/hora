@@ -16,12 +16,12 @@ use std::time::Duration;
 use futures_util::future::join_all;
 use hora_notify::Event;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
+use super::wire::{HealthReport, PeerSeen};
 use crate::config::{Config, Health, Peer};
 use crate::db;
 use crate::heartbeat::{Cadence, heartbeat_expected_since, heartbeat_outcome_for};
@@ -48,34 +48,6 @@ const HEARTBEAT_ROUND_DEADLINE: Duration = Duration::from_secs(12);
 const MAX_REPORT_BYTES: usize = 64 * 1024;
 
 // --- /healthz report ------------------------------------------------------
-
-/// The body of `/healthz`: this node's own health plus its view of every peer it
-/// watches. `status` is `"ok"` only when the node is fully healthy, so an external
-/// keyword monitor (e.g. `UptimeRobot` matching `"ok"`) detects trouble; the rest of
-/// the document is ignored by such pollers but read by other Hora for quorum.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct HealthReport {
-    /// `"ok"` when the scheduler and database are both healthy, else `"degraded"`.
-    pub status: String,
-    pub scheduler_ok: bool,
-    pub db_ok: bool,
-    /// Seconds since the most recent scheduler tick; `-1` if it has not ticked yet.
-    pub last_tick_age: i64,
-    /// This node's identity (`[health].id`), absent if no `[health]` section.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    /// This node's view of each watched peer, keyed by the peer's global id.
-    pub peers: HashMap<String, PeerSeen>,
-}
-
-/// One node's view of a peer, as reported on `/healthz`.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct PeerSeen {
-    /// `"up"`, `"down"`, or `"unknown"` (never seen).
-    pub state: String,
-    /// Seconds since the peer's last heartbeat; `-1` if never seen.
-    pub age: i64,
-}
 
 /// Build the `/healthz` report for the current configuration and scheduler state.
 pub async fn report(pool: &SqlitePool, config: &Config, last_tick: &AtomicU64) -> HealthReport {

@@ -392,7 +392,7 @@ async fn confirm_down(
     // Multi-vantage confirmation: bounded (one concurrent round, hard
     // deadline) and strictly fail-open - `None` means the alert reads exactly
     // as it would without the feature.
-    let vantage = crate::confirm::confirm_with_peers(confirm_client, config, monitor).await;
+    let vantage = crate::mesh::confirm::confirm_with_peers(confirm_client, config, monitor).await;
     if let Some(verdict) = &vantage {
         info!(monitor = %monitor.id, %verdict, "multi-vantage verdict");
         // Recorded on the incident too (best effort), so the post-mortem can

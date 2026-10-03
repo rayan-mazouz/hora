@@ -1031,7 +1031,7 @@ async fn confirm_probe(
     outcome: &hora_core::probe::Outcome,
 ) -> anyhow::Result<()> {
     let plain = hora_core::http::client(None).context("building the confirm HTTP client")?;
-    match hora_core::confirm::confirm_verdict(&plain, config, monitor, outcome.up).await {
+    match hora_core::mesh::confirm::confirm_verdict(&plain, config, monitor, outcome.up).await {
         Some(verdict) => println!("  vantage   {verdict}"),
         None => {
             println!(
@@ -1182,7 +1182,7 @@ async fn peers(args: &[String]) -> Result<(), CliError> {
     let mut drift = false;
     println!("hora peers diff - {} local probeable monitors", local.len());
     for (peer, url) in askable {
-        let answer = hora_core::vantage::fetch_peer_monitors(
+        let answer = hora_core::mesh::vantage::fetch_peer_monitors(
             &client,
             &url,
             &from,
@@ -1205,7 +1205,7 @@ async fn peers(args: &[String]) -> Result<(), CliError> {
 fn print_peer_diff(
     peer_name: &str,
     local: &std::collections::BTreeSet<(String, String)>,
-    answer: Option<&hora_core::confirm::PeerMonitors>,
+    answer: Option<&hora_core::mesh::wire::PeerMonitors>,
 ) -> bool {
     let Some(answer) = answer else {
         println!("{peer_name}: UNREACHABLE (or refused the exchange)");
@@ -1470,7 +1470,7 @@ async fn serve() -> anyhow::Result<()> {
     // [health] section and reads it live, so it is always spawned (and activates if
     // [health] is added on reload). The inbound peer-watch tasks are owned and
     // hot-reloaded by the supervisor alongside the monitors.
-    let heartbeat_task = hora_core::peer::spawn_heartbeat(
+    let heartbeat_task = hora_core::mesh::peer::spawn_heartbeat(
         handle.config.clone(),
         pool.clone(),
         client.clone(),
@@ -1481,8 +1481,8 @@ async fn serve() -> anyhow::Result<()> {
     // Per-vantage latency: poll the peers' /api/peer/monitors in the
     // background and share the snapshot with the web layer. Self-gating like
     // the heartbeat (no peers = a no-op per round).
-    let vantage_map = hora_core::vantage::new_map();
-    let vantage_task = hora_core::vantage::spawn_poller(
+    let vantage_map = hora_core::mesh::vantage::new_map();
+    let vantage_task = hora_core::mesh::vantage::spawn_poller(
         handle.config.clone(),
         client,
         Arc::clone(&vantage_map),

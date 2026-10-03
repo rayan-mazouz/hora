@@ -91,7 +91,7 @@ pub struct AppState {
     /// The peers' view of shared targets (per-vantage latency), written by the
     /// daemon's poller and read by the summary builder. Empty when the node
     /// has no askable peers.
-    vantage: hora_core::vantage::VantageMap,
+    vantage: hora_core::mesh::vantage::VantageMap,
 }
 
 impl AppState {
@@ -112,14 +112,14 @@ impl AppState {
             last_tick,
             notifier,
             flood: Arc::new(flood::Flood::default()),
-            vantage: hora_core::vantage::new_map(),
+            vantage: hora_core::mesh::vantage::new_map(),
         }
     }
 
     /// Attach the daemon's vantage snapshot (the poller's output). Without it
     /// the cards simply render no per-vantage line.
     #[must_use]
-    pub fn with_vantage(mut self, vantage: hora_core::vantage::VantageMap) -> Self {
+    pub fn with_vantage(mut self, vantage: hora_core::mesh::vantage::VantageMap) -> Self {
         self.vantage = vantage;
         self
     }
@@ -184,7 +184,7 @@ pub(crate) async fn summary_for(
     cache: &Cache,
     audience: &Audience,
     notifier: &Notifiers,
-    vantage: &hora_core::vantage::VantageMap,
+    vantage: &hora_core::mesh::vantage::VantageMap,
 ) -> Arc<Summary> {
     let cached = || match audience {
         Audience::Public => cache::fresh(&cache.public, config, SUMMARY_CACHE_TTL),

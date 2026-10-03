@@ -4,7 +4,6 @@ pub mod announce;
 pub mod cert;
 pub mod coalesce;
 pub mod config;
-pub mod confirm;
 pub mod db;
 pub mod digest;
 pub mod doctor;
@@ -15,8 +14,8 @@ mod heartbeat;
 pub mod http;
 pub mod import;
 pub mod maintenance;
+pub mod mesh;
 pub mod notifications;
-pub mod peer;
 pub mod postmortem;
 pub mod probe;
 mod rdap;
@@ -29,7 +28,6 @@ pub mod supervisor;
 pub mod timeline;
 pub mod topology;
 pub mod tune;
-pub mod vantage;
 
 /// Seconds in a day (UTC), shared across the time-bucketing logic.
 pub const SECONDS_PER_DAY: i64 = 86_400;

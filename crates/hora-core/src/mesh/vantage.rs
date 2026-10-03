@@ -17,7 +17,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::config::{Config, Kind, Monitor};
-use crate::confirm::PeerMonitors;
+use crate::mesh::wire::PeerMonitors;
 
 /// How often the peers are polled. Latency medians move slowly; a minute
 /// keeps the display fresh without turning the mesh into a chat room.
@@ -165,7 +165,7 @@ pub async fn fetch_peer_monitors(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::confirm::PeerMonitor;
+    use crate::mesh::wire::PeerMonitor;
 
     fn answer(entries: &[(&str, &str, Option<i64>)]) -> PeerMonitors {
         PeerMonitors {
