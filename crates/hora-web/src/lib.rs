@@ -160,10 +160,21 @@ impl AppState {
 /// request (and inflate the keyed-bucket map) simply by rotating the header.
 /// Forwarded headers are honored only when an operator behind a trusted proxy
 /// names one via `server.client_ip_header`.
+///
+/// Behind a proxy that nobody named, every client shares the proxy's address,
+/// hence one rate-limit bucket: a busy page then answers 429 to everyone. The
+/// first request that arrives with a forwarding header while none is
+/// configured logs a single warning saying so.
 #[derive(Clone)]
 pub(crate) struct ConfiguredIp {
     header: Option<HeaderName>,
+    /// Set once the "behind an unnamed proxy" warning was logged.
+    proxy_hint: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// The headers a reverse proxy adds; their presence without a configured
+/// `client_ip_header` means the peer address is the proxy's.
+const FORWARDING_HEADERS: [&str; 3] = ["x-forwarded-for", "x-real-ip", "forwarded"];
 
 impl KeyExtractor for ConfiguredIp {
     type Key = IpAddr;
@@ -178,6 +189,9 @@ impl KeyExtractor for ConfiguredIp {
                 .and_then(|first| first.trim().parse::<IpAddr>().ok())
         {
             return Ok(ip);
+        }
+        if self.header.is_none() {
+            self.note_unnamed_proxy(req);
         }
         PeerIpKeyExtractor.extract(req)
     }
@@ -194,7 +208,33 @@ impl ConfiguredIp {
                 })
                 .ok()
         });
-        Self { header }
+        Self {
+            header,
+            proxy_hint: Arc::default(),
+        }
+    }
+
+    /// Log, once per process, that requests come through a proxy that no
+    /// `client_ip_header` names. Returns whether this call logged it.
+    fn note_unnamed_proxy<T>(&self, req: &Request<T>) -> bool {
+        use std::sync::atomic::Ordering;
+        let forwarded = FORWARDING_HEADERS
+            .iter()
+            .find(|name| req.headers().contains_key(**name));
+        let Some(name) = forwarded else {
+            return false;
+        };
+        if self.proxy_hint.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+        tracing::warn!(
+            "requests carry a {name} header but server.client_ip_header is unset: the \
+             rate limits key on the TCP peer, so behind a reverse proxy every client \
+             shares the proxy's bucket (429s for everyone under load). Name the header \
+             your proxy sets (e.g. client_ip_header = \"x-forwarded-for\") - only if \
+             the proxy overwrites it and the origin is not reachable directly"
+        );
+        true
     }
 }
 
@@ -228,5 +268,21 @@ mod tests {
             .body(())
             .expect("request");
         assert_eq!(extractor.extract(&without_header).unwrap(), peer.ip());
+    }
+
+    #[test]
+    fn an_unnamed_proxy_is_reported_once() {
+        let request = |header: &str| {
+            Request::builder()
+                .header(header, "10.0.0.1")
+                .body(())
+                .expect("request")
+        };
+        let unset = ConfiguredIp::from_config(None);
+        assert!(!unset.note_unnamed_proxy(&request("accept")));
+        assert!(unset.note_unnamed_proxy(&request("x-real-ip")));
+        // Once: the clones the router holds share the flag.
+        assert!(!unset.clone().note_unnamed_proxy(&request("forwarded")));
+        assert!(!unset.note_unnamed_proxy(&request("x-forwarded-for")));
     }
 }

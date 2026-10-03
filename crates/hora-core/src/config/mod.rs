@@ -236,7 +236,9 @@ pub struct Server {
     /// Trust this request header for the client IP when rate limiting (e.g.
     /// `cf-connecting-ip` behind Cloudflare). Only safe when a proxy you control
     /// sets it and direct access to the origin is blocked - otherwise clients can
-    /// forge it. Unset = smart detection (x-forwarded-for / x-real-ip / peer).
+    /// forge it. Unset = the TCP peer address: forwarded headers are never
+    /// trusted on their own (behind a proxy every client then shares its
+    /// bucket; the daemon logs a warning when it sees one).
     #[serde(default)]
     pub client_ip_header: Option<String>,
     /// Per-IP API rate limit: one request slot is replenished every N seconds.
