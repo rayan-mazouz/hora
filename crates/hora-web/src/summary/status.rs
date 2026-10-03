@@ -79,9 +79,9 @@ pub(crate) fn build_bar(daily: &[DayRow], now: DateTime<Utc>, days: u16) -> Vec<
             .to_string();
         let cell = by_day.get(date.as_str()).map_or_else(
             || DayCell {
-                title: format!("{date}: no data"),
                 date: date.clone(),
                 state: "empty",
+                permille: None,
                 maint: false,
             },
             |row| day_cell(date.clone(), row),
@@ -98,11 +98,10 @@ pub(crate) const DAY_OUTAGE_BELOW_PERMILLE: i64 = 900; // < 90% availability ove
 pub(crate) fn day_cell(date: String, row: &DayRow) -> DayCell {
     let total = row.up + row.down + row.degraded;
     if total == 0 {
-        let title = format!("{date}: no data");
         return DayCell {
             date,
             state: "empty",
-            title,
+            permille: None,
             maint: false,
         };
     }
@@ -114,11 +113,10 @@ pub(crate) fn day_cell(date: String, row: &DayRow) -> DayCell {
     } else {
         "down"
     };
-    let title = format!("{date}: {}", hora_core::fmt::permille(permille));
     DayCell {
         date,
         state,
-        title,
+        permille: Some(permille),
         maint: false,
     }
 }

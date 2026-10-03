@@ -280,8 +280,11 @@ impl Serialize for DayBar {
 pub(crate) struct DayCell {
     pub(crate) date: String,
     pub(crate) state: &'static str,
+    /// The day's availability, permille; `None` without checks. (Kept as a
+    /// number: a formatted title per cell was 90 strings per monitor and
+    /// build, the largest share of the summary's memory and build time.)
     #[serde(skip)]
-    pub(crate) title: String,
+    pub(crate) permille: Option<i64>,
     /// A configured maintenance window covering this monitor touched the day.
     #[serde(skip)]
     pub(crate) maint: bool,

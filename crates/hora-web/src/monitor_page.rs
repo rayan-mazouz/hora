@@ -407,15 +407,10 @@ fn days(m: &MonitorView, incidents: &[Incident]) -> Vec<Day> {
                 b'm' => "maint",
                 _ => "none",
             };
-            // The cell title is "2026-09-18: 99.2%" (or ": no data").
-            let figure = cell
-                .title
-                .split_once(": ")
-                .map(|(_, figure)| figure)
-                .filter(|figure| *figure != "no data");
+            let figure = cell.permille.map(hora_core::fmt::permille);
             let date = NaiveDate::parse_from_str(&cell.date, "%Y-%m-%d").ok();
             let short = short_date(&cell.date);
-            let tip = match figure {
+            let tip = match &figure {
                 Some(figure) => format!("{short}: {} · {figure} up", word(state)),
                 None => format!("{short}: {}", word(state)),
             };
