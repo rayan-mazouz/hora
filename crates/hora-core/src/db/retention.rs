@@ -249,8 +249,8 @@ pub async fn downsample_daily(store: &Store, cutoff: i64) -> sqlx::Result<()> {
 /// # Errors
 ///
 /// Returns an error if the deletion fails.
-pub async fn prune_hourly(store: &Store, cutoff: i64, pause: Duration) -> sqlx::Result<()> {
-    delete_sliced(store, HOURLY, None, cutoff, 3600, pause).await
+pub(super) async fn prune_hourly(store: &Store, cutoff: i64, pace: &Pace) -> sqlx::Result<()> {
+    delete_sliced(store, HOURLY, None, cutoff, 3600, pace).await
 }
 
 /// Prune old daily aggregates beyond the retention period.
@@ -268,7 +268,7 @@ pub async fn prune_daily(store: &Store, cutoff: i64) -> sqlx::Result<()> {
 
 /// Downsample old history and age the aggregates out. Failures are logged and
 /// non-fatal: the retention pruning in [`prune`] still runs.
-async fn roll_up_history(store: &Store, now: i64, pause: Duration) {
+async fn roll_up_history(store: &Store, now: i64, pace: &Pace) {
     // Downsample before any deletion: every ended hour rolls up into an hourly
     // bucket, hourly buckets older than 90 days into daily ones. Each bucket is
     // written exactly once (see `downsample_hourly`), so the aggregates survive
@@ -285,7 +285,7 @@ async fn roll_up_history(store: &Store, now: i64, pause: Duration) {
     // only hours already rolled up into a *complete* daily bucket are dropped),
     // daily beyond a year.
     let hourly_prune_cutoff = (daily_cutoff / 86400) * 86400;
-    if let Err(err) = prune_hourly(store, hourly_prune_cutoff, pause).await {
+    if let Err(err) = prune_hourly(store, hourly_prune_cutoff, pace).await {
         tracing::warn!("hourly prune failed: {err}");
     }
     let yearly_cutoff = now - AGGREGATE_RETENTION_DAYS * SECONDS_PER_DAY;
@@ -315,23 +315,28 @@ async fn roll_up_history(store: &Store, now: i64, pause: Duration) {
     }
 }
 
-pub(crate) async fn prune(store: &Store, config: &Config) -> anyhow::Result<()> {
-    prune_with(store, config, false, ONLINE_SLICE_PAUSE).await
+/// The daemon's prune tick, paced and budgeted (see [`Pace::online`]).
+/// Returns `false` when the budget ran out with rows still past their
+/// retention: the caller comes back for them soon rather than in six hours.
+pub(crate) async fn prune(store: &Store, config: &Config) -> anyhow::Result<bool> {
+    let pace = Pace::online();
+    prune_with(store, config, false, &pace).await?;
+    Ok(pace.finished())
 }
 
 /// [`prune`], deleting the rows of removed monitors at once when
 /// `purge_removed` (the explicit `hora compact --purge-removed`) instead of
-/// after their grace period. `pause` is the breather between two delete
-/// slices (see [`delete_sliced`]): zero offline, where no writer waits.
+/// after their grace period. `pace` paces the sliced deletes (see
+/// [`delete_sliced`]): no pause and no deadline offline, where no writer waits.
 pub(super) async fn prune_with(
     store: &Store,
     config: &Config,
     purge_removed: bool,
-    pause: Duration,
+    pace: &Pace,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
 
-    roll_up_history(store, now, pause).await;
+    roll_up_history(store, now, pace).await;
 
     // Trim each monitor's history to its retention window. Monitors are grouped
     // by cutoff (most share the default), so this is one sliced delete per
@@ -356,10 +361,10 @@ pub(super) async fn prune_with(
     }
     for (cutoff, ids) in ids_by_cutoff {
         let ids = serde_json::to_string(&ids)?;
-        delete_sliced(store, CHECKS, Some(&ids), cutoff, PRUNE_SLICE_SECS, pause).await?;
+        delete_sliced(store, CHECKS, Some(&ids), cutoff, PRUNE_SLICE_SECS, pace).await?;
     }
 
-    delete_orphans(store, config, now, purge_removed, pause).await?;
+    delete_orphans(store, config, now, purge_removed, pace).await?;
 
     // Keep the planner statistics current as the tables grow and the prunes
     // reshape them - same rationale as the call in [`connect`]; cheap unless
@@ -383,6 +388,71 @@ const ORPHAN_SLICE_SECS: i64 = SECONDS_PER_DAY;
 /// SQLite's longest busy-retry sleep (100 ms), so an insert waiting on the
 /// lock gets it before the next slice takes it again.
 const ONLINE_SLICE_PAUSE: Duration = Duration::from_millis(100);
+/// How long one daemon prune tick may spend deleting before it hands the
+/// maintenance loop back (roll-ups, shutdown). A routine tick needs seconds;
+/// only a backlog - retention lowered from a year to a month, say - runs into
+/// it, and the loop then comes back for the rest a few minutes later instead
+/// of deleting for hours in one go.
+const ONLINE_PRUNE_BUDGET: Duration = Duration::from_secs(120);
+
+/// How a prune paces its sliced deletes: the breather between two slices,
+/// and an optional deadline after which it stops between slices and records
+/// that rows are left for a later tick.
+#[derive(Debug)]
+pub(super) struct Pace {
+    pause: Duration,
+    deadline: Option<tokio::time::Instant>,
+    ran_out: std::sync::atomic::AtomicBool,
+}
+
+impl Pace {
+    /// The daemon's pace: [`ONLINE_SLICE_PAUSE`] between slices, within
+    /// [`ONLINE_PRUNE_BUDGET`].
+    fn online() -> Self {
+        Self {
+            pause: ONLINE_SLICE_PAUSE,
+            deadline: Some(tokio::time::Instant::now() + ONLINE_PRUNE_BUDGET),
+            ran_out: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// `hora compact`'s pace: no other writer waits, so no pause and no
+    /// deadline.
+    pub(super) fn offline() -> Self {
+        Self {
+            pause: Duration::ZERO,
+            deadline: None,
+            ran_out: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// A pace whose deadline has already passed: deletes nothing.
+    #[cfg(test)]
+    pub(super) fn expired() -> Self {
+        Self {
+            pause: Duration::ZERO,
+            deadline: Some(tokio::time::Instant::now()),
+            ran_out: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Whether the deadline has passed; remembers it for [`Self::finished`].
+    fn out_of_time(&self) -> bool {
+        let late = self
+            .deadline
+            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
+        if late {
+            self.ran_out
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        late
+    }
+
+    /// Whether every sliced delete ran to its cutoff.
+    pub(super) fn finished(&self) -> bool {
+        !self.ran_out.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
 
 /// A time-keyed table whose old rows are deleted a slice at a time.
 #[derive(Clone, Copy)]
@@ -403,19 +473,24 @@ const HOURLY: Sliced = Sliced {
 /// Delete the rows of `target` older than `cutoff` - of the monitors in `ids`
 /// (a JSON array), or of all of them with `None` - oldest first, one
 /// `slice_secs` span per statement (see [`delete_oldest_slice`]), sleeping
-/// `pause` after each slice that deleted rows so the scheduler's inserts get
-/// the write lock in between. One big `DELETE` held it for seconds.
-async fn delete_sliced(
+/// the pace's pause after each slice that deleted rows so the scheduler's
+/// inserts get the write lock in between. One big `DELETE` held it for
+/// seconds. Stops between slices once the pace's deadline has passed.
+pub(super) async fn delete_sliced(
     store: &Store,
     target: Sliced,
     ids: Option<&str>,
     cutoff: i64,
     slice_secs: i64,
-    pause: Duration,
+    pace: &Pace,
 ) -> sqlx::Result<()> {
-    while let Some(deleted) = delete_oldest_slice(store, target, ids, cutoff, slice_secs).await? {
-        if deleted > 0 && !pause.is_zero() {
-            tokio::time::sleep(pause).await;
+    while !pace.out_of_time() {
+        let Some(deleted) = delete_oldest_slice(store, target, ids, cutoff, slice_secs).await?
+        else {
+            break;
+        };
+        if deleted > 0 && !pace.pause.is_zero() {
+            tokio::time::sleep(pace.pause).await;
         }
     }
     Ok(())
@@ -515,14 +590,14 @@ const ORPHAN_TABLES: [&str; 9] = [
 /// seconds every prune tick, timing out the scheduler's inserts, all to
 /// usually delete nothing. Reads don't block writers under WAL, and the
 /// targeted deletes only run once a removed monitor's grace has run out; a
-/// monitor's `checks` (months of them) go a day at a time, `pause` apart
+/// monitor's `checks` (months of them) go a day at a time, paced
 /// (see [`delete_sliced`]), the other tables hold little per monitor.
 pub(super) async fn delete_orphans(
     store: &Store,
     config: &Config,
     now: i64,
     purge: bool,
-    pause: Duration,
+    pace: &Pace,
 ) -> anyhow::Result<()> {
     let keep: std::collections::HashSet<&str> = config
         .monitors
@@ -588,7 +663,7 @@ pub(super) async fn delete_orphans(
                 if table == CHECKS.table {
                     let ids = serde_json::to_string(&[id])?;
                     let all = i64::MAX;
-                    delete_sliced(store, CHECKS, Some(&ids), all, ORPHAN_SLICE_SECS, pause).await?;
+                    delete_sliced(store, CHECKS, Some(&ids), all, ORPHAN_SLICE_SECS, pace).await?;
                     continue;
                 }
                 sqlx::query(sqlx::AssertSqlSafe(format!(

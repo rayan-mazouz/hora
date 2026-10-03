@@ -85,7 +85,7 @@ pub use release::{StoredRelease, mark_release_notified, release_watch, upsert_re
 pub(crate) use retention::prune;
 pub use retention::{
     AGGREGATE_RETENTION_DAYS, downsample_daily, downsample_hourly, fill_latency_histograms,
-    prune_daily, prune_hourly, roll_up_recent,
+    prune_daily, roll_up_recent,
 };
 pub use window::{DailyCache, SparklineCache, WindowCache, WindowStats, window_stats_all};
 

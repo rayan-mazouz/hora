@@ -19,6 +19,9 @@ const PRUNE_STARTUP_DELAY: Duration = Duration::from_mins(5);
 /// so the frontier must trail the clock by about an hour, not a prune
 /// interval. A tick with no newly ended hour is one indexed `MAX(hour)`.
 const ROLLUP_INTERVAL: Duration = Duration::from_mins(5);
+/// How soon a prune tick that ran out of its budget (a retention backlog)
+/// comes back for the rest. The roll-ups get their turn in between.
+const PRUNE_CATCH_UP_DELAY: Duration = Duration::from_mins(5);
 
 /// Background task: periodically prune each monitor's history to its retention,
 /// and drop any data left behind by monitors removed from the config (after a
@@ -44,8 +47,22 @@ pub fn spawn_pruner(
             tokio::select! {
                 _ = ticker.tick() => {
                     let config = config.borrow().clone();
-                    if let Err(err) = prune(&store, &config).await {
-                        tracing::warn!("pruning failed: {err}");
+                    // Each sliced DELETE is its own statement, so dropping the
+                    // prune between two of them on shutdown loses nothing.
+                    let finished = tokio::select! {
+                        result = prune(&store, &config) => result,
+                        _ = shutdown.changed() => break,
+                    };
+                    match finished {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::info!(
+                                "retention backlog: more history to prune, continuing in {} min",
+                                PRUNE_CATCH_UP_DELAY.as_secs() / 60
+                            );
+                            ticker.reset_after(PRUNE_CATCH_UP_DELAY);
+                        }
+                        Err(err) => tracing::warn!("pruning failed: {err}"),
                     }
                 }
                 _ = rollup.tick() => {

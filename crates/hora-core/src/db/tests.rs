@@ -10,7 +10,6 @@ use crate::SECONDS_PER_DAY;
 use crate::config::Config;
 use crate::probe::FailureKind;
 use crate::status::CheckStatus;
-use std::time::Duration;
 
 #[tokio::test]
 async fn a_release_alerts_once_and_a_new_project_starts_afresh() {
@@ -456,7 +455,7 @@ async fn prune_removes_orphans_and_expired_rows() {
         &config,
         now + ORPHAN_GRACE_SECS + 60,
         false,
-        Duration::ZERO,
+        &super::retention::Pace::offline(),
     )
     .await
     .unwrap();
@@ -470,6 +469,46 @@ async fn prune_removes_orphans_and_expired_rows() {
     );
     assert!(expected("keep").await.is_some());
     assert_eq!(recent_checks(&store, "keep", 10).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_spent_budget_stops_the_prune_and_says_so() {
+    let store = Store::in_memory().await;
+    for t in (0..3600).step_by(60) {
+        insert(&store, "a", 1_000_000 + t, 1, Some(5)).await;
+    }
+    let ids = r#"["a"]"#;
+    let cutoff = 1_000_000 + SECONDS_PER_DAY;
+    let count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM checks")
+            .fetch_one(store.sqlx())
+            .await
+            .unwrap()
+    };
+
+    // Out of time before the first slice: nothing goes, and the pace says
+    // rows are left, so the maintenance loop comes back for them soon.
+    let spent = super::retention::Pace::expired();
+    super::retention::delete_sliced(&store, CHECKS, Some(ids), cutoff, PRUNE_SLICE_SECS, &spent)
+        .await
+        .unwrap();
+    assert_eq!(count().await, 60);
+    assert!(!spent.finished());
+
+    // Without a deadline the same call runs to the cutoff and finishes.
+    let offline = super::retention::Pace::offline();
+    super::retention::delete_sliced(
+        &store,
+        CHECKS,
+        Some(ids),
+        cutoff,
+        PRUNE_SLICE_SECS,
+        &offline,
+    )
+    .await
+    .unwrap();
+    assert_eq!(count().await, 0);
+    assert!(offline.finished());
 }
 
 #[tokio::test]
@@ -541,9 +580,15 @@ async fn an_orphan_that_comes_back_keeps_its_history() {
     };
 
     // Renamed away: marked, not deleted.
-    delete_orphans(&store, &config_with(&["other"]), now, false, Duration::ZERO)
-        .await
-        .unwrap();
+    delete_orphans(
+        &store,
+        &config_with(&["other"]),
+        now,
+        false,
+        &super::retention::Pace::offline(),
+    )
+    .await
+    .unwrap();
     assert!(
         meta_get(&store, "orphan_since:api")
             .await
@@ -557,7 +602,7 @@ async fn an_orphan_that_comes_back_keeps_its_history() {
         &config_with(&["api"]),
         now + 3600,
         false,
-        Duration::ZERO,
+        &super::retention::Pace::offline(),
     )
     .await
     .unwrap();
@@ -571,7 +616,7 @@ async fn an_orphan_that_comes_back_keeps_its_history() {
         &config_with(&["other"]),
         later,
         false,
-        Duration::ZERO,
+        &super::retention::Pace::offline(),
     )
     .await
     .unwrap();
@@ -580,7 +625,7 @@ async fn an_orphan_that_comes_back_keeps_its_history() {
         &config_with(&["other"]),
         later + 3600,
         false,
-        Duration::ZERO,
+        &super::retention::Pace::offline(),
     )
     .await
     .unwrap();
@@ -1305,9 +1350,13 @@ async fn daily_cache_equals_daily_all_as_roll_ups_and_days_advance() {
     downsample_daily(&store, day0 + 2 * SECONDS_PER_DAY)
         .await
         .unwrap();
-    prune_hourly(&store, day0 + SECONDS_PER_DAY, Duration::ZERO)
-        .await
-        .unwrap();
+    super::retention::prune_hourly(
+        &store,
+        day0 + SECONDS_PER_DAY,
+        &super::retention::Pace::offline(),
+    )
+    .await
+    .unwrap();
 
     let mut cache = DailyCache::default();
     for step in 0..10 {

@@ -12,7 +12,7 @@ a little owl that dozes while all is well) and a status page redesigned
 around it; the findings of a full audit are fixed; and the page stays
 instant on huge databases: measured on 575 million checks across 700
 monitors, the status page answers in 1.5 ms at p99 (it took 13 s in
-0.10.0), weighs 71 KB instead of 6.5 MB, and the daemon peaks at 396 MB of
+0.10.0), weighs 71 KB instead of 6.5 MB, and the daemon peaks at 353 MB of
 RAM instead of 887 MB. See [UPGRADES.md](UPGRADES.md#0100--0110) for what to
 check before upgrading.
 
@@ -261,7 +261,9 @@ check before upgrading.
   in one statement that held the write lock for 5 to 10 seconds, so the
   scheduler's inserts failed with "database is locked". Retention (and the
   sweep of a removed monitor's history) now deletes five minutes of checks
-  at a time, oldest first, pausing in between.
+  at a time, oldest first, pausing in between; a tick spends at most two
+  minutes deleting and comes back five minutes later for any backlog, so a
+  much lowered retention never blocks the roll-ups or a shutdown.
 - **Group pages leaked operator data**: a group token saw every group's
   deploy markers in the sparklines and the names of other groups' private
   monitors in "caused by" / "impacts". A group audience now names only

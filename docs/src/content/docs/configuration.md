@@ -97,7 +97,10 @@ uptime bars keep working beyond the raw retention window, and the database
 never grows forever. Closed incidents age out after a year; expired silences
 are swept too. The prune runs every 6 hours (the first one 5 minutes after
 start) and deletes five minutes of checks per statement, pausing in
-between, so the checks being recorded never wait on it. The WAL file
+between, so the checks being recorded never wait on it. A tick spends at
+most two minutes deleting: after lowering a retention a lot, the backlog is
+worked off over the following ticks, five minutes apart, with the hourly
+roll-ups in between. The WAL file
 (`<db>-wal`) is truncated back to 64 MiB after each checkpoint.
 
 ### Removed monitors
