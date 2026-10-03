@@ -53,6 +53,7 @@ pub(crate) struct BuildState {
     window: db::WindowCache,
     sparklines: db::SparklineCache,
     daily: db::DailyCache,
+    marks: db::IncidentMarksCache,
 }
 
 /// One build: the operator's summary, plus every configured monitor's status
@@ -118,6 +119,7 @@ pub(crate) async fn build_summary(
         window,
         sparklines,
         daily,
+        marks,
     } = state;
     let (window, daily, sparklines, certs, recent, events, marks, logged) = tokio::join!(
         window.refresh(store, since_24h, timestamp),
@@ -126,7 +128,7 @@ pub(crate) async fn build_summary(
         db::cert_all(store),
         recent_checks_map(store, &monitors, ctx.threshold.max(1)),
         db::events_since(store, since_24h),
-        db::incident_marks(store),
+        marks.refresh(store),
         db::recent_incidents(store, RECENT_SCAN),
     );
     let window = or_empty(window, "24h window");

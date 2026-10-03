@@ -1313,3 +1313,47 @@ async fn purge_removed_deletes_a_removed_monitor_at_once() {
     assert!(recent_checks(&store, "gone", 5).await.unwrap().is_empty());
     assert_eq!(recent_checks(&store, "kept", 5).await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn the_incident_marks_cache_follows_the_log_like_a_full_read() {
+    type Marks = std::collections::HashMap<String, IncidentMarks>;
+    let store = Store::in_memory().await;
+    let mut cache = IncidentMarksCache::default();
+    let check = |cache_marks: Marks, full: Marks| assert_eq!(cache_marks, full);
+    check(
+        cache.refresh(&store).await.unwrap(),
+        incident_marks(&store).await.unwrap(),
+    );
+
+    // Opened, then closed between two refreshes; another opened meanwhile.
+    let first = insert_incident_start(&store, "a", None, None, None, &[], None, None)
+        .await
+        .unwrap();
+    check(
+        cache.refresh(&store).await.unwrap(),
+        incident_marks(&store).await.unwrap(),
+    );
+    assert!(
+        cache.refresh(&store).await.unwrap()["a"]
+            .open_since
+            .is_some()
+    );
+    update_incident_end(&store, first).await.unwrap();
+    insert_incident_start(&store, "b", None, None, None, &[], None, None)
+        .await
+        .unwrap();
+    let marks = cache.refresh(&store).await.unwrap();
+    check(marks.clone(), incident_marks(&store).await.unwrap());
+    assert!(marks["a"].last_end.is_some() && marks["a"].open_since.is_none());
+    assert!(marks["b"].open_since.is_some());
+
+    // An open incident deleted (its monitor purged) leaves no open mark.
+    sqlx::query("DELETE FROM incidents WHERE monitor_id = 'b'")
+        .execute(store.sqlx())
+        .await
+        .unwrap();
+    check(
+        cache.refresh(&store).await.unwrap(),
+        incident_marks(&store).await.unwrap(),
+    );
+}

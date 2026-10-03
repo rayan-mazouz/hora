@@ -1,5 +1,7 @@
 //! Incidents: one row per outage, opened and closed by the scheduler.
 
+use std::collections::HashMap;
+
 use super::Store;
 use crate::probe::FailureKind;
 
@@ -176,15 +178,14 @@ pub struct IncidentMarks {
 }
 
 /// Every monitor's [`IncidentMarks`], in one grouped pass over the incident
-/// log (one row per outage: small next to the checks), for the status page's
-/// "down since" and "no incident in N days".
+/// log, for the status page's "down since" and "no incident in N days". The
+/// page reads them through an [`IncidentMarksCache`] instead, which does not
+/// rescan the log on every build; this one-shot read is its reference.
 ///
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn incident_marks(
-    store: &Store,
-) -> sqlx::Result<std::collections::HashMap<String, IncidentMarks>> {
+pub async fn incident_marks(store: &Store) -> sqlx::Result<HashMap<String, IncidentMarks>> {
     let rows = sqlx::query_as::<_, (String, Option<i64>, Option<i64>)>(
         "SELECT monitor_id, MAX(ended_at), \
             MIN(CASE WHEN ended_at IS NULL THEN started_at END) \
@@ -204,6 +205,114 @@ pub async fn incident_marks(
             )
         })
         .collect())
+}
+
+/// [`incident_marks`], kept between status-page builds: the first refresh
+/// reads the incident log once, every later one only the incidents added
+/// since (by id, the primary key) and the ones it knows are open (by id), so
+/// a build costs the same whether the log holds a hundred incidents or a
+/// million.
+///
+/// The marks follow every incident the cache has seen. Retention deletes
+/// closed incidents a year after they started; one that ages out while the
+/// daemon runs keeps its mark until the next restart, after which the
+/// monitor reads as having no finished incident at all. "No incident in N
+/// days" stays true either way: without a mark it counts from the oldest day
+/// of data shown, never more than the real number of quiet days.
+#[derive(Debug, Default)]
+pub struct IncidentMarksCache {
+    /// The newest incident id read; `None` before the first refresh.
+    last_id: Option<i64>,
+    /// The open incidents: id -> (monitor, started at).
+    open: HashMap<i64, (String, i64)>,
+    /// Per monitor, the latest end among the finished incidents read.
+    last_end: HashMap<String, i64>,
+}
+
+impl IncidentMarksCache {
+    /// Every monitor's [`IncidentMarks`], as [`incident_marks`] reads them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a query fails; the cache then starts over.
+    pub async fn refresh(&mut self, store: &Store) -> sqlx::Result<HashMap<String, IncidentMarks>> {
+        let result = self.refresh_inner(store).await;
+        if result.is_err() {
+            *self = Self::default();
+        }
+        result
+    }
+
+    async fn refresh_inner(
+        &mut self,
+        store: &Store,
+    ) -> sqlx::Result<HashMap<String, IncidentMarks>> {
+        // Closed (or deleted) since the last refresh: re-read by id.
+        if !self.open.is_empty() {
+            let ids = serde_json::to_string(&self.open.keys().collect::<Vec<_>>())
+                .unwrap_or_else(|_| "[]".to_owned());
+            let rows: Vec<(i64, Option<i64>)> = sqlx::query_as(
+                "SELECT id, ended_at FROM incidents \
+                 WHERE id IN (SELECT value FROM json_each(?))",
+            )
+            .bind(ids)
+            .fetch_all(store.sqlx())
+            .await?;
+            let still: HashMap<i64, Option<i64>> = rows.into_iter().collect();
+            self.open.retain(|id, (monitor, _)| match still.get(id) {
+                Some(None) => true,
+                Some(Some(ended)) => {
+                    let end = self.last_end.entry(monitor.clone()).or_insert(*ended);
+                    *end = (*end).max(*ended);
+                    false
+                }
+                None => false,
+            });
+        }
+        let rows: Vec<(i64, String, i64, Option<i64>)> = sqlx::query_as(
+            "SELECT id, monitor_id, started_at, ended_at FROM incidents \
+             WHERE id > ? ORDER BY id",
+        )
+        .bind(self.last_id.unwrap_or(i64::MIN))
+        .fetch_all(store.sqlx())
+        .await?;
+        for (id, monitor, started_at, ended_at) in rows {
+            self.last_id = Some(self.last_id.map_or(id, |last| last.max(id)));
+            match ended_at {
+                None => {
+                    self.open.insert(id, (monitor, started_at));
+                }
+                Some(ended) => {
+                    let end = self.last_end.entry(monitor).or_insert(ended);
+                    *end = (*end).max(ended);
+                }
+            }
+        }
+        // The first refresh of an empty log still counts as read.
+        self.last_id.get_or_insert(i64::MIN);
+
+        let mut marks: HashMap<String, IncidentMarks> = self
+            .last_end
+            .iter()
+            .map(|(monitor, &end)| {
+                (
+                    monitor.clone(),
+                    IncidentMarks {
+                        last_end: Some(end),
+                        open_since: None,
+                    },
+                )
+            })
+            .collect();
+        for (monitor, started_at) in self.open.values() {
+            let mark = marks.entry(monitor.clone()).or_default();
+            mark.open_since = Some(
+                mark.open_since
+                    .map_or(*started_at, |since| since.min(*started_at)),
+            );
+        }
+        Ok(marks)
+    }
 }
 
 /// Every incident overlapping `[since, until)`: started before `until` and
