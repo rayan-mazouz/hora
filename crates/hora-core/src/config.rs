@@ -643,7 +643,7 @@ impl Kind {
 /// on each upgrade) or read from the service itself (`current_url`, with
 /// `current_query` when the answer is JSON): the second form cannot drift from
 /// what is deployed, and clears the alert by itself once the upgrade is done.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseWatch {
     /// The project on GitHub, `owner/repo`. Its latest published release is
@@ -658,7 +658,22 @@ pub struct ReleaseWatch {
     pub current_url: Option<String>,
     /// `JSONPath` to the version inside the JSON answered by `current_url`.
     #[serde(default)]
-    pub current_query: Option<String>,
+    pub current_query: Option<Parsed<serde_json_path::JsonPath>>,
+}
+
+impl std::fmt::Debug for ReleaseWatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReleaseWatch")
+            .field("github", &self.github)
+            .field("current", &self.current)
+            // A version endpoint may sit behind a `?token=`, like a target.
+            .field(
+                "current_url",
+                &self.current_url.as_deref().map(redact_url_secrets),
+            )
+            .field("current_query", &self.current_query)
+            .finish()
+    }
 }
 
 /// A config string parsed once, at load, into the typed value the probe uses
@@ -2190,8 +2205,9 @@ fn validate_release(id: &str, release: &ReleaseWatch) -> anyhow::Result<()> {
             release.current_url.is_some(),
             "monitor {id}: release.current_query needs release.current_url"
         );
-        serde_json_path::JsonPath::parse(query)
-            .map_err(|err| anyhow::anyhow!("monitor {id}: invalid release.current_query: {err}"))?;
+        if let Some(err) = query.error() {
+            anyhow::bail!("monitor {id}: invalid release.current_query: {err}");
+        }
     }
     Ok(())
 }
@@ -2889,6 +2905,20 @@ mod tests {
         // Strings that are not URLs (a tcp host:port) are untouched.
         monitor.target = "db.example.com:5432".to_owned();
         assert!(format!("{monitor:?}").contains("db.example.com:5432"));
+
+        // The release watch's version endpoint is redacted the same way.
+        monitor.release = Some(ReleaseWatch {
+            github: "a/b".to_owned(),
+            current: None,
+            current_url: Some("https://x.example/version?token=s3cret".to_owned()),
+            current_query: Some(Parsed::new("$.version")),
+        });
+        let dump = format!("{monitor:?}");
+        assert!(!dump.contains("s3cret"), "query secret leaked: {dump}");
+        assert!(
+            dump.contains("token=***") && dump.contains("$.version"),
+            "{dump}"
+        );
     }
 
     #[test]

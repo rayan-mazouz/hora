@@ -7,7 +7,9 @@
 //! an hour per address, so the watcher gates on the stored `checked_at`
 //! rather than asking on each tick.
 
-use crate::config::ReleaseWatch;
+use serde_json_path::JsonPath;
+
+use crate::config::{Parsed, ReleaseWatch};
 use crate::http::{MAX_JSON_BYTES, get_json_following, read_all_capped};
 
 /// GitHub's REST API, repositories.
@@ -85,21 +87,18 @@ pub(crate) async fn running(
     let status = response.status();
     anyhow::ensure!(status.is_success(), "{url} answered HTTP {status}");
     let body = read_all_capped(response, MAX_JSON_BYTES).await?;
-    version_in(
-        &String::from_utf8_lossy(&body),
-        watch.current_query.as_deref(),
-    )
-    .ok_or_else(|| anyhow::anyhow!("no version in the answer of {url}"))
+    // A malformed query never gets here: validation refuses it at load.
+    let query = watch.current_query.as_ref().and_then(Parsed::get);
+    version_in(&String::from_utf8_lossy(&body), query)
+        .ok_or_else(|| anyhow::anyhow!("no version in the answer of {url}"))
 }
 
 /// The version inside a service's answer: the first node `query` matches in a
 /// JSON document, or without a query the first line of the text.
-fn version_in(body: &str, query: Option<&str>) -> Option<String> {
+fn version_in(body: &str, query: Option<&JsonPath>) -> Option<String> {
     let version = match query {
-        Some(query) => {
+        Some(path) => {
             let value: serde_json::Value = serde_json::from_str(body).ok()?;
-            // The query is validated at config load.
-            let path = serde_json_path::JsonPath::parse(query).ok()?;
             match path.query(&value).first()? {
                 serde_json::Value::String(text) => text.trim().to_owned(),
                 serde_json::Value::Number(number) => number.to_string(),
@@ -203,26 +202,27 @@ mod tests {
 
     #[test]
     fn finds_the_version_a_service_answers() {
+        let path = |query: &str| JsonPath::parse(query).expect("valid query");
         let json = r#"{"server":{"name":"Tuwunel","version":"1.9.1"}}"#;
         assert_eq!(
-            version_in(json, Some("$.server.version")).as_deref(),
+            version_in(json, Some(&path("$.server.version"))).as_deref(),
             Some("1.9.1")
         );
         assert_eq!(
-            version_in(r#"{"v": 42}"#, Some("$.v")).as_deref(),
+            version_in(r#"{"v": 42}"#, Some(&path("$.v"))).as_deref(),
             Some("42")
         );
         // What a Matrix homeserver answers on /_matrix/client/versions (MSC4383).
         let matrix = r#"{"versions":["v1.19"],"net.zemos.msc4383.server":{"name":"Tuwunel","version":"1.9.1"}}"#;
         assert_eq!(
-            version_in(matrix, Some("$['net.zemos.msc4383.server'].version")).as_deref(),
+            version_in(matrix, Some(&path("$['net.zemos.msc4383.server'].version"))).as_deref(),
             Some("1.9.1")
         );
         assert_eq!(version_in("1.12.27\n", None).as_deref(), Some("1.12.27"));
         // Not a version: nothing matched, not JSON, an object, an HTML page.
-        assert_eq!(version_in(json, Some("$.nope")), None);
-        assert_eq!(version_in("<html>", Some("$.v")), None);
-        assert_eq!(version_in(json, Some("$.server")), None);
+        assert_eq!(version_in(json, Some(&path("$.nope"))), None);
+        assert_eq!(version_in("<html>", Some(&path("$.v"))), None);
+        assert_eq!(version_in(json, Some(&path("$.server"))), None);
         assert_eq!(version_in(&"x".repeat(MAX_VERSION_LEN + 1), None), None);
         assert_eq!(version_in("", None), None);
     }
