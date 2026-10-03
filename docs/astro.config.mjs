@@ -68,7 +68,7 @@ export default defineConfig({
 					label: 'Start here',
 					items: [
 						{ label: 'Getting started', slug: 'getting-started' },
-						{ label: 'Why Hora', slug: 'why-hora' },
+						{ label: 'When Hora fits', slug: 'when-hora-fits' },
 						{ label: 'Concepts', slug: 'concepts' },
 						{ label: 'Configuration', slug: 'configuration' },
 						{ label: 'Upgrading', slug: 'upgrading' },

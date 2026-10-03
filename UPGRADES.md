@@ -2,7 +2,7 @@
 
 Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
-`hora-data` volume) is in the [README](README.md#upgrade).
+`hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
 
 ## 0.10.0 → 0.11.0
 

@@ -73,24 +73,12 @@ The whole path, with the settings behind each step, is in [Concepts](./concepts/
 What visitors see, what you see once signed in, and the plain-text view are
 described in [The status page](./guides/status-page/).
 
-## How it compares
+## Is it for you?
 
-<div class="hora-compare">
-
-| | Hora | Uptime Kuma | Gatus |
-| --- | --- | --- | --- |
-| Runs as | One static binary, ~15 MB image | Node.js app, ~180 MB slim image | Go binary, ~26 MB image |
-| Configured in | A TOML file, reloaded live | The web UI | A YAML file |
-| N failures before an alert | Yes | Yes (retries) | Yes (failure threshold) |
-| One alert for a cascade | Yes, by dependencies | No | No |
-| Confirmed from other places | Yes, by peers | No | No |
-| Error budget, burn-rate alerts | Yes | No | No |
-| Monthly SLA report | Yes, printable | No | No |
-
-</div>
-
-Checked against each project's documentation in October 2026. The details,
-sources and what the others do better are in [Why Hora](./why-hora/).
+Hora is for people who want few alerts, each one worth getting up for, and
+their monitoring in a file next to the rest of their infrastructure. If you
+would rather click, or need a check type Hora leaves out, it has good
+neighbours: [When Hora fits](./when-hora-fits/) says which, and when.
 
 Named after the **Horai**, the Greek goddesses of the hours. Its owl dozes
 while all is well.

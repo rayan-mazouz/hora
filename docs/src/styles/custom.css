@@ -294,24 +294,6 @@ body {
 	color: var(--sl-color-accent);
 }
 
-/* comparison tables: Hora's column on the wash */
-.hora-compare {
-	overflow-x: auto;
-}
-.hora-compare table {
-	display: table;
-	width: 100%;
-	min-width: 34rem;
-}
-.hora-compare th:nth-child(2),
-.hora-compare td:nth-child(2) {
-	background: color-mix(in srgb, var(--sl-color-accent-low) 60%, transparent);
-	font-weight: 500;
-}
-.hora-compare thead th:nth-child(2) {
-	color: var(--sl-color-text-accent);
-}
-
 /* screenshots: one per theme, framed like a card */
 .hora-shot img {
 	width: 100%;
