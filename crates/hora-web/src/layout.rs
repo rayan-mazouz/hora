@@ -506,6 +506,19 @@ pub(crate) fn ms(latency: i64) -> String {
     }
 }
 
+/// A length in seconds as every page says it: `40 s` under a minute, then
+/// [`minutes`] (whole minutes, rounded down): `41 min`, `3 h 07 min`,
+/// `2 days 4 h`. The one spoken format of the web pages; the CLI and the
+/// machine outputs keep `hora_core::fmt::duration`.
+pub(crate) fn duration(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds < 60 {
+        format!("{seconds} s")
+    } else {
+        minutes(seconds / 60)
+    }
+}
+
 /// Minutes at a human size: `41 min`, `3 h 07 min`, `2 days 4 h`.
 pub(crate) fn minutes(total: i64) -> String {
     if total >= 2 * 1440 {
@@ -662,6 +675,10 @@ mod tests {
         assert_eq!(ms(64), "64 ms");
         assert_eq!(ms(1849), "1.8 s");
         assert_eq!(minutes(187), "3 h 07 min");
+        assert_eq!(duration(40), "40 s");
+        assert_eq!(duration(41 * 60), "41 min");
+        assert_eq!(duration(41 * 60 + 29), "41 min");
+        assert_eq!(duration(187 * 60), "3 h 07 min");
         assert_eq!(pct(999), "99.9 %");
         assert_eq!(count_word(2), "two");
         assert_eq!(count_word(12), "12");

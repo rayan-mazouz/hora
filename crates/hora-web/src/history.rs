@@ -61,18 +61,10 @@ pub(crate) struct IncidentRow {
     verdict: Option<(&'static str, String)>,
 }
 
-/// A span at the size a person says it: `45 seconds`, `41 minutes`,
-/// `3 h 07 min`, `2 days 4 h`.
+/// A span at the size a person says it: `45 s`, `41 min`, `3 h 07 min`,
+/// `2 days 4 h` - the pages' one format ([`crate::layout::duration`]).
 pub(crate) fn human_duration(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    let minutes = seconds / 60;
-    if seconds < 60 {
-        format!("{seconds} second{}", if seconds == 1 { "" } else { "s" })
-    } else if minutes < 60 {
-        format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
-    } else {
-        crate::layout::minutes(minutes)
-    }
+    crate::layout::duration(seconds)
 }
 
 /// The multi-vantage verdict (as `hora_core::mesh::confirm` writes it) in a
@@ -518,8 +510,8 @@ mod tests {
         let rows = incident_rows(&[incident], &names);
         assert_eq!(rows[0].monitor, "Database");
         assert!(rows[0].resolved);
-        assert_eq!(rows[0].length.as_deref(), Some("1 minute"));
-        assert_eq!(rows[0].headline, "Database was down for 1 minute");
+        assert_eq!(rows[0].length.as_deref(), Some("1 min"));
+        assert_eq!(rows[0].headline, "Database was down for 1 min");
         assert_eq!(rows[0].impacted.as_deref(), Some("API, Web"));
         assert_eq!(rows[0].note.as_deref(), Some("fiber cut"));
         assert_eq!(rows[0].event.as_deref(), Some("deploy api v2.3, 3m before"));
@@ -571,8 +563,8 @@ mod tests {
         let (_, text) = humanize_verdict("no peer watches this target, unconfirmed").unwrap();
         assert!(text.contains("no other place watches"), "{text}");
         assert!(humanize_verdict("something new").is_none());
-        assert_eq!(human_duration(41 * 60), "41 minutes");
-        assert_eq!(human_duration(1), "1 second");
+        assert_eq!(human_duration(41 * 60), "41 min");
+        assert_eq!(human_duration(1), "1 s");
     }
 
     #[test]

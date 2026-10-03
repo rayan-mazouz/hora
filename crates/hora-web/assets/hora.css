@@ -302,6 +302,9 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .past .t a { color: var(--ink); text-decoration: none; }
 .past .t a:hover { text-decoration: underline; }
 .past .t small { display: block; font: var(--t-secondary); color: var(--ink-muted); margin-top: 2px; }
+/* On the status page these lists run the page's width, like the hero and the
+   service grid above them, so their section's link sits at their end. */
+.status-page .past, .status-page .list.wide { max-width: none; }
 .past .r { font: var(--t-meta); white-space: nowrap; display: inline-flex; gap: 6px; align-items: center; }
 @media (max-width: 599px) { .past li { grid-template-columns: minmax(0, 1fr) auto; } .past time { grid-column: 1 / -1; } }
 .quiet-line { display: flex; align-items: center; gap: var(--s-3); color: var(--ink-muted); padding: var(--s-4) 0; }

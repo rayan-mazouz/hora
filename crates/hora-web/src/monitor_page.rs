@@ -142,7 +142,7 @@ pub(crate) fn build(
                 state: if ongoing { "down" } else { "up" },
                 title: match incident.duration_s {
                     Some(secs) if !ongoing => {
-                        format!("Down for {}", hora_core::fmt::duration(secs))
+                        format!("Down for {}", crate::layout::duration(secs))
                     }
                     _ => "Down, ongoing".to_owned(),
                 },
@@ -441,7 +441,7 @@ fn days(m: &MonitorView, incidents: &[Incident]) -> Vec<Day> {
                         .unwrap_or_default();
                     let length = incident
                         .duration_s
-                        .map_or_else(|| "ongoing".to_owned(), hora_core::fmt::duration);
+                        .map_or_else(|| "ongoing".to_owned(), crate::layout::duration);
                     (incident.id, format!("Down at {at}, {length}"))
                 })
                 .collect();

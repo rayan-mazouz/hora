@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use hora_core::config::Config;
 
 use crate::layout::{count_word, join_and, ms, pct};
-use crate::render::{day_bar, day_class, day_rank, meter, owl};
+use crate::render::{day_bar, day_class, meter, owl};
 use crate::summary::{MonitorView, Summary};
 
 /// Above this many monitors the page uses its scale layout.
@@ -177,7 +177,7 @@ pub(crate) struct GroupBlock<'a> {
     pub(crate) fact_rest: String,
     /// Open on arrival: something is wrong in it, or it is the group's page.
     pub(crate) open: bool,
-    /// The group's daily bar (scale layout): each day its worst monitor's.
+    /// The group's daily bar (scale layout), see [`group_day_classes`].
     pub(crate) bar: String,
     pub(crate) uptime: String,
     pub(crate) rows: Vec<Row<'a>>,
@@ -867,6 +867,17 @@ fn why(monitor: &MonitorView) -> Option<String> {
             (Some(error), _, _) => parts.push(format!(
                 "The last check failed ({error}); checking again before calling it down."
             )),
+            // Say the limit it crossed: a 4 ms answer reads "slow" only next
+            // to the 1 ms the operator set.
+            (None, Some(latency), _)
+                if monitor.slow_over_ms.is_some_and(|limit| latency > limit) =>
+            {
+                parts.push(format!(
+                    "Answers take {}, over its {} limit.",
+                    ms(latency),
+                    ms(monitor.slow_over_ms.unwrap_or_default())
+                ));
+            }
             (None, Some(latency), Some(p50)) if p50 < latency => parts.push(format!(
                 "Answers take {} (usually {}).",
                 ms(latency),
@@ -946,6 +957,76 @@ fn day_classes(monitor: &MonitorView) -> Vec<u8> {
         *today = b'm';
     }
     days
+}
+
+/// Below this mean availability over a day (per mille), a group's day reads
+/// slow. A group's bar summarises many services: one failed check among 45
+/// that day is the services' own bars' business, not the group's.
+const GROUP_DAY_SLOW_BELOW_PERMILLE: i64 = 999;
+
+/// A group's daily bar, one class per day: an outage (`x`) when any of its
+/// services had a real outage that day (see `DAY_OUTAGE_BELOW_PERMILLE`), slow
+/// (`d`) when the group's mean availability fell under 99.9 %, maintenance
+/// (`m`) when a service was in a planned window and nothing went down, up
+/// (`u`) otherwise, and no data (`n`) when none of them had any. Taking each
+/// day's worst service instead painted a large group's bar slow every day.
+fn group_day_classes(monitors: &[std::sync::Arc<MonitorView>]) -> Vec<u8> {
+    let days: Vec<(Vec<u8>, Vec<Option<i64>>)> = monitors
+        .iter()
+        .map(|m| {
+            (
+                day_classes(m),
+                m.bar.iter().map(|cell| cell.permille).collect(),
+            )
+        })
+        .collect();
+    fold_group_days(&days)
+}
+
+/// [`group_day_classes`] on each service's day classes and availabilities
+/// (per mille), oldest day first; bars are aligned on today.
+fn fold_group_days(services: &[(Vec<u8>, Vec<Option<i64>>)]) -> Vec<u8> {
+    let length = services
+        .iter()
+        .map(|(days, _)| days.len())
+        .max()
+        .unwrap_or(0);
+    (0..length)
+        .map(|day| {
+            let mut any = false;
+            let mut outage = false;
+            let mut maint = false;
+            let (mut sum, mut measured) = (0_i64, 0_i64);
+            for (days, permilles) in services {
+                // A shorter bar (a newer service) starts later.
+                let Some(index) = (day + days.len()).checked_sub(length) else {
+                    continue;
+                };
+                match days[index] {
+                    b'x' => outage = true,
+                    b'm' => maint = true,
+                    b'n' => continue,
+                    _ => {}
+                }
+                any = true;
+                if let Some(permille) = permilles.get(index).copied().flatten() {
+                    sum += permille;
+                    measured += 1;
+                }
+            }
+            if outage {
+                b'x'
+            } else if measured > 0 && sum < GROUP_DAY_SLOW_BELOW_PERMILLE * measured {
+                b'd'
+            } else if maint {
+                b'm'
+            } else if any {
+                b'u'
+            } else {
+                b'n'
+            }
+        })
+        .collect()
 }
 
 /// The bar's words: the period, the outages, the slow days.
@@ -1061,16 +1142,7 @@ fn group_block<'a>(
     }
 
     let bar = if scale {
-        let length = monitors.iter().map(|m| m.bar.len()).max().unwrap_or(0);
-        let mut days = vec![b'n'; length];
-        for monitor in monitors {
-            for (day, class) in days.iter_mut().zip(day_classes(monitor)) {
-                if day_rank(class) > day_rank(*day) {
-                    *day = class;
-                }
-            }
-        }
-        day_bar(&days)
+        day_bar(&group_day_classes(monitors))
     } else {
         String::new()
     };
@@ -1102,5 +1174,43 @@ fn group_block<'a>(
         uptime,
         rows,
         total,
+    }
+}
+
+#[cfg(test)]
+mod group_bar_tests {
+    use super::fold_group_days;
+
+    #[test]
+    fn a_large_group_is_not_slow_for_one_service_failed_check() {
+        // 45 services; one had a few failed checks (a slow day for its own
+        // bar, 99.3 %), the others a clean day: the group reads up.
+        let mut services = vec![(vec![b'u'], vec![Some(1000)]); 44];
+        services.push((vec![b'd'], vec![Some(993)]));
+        assert_eq!(fold_group_days(&services), vec![b'u']);
+    }
+
+    #[test]
+    fn a_real_outage_or_a_low_mean_still_shows() {
+        // One service under 90 % that day: the group shows the outage.
+        let outage = vec![
+            (vec![b'u'], vec![Some(1000)]),
+            (vec![b'x'], vec![Some(400)]),
+        ];
+        assert_eq!(fold_group_days(&outage), vec![b'x']);
+        // Two services slow most of the day: the mean falls under 99.9 %.
+        let slow = vec![(vec![b'd'], vec![Some(950)]), (vec![b'd'], vec![Some(960)])];
+        assert_eq!(fold_group_days(&slow), vec![b'd']);
+    }
+
+    #[test]
+    fn maintenance_newer_services_and_empty_days() {
+        // Today: one service in a planned window, nothing down. Yesterday: only
+        // the older service existed. The day before: no data at all.
+        let services = vec![
+            (vec![b'n', b'u', b'm'], vec![None, Some(1000), Some(1000)]),
+            (vec![b'u'], vec![Some(1000)]),
+        ];
+        assert_eq!(fold_group_days(&services), vec![b'n', b'u', b'm']);
     }
 }

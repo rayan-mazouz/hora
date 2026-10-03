@@ -94,17 +94,6 @@ pub(crate) fn day_class(state: &str) -> u8 {
     }
 }
 
-/// How bad a day cell is, to fold several monitors' days into a group's bar.
-pub(crate) fn day_rank(class: u8) -> u8 {
-    match class {
-        b'x' => 4,
-        b'd' => 3,
-        b'm' => 2,
-        b'u' => 1,
-        _ => 0,
-    }
-}
-
 /// Render the daily bar, oldest day first, from day cell classes.
 pub(crate) fn day_bar(days: &[u8]) -> String {
     let mut rects = String::new();

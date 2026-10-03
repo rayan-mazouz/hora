@@ -193,6 +193,9 @@ pub(crate) struct MonitorView {
     /// When the open incident started (confirmed down), while it is down.
     #[serde(skip)]
     pub(crate) down_since: Option<i64>,
+    /// The latency above which it reads slow (`degraded_over_ms`), if set.
+    #[serde(skip)]
+    pub(crate) slow_over_ms: Option<i64>,
     /// Its incident log in short: the last end, the open one's start.
     #[serde(skip)]
     pub(crate) marks: hora_core::db::IncidentMarks,

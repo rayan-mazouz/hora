@@ -159,6 +159,7 @@ pub(crate) fn build_monitor_view(
         budget_title: budget.as_ref().map(|b| b.title.clone()).unwrap_or_default(),
         budget_state: budget.as_ref().map_or("none", |b| b.state),
         maintenance: None,
+        slow_over_ms: monitor.degraded_over_ms,
         down_since: (status == MonitorState::Down)
             .then(|| {
                 data.marks
