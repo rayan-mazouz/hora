@@ -112,8 +112,9 @@ pub struct Maintenance {
     pub monitors: Vec<String>,
 }
 
-/// Severity of an [`Incident`], controlling its banner colour.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+/// Severity of an [`Incident`] or an ad-hoc announcement, controlling its
+/// banner colour. Parsed from and shown as its lowercase name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     #[default]
@@ -135,6 +136,43 @@ impl Severity {
         }
     }
 }
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Severity {
+    type Err = UnknownSeverity;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "info" => Ok(Self::Info),
+            "warning" => Ok(Self::Warning),
+            "critical" => Ok(Self::Critical),
+            "resolved" => Ok(Self::Resolved),
+            _ => Err(UnknownSeverity),
+        }
+    }
+}
+
+/// A severity name outside `info`, `warning`, `critical` and `resolved`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownSeverity;
+
+impl UnknownSeverity {
+    /// The message every door (API, CLI, TUI) answers with.
+    pub const MESSAGE: &'static str = "severity must be info, warning, critical or resolved";
+}
+
+impl std::fmt::Display for UnknownSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(Self::MESSAGE)
+    }
+}
+
+impl std::error::Error for UnknownSeverity {}
 
 /// A posted incident or announcement shown on the status page.
 #[derive(Debug, Clone, Deserialize)]

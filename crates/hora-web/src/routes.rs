@@ -1617,6 +1617,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn announce_until_takes_a_utc_clock_time() {
+        let res = test_app()
+            .await
+            .oneshot(push(
+                "/api/announce?title=Fiber+cut&until=18:00&token=0123456789abcdef",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+        let until = body["until"].as_i64().expect("until");
+        let now = chrono::Utc::now().timestamp();
+        assert!(until > now && until <= now + 86_400, "{until}");
+        assert_eq!(until % 86_400, 18 * 3600, "18:00 UTC");
+    }
+
+    #[tokio::test]
     async fn announce_rejects_bad_severity_and_empty_title() {
         for bad in [
             "/api/announce?title=x&severity=panic&token=0123456789abcdef",
@@ -1659,6 +1676,24 @@ mod tests {
         // Within the requested window, never past it.
         assert!(
             !hora_core::db::is_silenced(&pool, "web", now + 601)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn silence_accepts_a_watched_peer() {
+        let (app, pool) = test_app_with_pool().await;
+        let res = app
+            .oneshot(push(
+                "/api/silence?monitors=web,peer-x&duration=5m&token=0123456789abcdef",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let now = chrono::Utc::now().timestamp();
+        assert!(
+            hora_core::db::is_silenced(&pool, "peer-x", now)
                 .await
                 .unwrap()
         );

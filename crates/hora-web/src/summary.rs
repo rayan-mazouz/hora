@@ -477,12 +477,10 @@ async fn announcement_banners(pool: &SqlitePool, now: i64) -> Vec<IncidentView> 
 /// The static severity label for a stored announcement (validated at insert;
 /// anything unexpected degrades to `info`).
 fn severity_label(severity: &str) -> &'static str {
-    match severity {
-        "warning" => "warning",
-        "critical" => "critical",
-        "resolved" => "resolved",
-        _ => "info",
-    }
+    severity
+        .parse::<hora_core::config::Severity>()
+        .unwrap_or_default()
+        .as_str()
 }
 
 /// The configured announcements, rendered for the status page banner.

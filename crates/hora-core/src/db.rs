@@ -1557,6 +1557,34 @@ pub async fn insert_silence(
     Ok(())
 }
 
+/// Record one ad-hoc silence per id in `monitor_ids`, all expiring at
+/// `until`, in a single transaction: a failure leaves none of them behind.
+///
+/// # Errors
+///
+/// Returns an error if an insert or the commit fails.
+pub async fn insert_silences(
+    pool: &SqlitePool,
+    monitor_ids: &[String],
+    until: i64,
+    reason: Option<&str>,
+) -> sqlx::Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    let mut tx = pool.begin().await?;
+    for id in monitor_ids {
+        sqlx::query(
+            "INSERT INTO silences (monitor_id, until, reason, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(until)
+        .bind(reason)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await
+}
+
 /// Whether an active silence (its own or the `*` wildcard) covers `monitor_id`
 /// at `now`.
 ///

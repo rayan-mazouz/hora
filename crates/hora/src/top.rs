@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use crossterm::event::KeyCode;
 use futures_util::StreamExt as _;
+use hora_core::announce::{self, Announcement};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -624,40 +625,28 @@ fn input_key(app: &mut App, code: KeyCode) -> Option<Result<Action, String>> {
 }
 
 /// Pin an announcement from the input line: `title :: body`, with optional
-/// `--severity <s>` and `--until <4h|18:00-style duration>` flags anywhere -
-/// the same grammar as `hora announce`.
+/// `--severity <s>` and `--until <4h|18:00>` flags anywhere - the same flag
+/// grammar and validation as `hora announce` ([`announce::split_flags`]); the
+/// server re-validates and resolves `--until` against its own clock.
 fn announce_action(line: &str) -> Result<Action, String> {
-    let mut severity = "warning"; // announcing from `top` usually means trouble
-    let mut until = None;
-    let mut words: Vec<&str> = Vec::new();
-    let mut iter = line.split_whitespace();
-    while let Some(word) = iter.next() {
-        match word {
-            "--severity" => {
-                let value = iter.next().unwrap_or("warning");
-                if !matches!(value, "info" | "warning" | "critical" | "resolved") {
-                    return Err("severity must be info, warning, critical or resolved".to_owned());
-                }
-                severity = value;
-            }
-            "--until" => until = iter.next(),
-            other => words.push(other),
-        }
-    }
-    let text = words.join(" ");
+    let flags = announce::split_flags(line.split_whitespace()).map_err(|err| err.to_string())?;
+    // Announcing from `top` usually means trouble.
+    let severity = flags.severity.unwrap_or(announce::Severity::Warning);
+    let text = flags.words.join(" ");
     let (title, body) = text
         .split_once("::")
         .map_or((text.as_str(), ""), |(t, b)| (t, b));
-    let (title, body) = (title.trim().to_owned(), body.trim().to_owned());
-    if title.is_empty() {
-        return Err("announce needs a title".to_owned());
+    let announcement =
+        Announcement::new(title, body, severity, None).map_err(|err| err.to_string())?;
+    let done = format!("announced [{severity}] {:?}", announcement.title);
+    let mut params = vec![
+        ("title", announcement.title),
+        ("severity", severity.to_string()),
+    ];
+    if !announcement.body.is_empty() {
+        params.push(("body", announcement.body));
     }
-    let done = format!("announced [{severity}] {title:?}");
-    let mut params = vec![("title", title), ("severity", severity.to_owned())];
-    if !body.is_empty() {
-        params.push(("body", body));
-    }
-    if let Some(until) = until {
+    if let Some(until) = flags.until {
         params.push(("until", until.to_owned()));
     }
     Ok(Action {
@@ -1199,6 +1188,11 @@ mod tests {
         assert!(action.params.contains(&("until", "4h".to_owned())));
         assert!(announce_action(":: body only").is_err());
         assert!(announce_action("t --severity panic").is_err());
+        // The clock-time form the hint advertises is accepted (the API takes
+        // it too); garbage is refused before it reaches the server.
+        let action = announce_action("Fiber cut --until 18:00").expect("announce");
+        assert!(action.params.contains(&("until", "18:00".to_owned())));
+        assert!(announce_action("t --until soon").is_err());
         assert!(silence_action("web", "  ").is_err());
     }
 

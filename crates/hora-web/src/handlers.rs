@@ -32,9 +32,11 @@ use crate::text;
 use crate::visibility::{Audience, Visibility};
 use crate::{
     AppState, FAVICON_SVG, FONT_WOFF2, MAX_ALERT_DEDUP_CHARS, MAX_ALERT_TAG_CHARS, MAX_ALERT_TAGS,
-    MAX_ALERT_TITLE_CHARS, MAX_LATENCY_HOURS, MAX_LATENCY_POINTS, MAX_PUSH_MSG_CHARS,
-    SECONDS_PER_HOUR, summary_for,
+    MAX_LATENCY_HOURS, MAX_LATENCY_POINTS, SECONDS_PER_HOUR, summary_for,
 };
+use hora_core::announce::{self, Announcement};
+use hora_core::silence::{self, SilenceError};
+use hora_core::{MAX_ALERT_TITLE_CHARS, MAX_EVENT_TITLE_CHARS, MAX_PUSH_MSG_CHARS};
 
 /// The `OpenAPI` document, generated once at startup (empty if generation fails).
 pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
@@ -251,7 +253,8 @@ pub(crate) struct AnnounceQuery {
     /// `info` (default) | `warning` | `critical` | `resolved`.
     #[serde(default)]
     severity: Option<String>,
-    /// Auto-expiry as a duration (`4h`, `90m`); absent = until cleared.
+    /// Auto-expiry: a duration (`4h`, `90m`) or the next occurrence of a UTC
+    /// time (`18:00`), like `hora announce --until`; absent = until cleared.
     #[serde(default)]
     until: Option<String>,
 }
@@ -271,7 +274,7 @@ pub(crate) struct AnnounceResponse {
         ("title" = String, Query, description = "Banner title"),
         ("body" = Option<String>, Query, description = "Banner body"),
         ("severity" = Option<String>, Query, description = "info (default), warning, critical or resolved"),
-        ("until" = Option<String>, Query, description = "Auto-expiry as a duration (e.g. 4h)"),
+        ("until" = Option<String>, Query, description = "Auto-expiry: a duration (e.g. 4h) or the next occurrence of a UTC time (HH:MM, e.g. 18:00)"),
         ("token" = Option<String>, Query, description = "Viewer token (prefer Authorization: Bearer)")
     ),
     security(("bearer" = [])),
@@ -287,34 +290,33 @@ pub(crate) async fn announce(
     _operator: Operator,
     Query(query): Query<AnnounceQuery>,
 ) -> Result<Json<AnnounceResponse>, AppError> {
-    let title: String = query.title.trim().chars().take(200).collect();
-    if title.is_empty() {
-        return Err(AppError::BadRequest("title must not be empty"));
-    }
     let severity = match query.severity.as_deref() {
-        None => "info",
-        Some(value) => severity_or_400(value)?,
+        None => announce::Severity::Info,
+        Some(value) => {
+            announce::parse_severity(value).map_err(|err| AppError::BadRequest(err.message()))?
+        }
     };
     let until = match query.until.as_deref() {
         None => None,
-        Some(raw) => Some(
-            hora_core::parse_duration(raw)
-                .map(|secs| Utc::now().timestamp() + i64::try_from(secs).unwrap_or(i64::MAX))
-                .ok_or(AppError::BadRequest("invalid until (use e.g. 4h, 90m)"))?,
-        ),
+        Some(raw) => Some(announce::parse_until(raw, Utc::now().timestamp()).ok_or(
+            AppError::BadRequest(announce::AnnounceError::InvalidUntil.message()),
+        )?),
     };
-    let body: String = query
-        .body
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .chars()
-        .take(MAX_PUSH_MSG_CHARS)
-        .collect();
-    let id = db::insert_announcement(&state.pool, &title, &body, severity, until).await?;
+    let announcement = Announcement::new(
+        &query.title,
+        query.body.as_deref().unwrap_or(""),
+        severity,
+        until,
+    )
+    .map_err(|err| AppError::BadRequest(err.message()))?;
+    let id = announcement.pin(&state.pool).await?;
     // Visitors should see the banner now, not when the summary cache rolls.
     state.cache.invalidate();
-    tracing::info!(%title, severity, "announcement pinned via API");
+    tracing::info!(
+        title = %announcement.title,
+        severity = %announcement.severity,
+        "announcement pinned via API"
+    );
     Ok(Json(AnnounceResponse { id, until }))
 }
 
@@ -376,12 +378,7 @@ pub(crate) async fn post_event(
     _operator: Operator,
     Query(query): Query<EventQuery>,
 ) -> Result<Json<EventResponse>, AppError> {
-    let title: String = query
-        .title
-        .trim()
-        .chars()
-        .take(MAX_ALERT_TITLE_CHARS)
-        .collect();
+    let title = hora_core::bounded(&query.title, MAX_EVENT_TITLE_CHARS);
     if title.is_empty() {
         return Err(AppError::BadRequest("title must not be empty"));
     }
@@ -391,19 +388,6 @@ pub(crate) async fn post_event(
     state.cache.invalidate();
     tracing::info!(%title, "event marker recorded via API");
     Ok(Json(EventResponse { id }))
-}
-
-/// Validate a severity label, or answer 400.
-fn severity_or_400(value: &str) -> Result<&'static str, AppError> {
-    match value {
-        "info" => Ok("info"),
-        "warning" => Ok("warning"),
-        "critical" => Ok("critical"),
-        "resolved" => Ok("resolved"),
-        _ => Err(AppError::BadRequest(
-            "severity must be info, warning, critical or resolved",
-        )),
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1303,45 +1287,23 @@ pub(crate) async fn silence(
     Operator { config }: Operator,
     Query(query): Query<SilenceQuery>,
 ) -> Result<Json<SilenceResponse>, AppError> {
-    let duration_secs = hora_core::parse_duration(&query.duration)
-        .filter(|secs| *secs <= hora_core::MAX_SILENCE_SECS)
-        .ok_or(AppError::BadRequest(
-            "invalid duration (use e.g. 10m, 1h30m; max 7d)",
-        ))?;
-
-    let monitors: Vec<String> = if query.monitors.trim() == "all" || query.monitors.trim() == "*" {
-        vec!["*".to_owned()]
-    } else {
-        let ids: Vec<String> = query
-            .monitors
-            .split(',')
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(str::to_owned)
-            .collect();
-        if ids.is_empty() {
-            return Err(AppError::BadRequest("no monitor ids given"));
+    let silenced = silence::apply(
+        &state.pool,
+        &config,
+        &query.monitors,
+        &query.duration,
+        query.reason.as_deref(),
+    )
+    .await
+    .map_err(|err| match err {
+        SilenceError::InvalidDuration => {
+            AppError::BadRequest("invalid duration (use e.g. 10m, 1h30m; max 7d)")
         }
-        // Validate every id so a typo'd deploy hook fails loudly instead of
-        // silencing nothing.
-        if ids
-            .iter()
-            .any(|id| !config.monitors.iter().any(|monitor| monitor.id == *id))
-        {
-            return Err(AppError::NotFound("unknown monitor id"));
-        }
-        ids
-    };
-
-    let until = Utc::now().timestamp() + i64::try_from(duration_secs).unwrap_or(i64::MAX);
-    // Bound the stored reason like push messages, so a buggy hook can't bloat the DB.
-    let reason = query
-        .reason
-        .as_deref()
-        .map(|reason| reason.chars().take(MAX_PUSH_MSG_CHARS).collect::<String>());
-    for id in &monitors {
-        db::insert_silence(&state.pool, id, until, reason.as_deref()).await?;
-    }
+        SilenceError::NoIds => AppError::BadRequest("no monitor ids given"),
+        SilenceError::UnknownId(_) => AppError::NotFound("unknown monitor id"),
+        SilenceError::Database(err) => AppError::Internal(err.into()),
+    })?;
+    let (monitors, until) = (silenced.ids, silenced.until);
     tracing::info!(monitors = ?monitors, until, "alerts silenced via API");
     Ok(Json(SilenceResponse { monitors, until }))
 }

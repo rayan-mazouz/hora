@@ -40,10 +40,8 @@ pub(crate) const SUMMARY_CACHE_TTL: Duration = Duration::from_secs(5);
 /// How long a rendered heatmap or a built monthly report is reused: both scan
 /// weeks of history and change slowly, and both are reachable anonymously.
 pub(crate) const VIEW_CACHE_TTL: Duration = Duration::from_mins(1);
-/// Cap on a pushed heartbeat message, so the endpoint can't bloat the database.
-pub(crate) const MAX_PUSH_MSG_CHARS: usize = 500;
-/// Cap on a pushed alert's title (matches the announcement-title cap).
-pub(crate) const MAX_ALERT_TITLE_CHARS: usize = 200;
+// The free-text caps shared with the CLI (push message, alert/event title,
+// announcement, silence reason) live in hora-core (`hora_core::MAX_*_CHARS`).
 /// Cap on a pushed alert's `dedup_key`.
 pub(crate) const MAX_ALERT_DEDUP_CHARS: usize = 200;
 /// Cap on how many `tags` a pushed alert may fold into its message, and on the

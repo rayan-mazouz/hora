@@ -11,7 +11,9 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use hora_core::{config, fmt};
+use hora_core::announce::{self, Announcement};
+use hora_core::silence::SilenceError;
+use hora_core::{MAX_EVENT_TITLE_CHARS, config, fmt};
 
 mod top;
 use tokio::sync::watch;
@@ -161,13 +163,18 @@ fn find_monitor<'c>(
     config: &'c hora_core::config::Config,
     id: &str,
 ) -> Result<&'c hora_core::config::Monitor, CliError> {
-    config.find_monitor(id).ok_or_else(|| {
-        let mut message = format!("Unknown monitor {id:?}. Configured ids:");
-        for monitor in &config.monitors {
-            let _ = write!(message, "\n  {}", monitor.id);
-        }
-        usage(message)
-    })
+    config
+        .find_monitor(id)
+        .ok_or_else(|| unknown_monitor(config, id))
+}
+
+/// The usage error for an unknown monitor id, listing the configured ones.
+fn unknown_monitor(config: &hora_core::config::Config, id: &str) -> CliError {
+    let mut message = format!("Unknown monitor {id:?}. Configured ids:");
+    for monitor in &config.monitors {
+        let _ = write!(message, "\n  {}", monitor.id);
+    }
+    usage(message)
 }
 
 /// Resolve an incident argument: a numeric id, or `last` for the most recent
@@ -417,85 +424,35 @@ async fn announce(args: &[String]) -> Result<(), CliError> {
 }
 
 async fn pin_announcement(args: &[String]) -> anyhow::Result<()> {
-    let (title, body, severity, until) = parse_announce_args(args)?;
+    let announcement = parse_announce_args(args, chrono::Utc::now().timestamp())?;
     let (_, pool) = open_database().await?;
-    hora_core::db::insert_announcement(&pool, &title, &body, severity, until).await?;
-    let expiry = until.map_or_else(
+    announcement.pin(&pool).await?;
+    let expiry = announcement.until.map_or_else(
         || "until `hora announce clear`".to_owned(),
         |ts| format!("until {}", fmt::utc(ts)),
     );
-    println!("Pinned [{severity}] {title:?} ({expiry}).");
+    println!(
+        "Pinned [{}] {:?} ({expiry}).",
+        announcement.severity, announcement.title
+    );
     Ok(())
 }
 
-/// Split `hora announce` arguments: `--severity`/`--until` flags anywhere,
-/// the first free word is the title, the rest joins into the body.
-fn parse_announce_args(
-    args: &[String],
-) -> anyhow::Result<(String, String, &'static str, Option<i64>)> {
-    let mut severity = "info";
-    let mut until = None;
-    let mut words: Vec<&str> = Vec::new();
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--severity" => {
-                severity = match iter.next().map(String::as_str) {
-                    Some("info") => "info",
-                    Some("warning") => "warning",
-                    Some("critical") => "critical",
-                    Some("resolved") => "resolved",
-                    other => anyhow::bail!(
-                        "--severity must be info, warning, critical or resolved (got {other:?})"
-                    ),
-                };
-            }
-            "--until" => {
-                let raw = iter
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--until needs a value (e.g. 4h or 18:00)"))?;
-                until = Some(parse_until(raw, chrono::Utc::now().timestamp()).ok_or_else(
-                    || {
-                        anyhow::anyhow!(
-                            "invalid --until {raw:?} (use a duration like 4h, or HH:MM UTC)"
-                        )
-                    },
-                )?);
-            }
-            word => words.push(word),
-        }
-    }
-    let Some((title, body)) = words.split_first() else {
+/// Split `hora announce` arguments: `--severity`/`--until` flags anywhere
+/// (see [`announce::split_flags`]), the first free word is the title, the rest
+/// joins into the body.
+fn parse_announce_args(args: &[String], now: i64) -> anyhow::Result<Announcement> {
+    let flags = announce::split_flags(args.iter().map(String::as_str))?;
+    let Some((title, body)) = flags.words.split_first() else {
         anyhow::bail!("announce needs a title");
     };
-    Ok((
-        title
-            .trim()
-            .chars()
-            .take(MAX_ANNOUNCE_TITLE_CHARS)
-            .collect(),
-        body.join(" ")
-            .chars()
-            .take(MAX_ANNOUNCE_BODY_CHARS)
-            .collect(),
-        severity,
+    let until = flags.until.and_then(|raw| announce::parse_until(raw, now));
+    Ok(Announcement::new(
+        title,
+        &body.join(" "),
+        flags.severity.unwrap_or_default(),
         until,
-    ))
-}
-
-/// `--until` accepts a duration (`4h`, `90m`) or a UTC clock time (`18:00`,
-/// meaning the next occurrence - today if still ahead, tomorrow otherwise).
-fn parse_until(raw: &str, now: i64) -> Option<i64> {
-    if let Some(secs) = hora_core::parse_duration(raw) {
-        return Some(now + i64::try_from(secs).unwrap_or(i64::MAX));
-    }
-    let (hours, minutes) = raw.split_once(':')?;
-    let (hours, minutes): (i64, i64) = (hours.parse().ok()?, minutes.parse().ok()?);
-    if !(0..24).contains(&hours) || !(0..60).contains(&minutes) {
-        return None;
-    }
-    let today = (now / 86_400) * 86_400 + hours * 3600 + minutes * 60;
-    Some(if today > now { today } else { today + 86_400 })
+    )?)
 }
 
 /// Print the digest exactly as the `[digest]` task would send it - a dry run
@@ -1173,12 +1130,7 @@ fn parse_event_args(args: &[String]) -> Result<EventCommand, CliError> {
         [first, rest @ ..] if first == "--" => rest,
         _ => args,
     };
-    let title: String = title_words
-        .join(" ")
-        .trim()
-        .chars()
-        .take(MAX_EVENT_TITLE_CHARS)
-        .collect();
+    let title = hora_core::bounded(&title_words.join(" "), MAX_EVENT_TITLE_CHARS);
     if title.is_empty() {
         return Err(usage("Usage: hora event <title...>"));
     }
@@ -1435,68 +1387,44 @@ async fn silence(args: &[String]) -> Result<(), CliError> {
             println!("Cleared {cleared} active silence(s).");
         }
         Some(ids) if args.len() >= 2 => {
-            let Some(duration_secs) = hora_core::parse_duration(&args[1])
-                .filter(|secs| *secs <= hora_core::MAX_SILENCE_SECS)
-            else {
-                return Err(usage(format!(
-                    "Invalid duration {:?} (use e.g. 10m, 1h30m; max 7d).",
-                    args[1]
-                )));
-            };
             let (config, pool) = open_database().await?;
-            let monitors: Vec<&str> = if ids == "all" || ids == "*" {
-                vec!["*"]
-            } else {
-                let ids: Vec<&str> = ids.split(',').map(str::trim).collect();
-                for id in &ids {
-                    find_monitor(&config, id)?;
-                }
-                ids
-            };
-            let reason = silence_reason(&args[2..]);
-            let until =
-                chrono::Utc::now().timestamp() + i64::try_from(duration_secs).unwrap_or(i64::MAX);
-            for id in &monitors {
-                hora_core::db::insert_silence(&pool, id, until, reason.as_deref()).await?;
-            }
-            let target = if monitors == ["*"] {
+            let reason = (args.len() > 2).then(|| args[2..].join(" "));
+            let silenced =
+                match hora_core::silence::apply(&pool, &config, ids, &args[1], reason.as_deref())
+                    .await
+                {
+                    Ok(silenced) => silenced,
+                    Err(SilenceError::InvalidDuration) => {
+                        return Err(usage(format!(
+                            "Invalid duration {:?} (use e.g. 10m, 1h30m; max 7d).",
+                            args[1]
+                        )));
+                    }
+                    Err(SilenceError::UnknownId(id)) => return Err(unknown_monitor(&config, &id)),
+                    Err(SilenceError::NoIds) => return Err(usage(SILENCE_USAGE)),
+                    Err(err @ SilenceError::Database(_)) => {
+                        return Err(CliError::Other(err.into()));
+                    }
+                };
+            let until = silenced.until;
+            let target = if silenced.ids == ["*"] {
                 "all monitors".to_owned()
             } else {
-                monitors.join(", ")
+                silenced.ids.join(", ")
             };
             println!("Silenced {target} until {}.", fmt::utc(until));
         }
-        _ => {
-            return Err(usage(concat!(
-                "Usage: hora silence <ids|all> <duration> [reason]\n",
-                "       hora silence list\n",
-                "       hora silence clear",
-            )));
-        }
+        _ => return Err(usage(SILENCE_USAGE)),
     }
     Ok(())
 }
 
-/// The optional free-text reason after `hora silence <ids> <duration>`,
-/// bounded like the API's (`POST /api/silence`) so neither path can bloat the
-/// database.
-fn silence_reason(words: &[String]) -> Option<String> {
-    (!words.is_empty()).then(|| {
-        words
-            .join(" ")
-            .chars()
-            .take(MAX_SILENCE_REASON_CHARS)
-            .collect()
-    })
-}
-
-/// Caps on CLI-written free text, mirroring the HTTP API's limits
-/// (`hora-web`'s `MAX_ALERT_TITLE_CHARS` / `MAX_PUSH_MSG_CHARS`) so a record
-/// looks the same whichever door it came in through.
-const MAX_EVENT_TITLE_CHARS: usize = 200;
-const MAX_ANNOUNCE_TITLE_CHARS: usize = 200;
-const MAX_ANNOUNCE_BODY_CHARS: usize = 500;
-const MAX_SILENCE_REASON_CHARS: usize = 500;
+/// What `hora silence` answers a malformed invocation with.
+const SILENCE_USAGE: &str = concat!(
+    "Usage: hora silence <ids|all> <duration> [reason]\n",
+    "       hora silence list\n",
+    "       hora silence clear",
+);
 
 /// Run the monitor: load config, open the database, start the supervisor and
 /// background tasks, and serve the status page until a shutdown signal.
@@ -1669,25 +1597,28 @@ mod tests {
 
     #[test]
     fn announce_args_split_flags_title_and_body() {
-        let (title, body, severity, until) = parse_announce_args(&strings(&[
-            "Fiber",
-            "cut,",
-            "ETA",
-            "6pm",
-            "--severity",
-            "warning",
-            "--until",
-            "4h",
-        ]))
+        let announcement = parse_announce_args(
+            &strings(&[
+                "Fiber",
+                "cut,",
+                "ETA",
+                "6pm",
+                "--severity",
+                "warning",
+                "--until",
+                "4h",
+            ]),
+            1000,
+        )
         .expect("parse");
-        assert_eq!(title, "Fiber");
-        assert_eq!(body, "cut, ETA 6pm");
-        assert_eq!(severity, "warning");
-        assert!(until.is_some());
+        assert_eq!(announcement.title, "Fiber");
+        assert_eq!(announcement.body, "cut, ETA 6pm");
+        assert_eq!(announcement.severity, announce::Severity::Warning);
+        assert_eq!(announcement.until, Some(1000 + 4 * 3600));
 
-        assert!(parse_announce_args(&strings(&["--severity", "warning"])).is_err());
-        assert!(parse_announce_args(&strings(&["t", "--severity", "panic"])).is_err());
-        assert!(parse_announce_args(&strings(&["t", "--until", "nope"])).is_err());
+        assert!(parse_announce_args(&strings(&["--severity", "warning"]), 0).is_err());
+        assert!(parse_announce_args(&strings(&["t", "--severity", "panic"]), 0).is_err());
+        assert!(parse_announce_args(&strings(&["t", "--until", "nope"]), 0).is_err());
     }
 
     /// The message a usage error would print, or a panic for any other outcome.
@@ -1769,18 +1700,6 @@ mod tests {
     }
 
     #[test]
-    fn silence_reason_is_capped_like_the_api() {
-        assert_eq!(silence_reason(&[]), None);
-        assert_eq!(
-            silence_reason(&strings(&["deploy", "window"])).as_deref(),
-            Some("deploy window")
-        );
-        let long = "é".repeat(MAX_SILENCE_REASON_CHARS + 50);
-        let capped = silence_reason(&strings(&[&long])).expect("reason");
-        assert_eq!(capped.chars().count(), MAX_SILENCE_REASON_CHARS);
-    }
-
-    #[test]
     fn unknown_monitor_lists_the_configured_ids() {
         let config = two_monitor_config();
         assert_eq!(find_monitor(&config, "db").expect("db").name, "Database");
@@ -1817,17 +1736,5 @@ mod tests {
             Err(CliError::Failed(message)) => assert_eq!(message, "No incidents recorded yet."),
             other => panic!("expected a failure on an empty database, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn until_takes_durations_and_next_clock_time() {
-        let noon = 86_400 * 10 + 12 * 3600; // some UTC noon
-        assert_eq!(parse_until("4h", noon), Some(noon + 4 * 3600));
-        // 18:00 is still ahead today.
-        assert_eq!(parse_until("18:00", noon), Some(noon + 6 * 3600));
-        // 09:00 already passed: tomorrow.
-        assert_eq!(parse_until("09:00", noon), Some(noon + 21 * 3600));
-        assert_eq!(parse_until("25:00", noon), None);
-        assert_eq!(parse_until("garbage", noon), None);
     }
 }
