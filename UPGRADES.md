@@ -12,10 +12,45 @@ pushes and recorded misses apart; older rows are read exactly as before),
 `0020` (a latency histogram per hourly roll-up, plus two indexes; hours
 rolled up before it are read from raw checks until they age out) and `0021`
 (a failure reason code on checks and incidents; older rows keep the
-previous wording-based reading). No new
-config key. The first page request after the upgrade waits for the first
-summary build (a few seconds on a large database). Check these before you
-roll out:
+previous wording-based reading). One new optional key,
+`alerts.notify_unconfirmed`: deploy the binary before a config that sets it
+(`deny_unknown_fields`). The first page request after the upgrade waits for
+the first summary build (a few seconds on a large database). Check these
+before you roll out:
+
+- **Local-only downs no longer page.** With `confirm_with_peers`, a down
+  that every peer that answered sees up is no longer sent to the monitor's
+  channels (it was, softened). It goes to `alerts.notify_unconfirmed` if
+  you set it - a quiet channel - or is only recorded. If you relied on
+  those softened alerts, add `notify_unconfirmed = ["<channel>"]` under
+  `[alerts]`. Downs that no peer could judge, or that any peer also sees,
+  page exactly as before.
+- **ICMP monitors behind a router that answers "unreachable" turn down.**
+  They were reported up (the router's ICMP error passed for the host's echo
+  reply). A monitor that goes red after the upgrade was never reaching its
+  host.
+- **An https monitor that redirects to plain http is now down**
+  (*redirected to plain http*). Point the monitor at the final https URL,
+  or fix the redirect.
+- **New webhook event and field.** `cert_unreadable` (with the read error
+  in `message`) is a new `event`, and `down` / `recovered` carry
+  `local_only`. A webhook consumer that rejects unknown events or fields
+  has to learn them first.
+- **One `cert_unreadable` alert may arrive after the upgrade** for every
+  monitor whose certificate the watcher cannot read: those used to fail in
+  the log only. Typical causes: a server that only speaks TLS 1.0/1.1, a
+  STARTTLS dialogue that changed, or a proxied monitor behind an `https://`
+  or `socks4://` proxy (the certificate is read through `http://`,
+  `socks5://` and `socks5h://` proxies only).
+- **`POST /api/push/{id}` answers 401 for an unknown id** (it was 404). A
+  script that told the two apart sees a wrong token in both cases.
+- **Probe failure wording is more precise** (*connection failed: connection
+  refused*, *proxy failed: ...*, *domain does not exist (NXDOMAIN)*, *+ 20s
+  grace*). Update any client-side filter that matched the old texts.
+- **HTTP probes send `Accept-Encoding: gzip, br, deflate, zstd`** and
+  decode the answer before the assertions run; a server may now answer
+  compressed where it did not before. `max_body_kb` caps the decoded body.
+- **Announcements**: an `until` longer than a year (`366d`) is refused.
 
 - **Configs that no longer load.** `interval_secs`, `timeout_secs`,
   `expect_every_secs` or `health.interval_secs` above 30 days

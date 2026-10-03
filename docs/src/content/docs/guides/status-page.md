@@ -53,8 +53,10 @@ it.* on the upstream itself.
 **From several places**: with [peers](../peers/), a down that only this
 node sees, while every peer reaches the target, is a network problem near
 this node, not an outage. The page shows the service as *Up* with a calm
-*Not an outage* notice, and no one is paged. A down the peers confirm says
-where it was seen from.
+*Not an outage* notice, and the monitor's channels are not paged (only
+`alerts.notify_unconfirmed`, if set; see
+[local-only downs](../peers/#local-only-downs)). A down the peers confirm
+says where it was seen from.
 
 Failure reasons are reduced to a safe category for visitors (*HTTP 500*,
 *content check failed*): the full reason can contain response bodies, DNS
@@ -99,7 +101,8 @@ With the operator token (`server.auth_token`), the same page also shows:
 - **Full failure detail** on every monitor, and the captured response of
   the last failure in the history.
 - **Why nobody was woken**: for a down seen from this node only, who saw
-  what, place by place.
+  what, place by place, and where such a down goes with your config (the
+  quiet channels, or nowhere).
 - **The watched peers**, with when each was last heard from, and the
   **Watchers** page (`/watchers`): this node's view of its peers, the last
   30 days of confirmations, each shared service from each place.

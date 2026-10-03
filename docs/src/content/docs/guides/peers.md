@@ -87,10 +87,36 @@ verdict:
 
 - *"confirmed down from 3/3 vantage points"* - a real outage;
 - *"seen UP by hora-b - down from 1/3 vantage points (network issue near
-  this node?)"* - probably your fibre, not the service. The alert is
-  **softened, never silenced**: geo-partial outages are real outages.
+  this node?)"* - probably your fibre, not the service.
 
 Two Raspberry Pi at two homes become a distributed Pingdom.
+
+### Local-only downs
+
+When **every peer that answered sees the target up** (and at least one
+answered), the down is *local-only*: a problem on the road from this node,
+not an outage. It does **not** go to the monitor's channels. It goes to the
+channels listed in `alerts.notify_unconfirmed`, or, without that key, it is
+only recorded - the incident, the timeline, and the status page's
+*Not an outage* notice.
+
+```toml
+[alerts]
+notify_unconfirmed = ["ntfy-low"]   # optional: a quiet channel for local-only downs
+```
+
+Only an explicit contradiction quiets a down. No peer configured, no peer
+reachable, peers that do not watch this target, or **any** peer seeing it
+down too: the alert goes out normally - geo-partial outages are real
+outages.
+
+While a local-only down lasts, the node asks its peers again every 5
+minutes. As soon as they no longer all see the target up (they see it down
+too, or stop answering), the real down alert goes out, once, to the usual
+channels. A recovery goes to whoever received a down: the quiet channels
+for a down that stayed local-only, both after a late confirmation. The
+[webhook](../alerting/#channels) payload carries `local_only: true` on the
+`down` and `recovered` events of a local-only down.
 
 Confirmation only applies to network probes (http, tcp, icmp, dns). Exec
 and push monitors have no remote point of view, so they are never sent to

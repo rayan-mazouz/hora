@@ -24,7 +24,7 @@ each monitor to specific ones. Ten backends are built in:
 | `pushover` | application `token` + `user` key |
 | `email` | SMTP: `host`, `port` (587 STARTTLS default, `implicit_tls` for 465), `from`, `to` |
 | `freemobile` | Free Mobile SMS: `user` + `pass` |
-| `webhook` | POSTs a structured JSON event (`{ event, monitor, … }`) to `url` |
+| `webhook` | POSTs a structured JSON event (`{ event, monitor, … }`) to `url` (see below) |
 
 ```toml
 [[channels]]
@@ -58,6 +58,19 @@ elsewhere fails delivery.
 
 **Routing**: a monitor (or a peer) selects channels with
 `notify = ["ops-telegram"]`; without it, every configured channel is used.
+A down seen from this node only, while the peers see the target up, goes to
+`alerts.notify_unconfirmed` instead (or nowhere): see
+[local-only downs](../peers/#local-only-downs).
+
+**The webhook payload** is a JSON object with `event` (`down`, `degraded`,
+`recovered`, `cert_expiring`, `cert_changed`, `cert_unreadable`,
+`domain_expiring`, `release_available`, `peer_link_degraded`,
+`budget_burn`, `digest`, `alert`) and `monitor`, plus the fields that event
+carries: `message`, `cause`, `impacted`, `vantage` and `change` on a down;
+`local_only` (bool) on `down` and `recovered`; `days_left` on expiry
+events; the fingerprints on `cert_changed`; the read error as `message` on
+`cert_unreadable`. Fields are only ever added: ignore the ones you do not
+know.
 
 **Test the chain before you need it**:
 
@@ -291,3 +304,9 @@ at = "2026-06-07T12:00:00Z"
 
 `https://` monitors are warned `alerts.cert_expiry_days` before their
 certificate expires (default 14), through the same channels and routing.
+Under a day the warning counts hours (*expires in 10 hours*). A proxied
+monitor's certificate is read through its proxy (HTTP `CONNECT`, `socks5`,
+`socks5h`), like its probe. A certificate that cannot be read at all (the
+STARTTLS dialogue changed, a server down to TLS 1.0, a firewall) alerts
+once, *TLS certificate could not be read*, with the error - not while the
+monitor is down, and not again until it has been read successfully.

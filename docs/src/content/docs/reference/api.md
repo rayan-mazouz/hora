@@ -70,9 +70,9 @@ curl -fsS -X POST -H "X-Push-Token: ${TOKEN}" \
 ```
 
 Optional query: `status=up|down|degraded` (default up), `msg=...` (recorded
-with the heartbeat, bounded), `ping=<ms>`. Answers 401 on a wrong token, 404
-if the id is not a push target, and 400 on an unknown `status` or a negative
-`ping`.
+with the heartbeat, bounded), `ping=<ms>`. Answers 401 on a wrong token -
+and on an id that is not a push target, so push ids cannot be probed from
+outside - and 400 on an unknown `status` or a negative `ping`.
 
 The `status` is the job's verdict and drives alerting: `down` counts as a
 failure with `msg` as the reason (confirmed down after `fail_threshold`),
@@ -109,7 +109,8 @@ JSON body: `severity` (`info` default, `warning`, `error`, `critical`),
 `title` (required), `message` (optional), `dedup_key` (optional) and `tags`
 (optional map, folded into the message). Answers **202 Accepted** with
 `{"status":"dispatched","id":…}`; a 400 on an empty title or unknown severity,
-401/404 like the push endpoint.
+401 on a missing or wrong credential (also for an unknown id), and 404 for
+an unknown id only with the operator token.
 
 **Severity → priority.** On backends that have a native priority - ntfy,
 Pushover, Gotify - the severity maps onto it (so `critical` pages louder than
@@ -152,8 +153,8 @@ curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
 ```
 
 `severity` is `info` (default), `warning`, `critical` or `resolved`. `until` is a duration
-(`4h`, `90m`) or a time of day in UTC (`18:00`, the next occurrence); without
-it the banner stays until cleared. See
+(`4h`, `90m`, at most `365d`) or a time of day in UTC (`18:00`, the next
+occurrence); without it the banner stays until cleared. See
 [Announcements](../../guides/alerting/#announcements).
 
 ## `GET /metrics`
@@ -172,7 +173,9 @@ Every route except static assets and `/api/openapi.json` is **rate-limited
 per client IP**, with `x-ratelimit-*` / `retry-after` headers. The `/api/*`
 endpoints use `rate_limit_burst` / `rate_limit_refill_secs`; pages, badges,
 reports, heatmaps, `/metrics` and `/healthz` get four times the burst and
-refill. These settings are read once at startup.
+refill. These settings are read once at startup. An IPv6 client is counted
+by its `/64` (one subscriber usually holds the whole prefix, so a bucket per
+address would be no limit at all), and an IPv4-mapped address as IPv4.
 
 **Client IP behind a proxy.** By default the client is the TCP peer, never a
 forwarded header a direct client could forge. Behind a reverse proxy that
@@ -191,11 +194,15 @@ is safe only with a proxy that replaces it (Caddy's default) rather than
 appending to what the client sent (nginx's `$proxy_add_x_forwarded_for`).
 
 `allowed_origins` controls CORS (empty = allow any, since the data is
-read-only and public). Responses carry a strict CSP,
-`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
-`Permissions-Policy` and `Cross-Origin-Opener-Policy`, plus an
-`x-request-id` (a well-formed inbound one is honoured, otherwise minted)
-echoed on the response for log correlation.
+read-only and public). Responses carry a strict CSP (no script,
+`form-action 'self'`), `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY`, `Permissions-Policy` and
+`Cross-Origin-Opener-Policy`, plus an `x-request-id` (a well-formed inbound
+one is honoured, otherwise minted) echoed on the response for log
+correlation. A response to a request that carried a credential
+(`Authorization`, `X-Push-Token` or `?token=`) is marked
+`Cache-Control: no-store`, so no shared cache in front of Hora and no
+browser disk cache keeps an operator or group view.
 
 **HTTPS and HSTS** belong to the reverse proxy that terminates TLS: Hora
 serves plain HTTP. Set `Strict-Transport-Security` there, for example

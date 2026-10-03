@@ -37,6 +37,17 @@ check before upgrading.
 - **"Not an outage."** A down seen from this node only, while every peer
   reaches the target, shows as up with a notice explaining why nobody was
   paged. The JSON API is unchanged.
+- **`alerts.notify_unconfirmed`**: the channels that receive a local-only
+  down (see Changed), validated like any `notify` route. The webhook payload
+  gains `local_only` (bool) on `down` and `recovered` events.
+- **A certificate that cannot be read alerts** (`cert_unreadable`: *TLS
+  certificate could not be read*, with the error), once per streak and not
+  while the monitor is down. It used to be a log line, and the expiry of a
+  server whose STARTTLS dialogue or TLS versions changed silently stopped
+  being watched.
+- **The HTTP probe decodes `gzip`, `br`, `deflate` and `zstd` bodies**
+  before the assertions run (a CDN that always compresses failed every
+  keyword check). `max_body_kb` caps the decoded size.
 - **Kiosk refresh is opt-in**: `?refresh=<secs>` (10 to 3600) reloads the
   page; without it the page no longer reloads itself every 30 seconds,
   which closed open groups and disturbed screen readers.
@@ -77,6 +88,51 @@ check before upgrading.
 
 ### Changed
 
+- **Local-only downs no longer page.** With `confirm_with_peers`, a down
+  that every peer that answered sees up used to be sent to the monitor's
+  channels anyway, softened. It now goes to `alerts.notify_unconfirmed` (or
+  is only recorded: incident, timeline, *Not an outage*). Only that explicit
+  contradiction quiets a down: no peer, no answer, or any peer seeing it
+  down alert as before. The peers are asked again every 5 minutes while it
+  lasts; once they no longer all see it up, the real down goes out, once.
+  A recovery goes to whoever received a down. The operator panel *Why
+  nobody was woken* says what the config does with such a down.
+- **Probe failures name their cause.** *connection failed: connection
+  refused*, *connection failed: TLS invalid peer certificate: Expired*
+  instead of a bare *connection failed*; *proxy failed: tunnel error: proxy
+  authorization required (HTTP 407)* or *proxy failed: SOCKS error:
+  credentials not accepted* instead of blaming the target; *domain does not
+  exist (NXDOMAIN)* apart from *no A records found*, and *server answered
+  Server Failure (rcode 2)* instead of hickory's debug text; an assertion
+  judged on a body cut at `max_body_kb` says *(body cut at 256 KiB)*. A
+  push to an unknown id, a cron grace of 20 seconds (*+ 20s grace*, was
+  *+ 0m grace*) and an ICMP error (*icmp destination unreachable (code 1)
+  from 192.0.2.1*) read as what they are.
+- **An https monitor redirected to plain http is down** (*redirected to
+  plain http*, public reason of the same words): following it carried the
+  session in clear text without a word.
+- **TCP and certificate connects try the next address after 250 ms**
+  (happy-eyeballs): a dual-stack name whose IPv6 address blackholes no
+  longer times out while IPv4 answers.
+- **A custom `dns_resolver` falls back to TCP** for answers too large for a
+  datagram (long TXT, SPF, DKIM records), which used to fail as truncated.
+- **A proxied monitor's certificate is read through its proxy** (HTTP
+  `CONNECT`, `socks5`, `socks5h`), like its probe; `hora probe` does the
+  same. It was read by a direct dial around the proxy.
+- **Certificate warnings count hours under a day** (*expires in 10 hours*;
+  `hora probe` prints *10 hours left*): with less than a day left they said
+  *has expired*.
+- **`POST /api/push/{id}` answers 401 for an unknown id**, like a wrong
+  token (it answered 404, which listed the push ids).
+- **An announcement's `until` is at most a year** (`365d`); a longer one is
+  refused (400, CLI error).
+- A confirmation peer that does not watch the target (it answers 404) is no
+  longer counted as unreachable: the verdict reads *no peer watches this
+  target, unconfirmed*, and `/watchers` no longer counts it under *No
+  answer*.
+- A peer that misses a vantage poll keeps its last view for three rounds:
+  one lost poll no longer makes its column (and the *Not an outage* notice)
+  vanish for a minute.
 - **The status summary is never built on a request.** A background task
   rebuilds it continuously (about 150 ms on 575M checks, was 13-20 s) and
   every page, `/api/summary`, `/metrics`, group page and peer exchange is
@@ -210,7 +266,12 @@ check before upgrading.
   probe; a hostname resolver now fails validation instead of every probe.
 - **Exec timeouts left grandchildren running**: the plugin now runs in its
   own process group, killed as a whole; a plugin that exits while a
-  background child holds stdout reports its real result, not "timed out".
+  background child holds stdout reports its real result, not "timed out",
+  and that child is killed instead of piling up, one per interval.
+- **ICMP monitors were up when a router answered "destination
+  unreachable"**: surge-ping hands back the ICMP errors that quote the
+  request as a reply, so the router's round-trip passed for the host's.
+  Only an echo reply counts now.
 - A cron push heartbeat that arrived slightly before its run counted as
   missed.
 - A body cut mid-read was reported as a failed assertion ("keyword missing")
@@ -230,6 +291,27 @@ check before upgrading.
 
 ### Security
 
+- **Remote text cannot drive the operator's terminal.** A probed body, a
+  push `msg`, a pushed alert or a plugin's output could carry escape
+  sequences (retitle or clear the terminal, write the clipboard with OSC 52)
+  into `hora incidents`, `hora postmortem` and `hora probe`. Control
+  characters other than newline and tab are replaced with U+FFFD where the
+  text is stored and again where the CLI prints it.
+- **`/monitor/{id}` showed the raw target** (`https://user:pass@...`,
+  `?api_key=...`) to group viewers; credentials are now redacted on the
+  page.
+- **IPv6 clients are rate-limited by their `/64`** (one subscriber holds a
+  whole prefix, so a bucket per address was no limit), IPv4-mapped
+  addresses as IPv4.
+- **Responses to credentialed requests** (`Authorization`, `X-Push-Token`,
+  `?token=`) carry `Cache-Control: no-store`; the CSP adds
+  `form-action 'self'`.
+- `/report/{month}` accepts digits only (`2026-+5` was a second spelling,
+  and cache entry, of `2026-05`) and rendered report pages are evicted with
+  their report.
+- Post-mortems put the remote text of the *First failure* and timeline
+  lines in a code span, so markdown in a response body (a tracking image, a
+  link) stays text in the ticket it is pasted into.
 - **Secrets stay on their origin.** Notifier, webhook and mesh requests
   follow a redirect only within the same origin (or an http-to-https upgrade
   on the same host): reqwest strips `Authorization` across hosts but not

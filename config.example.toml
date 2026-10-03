@@ -150,6 +150,14 @@ default_retention_days = 90
 # blip. The alert fires once per failure streak; a successful delivery resets
 # the counter. 1 = alert on the first failure (aggressive). Default: 3.
 # channel_fail_threshold = 3
+#
+# Local-only downs: with peers and confirm_with_peers, a down that every peer
+# that answered sees UP is a problem near this node, not an outage. It never
+# goes to the monitor's own channels: it goes to these (a quiet channel), or,
+# without this key, is only recorded (incident, timeline, "Not an outage").
+# The peers are asked again every 5 minutes; once they no longer all see it
+# up, the real down alert goes out. Default: unset.
+# notify_unconfirmed = ["ntfy-low"]
 
 # --- Weekly digest ----------------------------------------------------------
 # A recap of the last 7 days through the notification channels: "99.97%
@@ -322,7 +330,8 @@ name = "Nightly backup"
 kind = "push"
 interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # push_token = "${BACKUP_TOKEN}"   # optional but recommended
-# schedule = "0 3 * * *"     # five-field cron, UTC; replaces the fixed-gap rule
+# schedule = "0 3 * * *"     # five-field cron, UTC (not local time: DST moves a
+#                            # local crontab by an hour); replaces the fixed-gap rule
 # grace_secs = 1800          # how late a scheduled ping may be (default 30m)
 
 # Exec monitor: run an external check, monitoring-plugins convention (exit
@@ -378,7 +387,9 @@ interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 #                           # down, ask the peers to probe the same target before
 #                           # alerting. The alert says "confirmed down from 3/3
 #                           # vantage points" (real outage) or "seen UP by hora-b"
-#                           # (network issue near this node). A peer only probes
+#                           # (network issue near this node) - such a local-only
+#                           # down goes to alerts.notify_unconfirmed (or nowhere),
+#                           # not to the monitor's channels. A peer only probes
 #                           # targets in its OWN config (never an arbitrary one),
 #                           # and its [[peers]] entry for this node must set a
 #                           # listen_token. Strictly fail-open: unreachable peers

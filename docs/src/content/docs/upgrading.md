@@ -43,9 +43,21 @@ older binary refuses keys it does not know.
 
 The next release brings the new status page and a hardening pass. Three
 schema migrations apply by themselves, in seconds even on very large
-databases, and there is no new config key; the first page request after the
-upgrade waits a few seconds for the first summary build. A few behaviours
-change:
+databases, and one optional config key is new
+(`alerts.notify_unconfirmed`); the first page request after the upgrade
+waits a few seconds for the first summary build. A few behaviours change:
+
+- **Local-only downs no longer page.** A down that every peer that answered
+  sees up goes to `alerts.notify_unconfirmed` (a quiet channel), or is only
+  recorded, instead of the monitor's channels. See
+  [local-only downs](../guides/peers/#local-only-downs).
+- **Some monitors may turn down, rightly**: an ICMP monitor whose router
+  answered "unreachable" (it read as up), or an https monitor redirected to
+  plain http. A `cert_unreadable` alert may arrive once for a certificate
+  the watcher could not read (it only logged it).
+- **The webhook** gains the `cert_unreadable` event and a `local_only`
+  field on `down` and `recovered`.
+- **A push to an unknown id answers 401**, like a wrong token (it was 404).
 
 - **Some configs no longer load.** Intervals and timeouts above 30 days, an
   `expected_status` outside 100 to 599, an unbracketed IPv6 tcp target, or a

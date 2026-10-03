@@ -11,7 +11,7 @@ your phone, and shows where each kind of noise stops.
 <figure class="hora-diagram">
 <svg viewBox="0 0 520 544" role="img" aria-labelledby="flow-title flow-desc">
 <title id="flow-title">From a failed check to one alert</title>
-<desc id="flow-desc">A check runs and is retried once. A failure is recorded and shows as degraded. After fail_threshold failures in a row it is confirmed down. Peers are asked to confirm. Dependent monitors are grouped under their cause. One alert goes out. At each step, a branch shows what stops there: a retry that passes, fewer failures than the threshold, a maintenance window or silence, a place where the target is still up (the alert is softened, not dropped), and an upstream that is already down.</desc>
+<desc id="flow-desc">A check runs and is retried once. A failure is recorded and shows as degraded. After fail_threshold failures in a row it is confirmed down. Peers are asked to confirm. Dependent monitors are grouped under their cause. One alert goes out. At each step, a branch shows what stops there: a retry that passes, fewer failures than the threshold, a maintenance window or silence, a place where the target is still up (not an outage: a quiet channel at most), and an upstream that is already down.</desc>
 <defs><path id="ah" d="M-5 -7 0 0 5 -7Z"/></defs>
 <g>
 <rect class="box" x="10" y="10" width="250" height="56" rx="10"/>
@@ -39,7 +39,7 @@ your phone, and shows where each kind of noise stops.
 <text class="t" x="26" y="346">Peers are asked</text><text class="s" x="26" y="365">confirm_with_peers, 10 s at most</text>
 <path class="exit" d="M260 350h30"/>
 <rect class="box quiet" x="290" y="322" width="220" height="56" rx="10"/>
-<text class="t" x="304" y="346">Up from another place</text><text class="s" x="304" y="365">alert softened, still sent</text>
+<text class="t" x="304" y="346">Up from another place</text><text class="s" x="304" y="365">quiet channel, or recorded only</text>
 <path class="ar" d="M135 378v20"/><use href="#ah" class="ar-head" x="135" y="400"/>
 <rect class="box" x="10" y="400" width="250" height="56" rx="10"/>
 <text class="t" x="26" y="424">Grouped by cause</text><text class="s" x="26" y="443">depends_on, group_window_secs</text>
@@ -123,11 +123,16 @@ from where they are, before the alert goes out.
 - Up from somewhere else: *"seen UP by hora-b, down from 1/3 vantage points
   (network issue near this node?)"*.
 
-The second alert is **softened, never dropped**: an outage seen from one
-region is still an outage for someone. Peers only probe targets that are in
-their own configuration, and the round never takes more than 10 seconds:
-a slow or unreachable peer only means the alert goes out without the
-annotation.
+In the second case, when every peer that answered sees the target up, the
+down is **local-only**: it does not page the monitor's channels. It goes to
+`alerts.notify_unconfirmed` if you set one (a quiet channel), or is only
+recorded, and the page says *Not an outage*. The peers are asked again
+every 5 minutes; if they come to see it down too, the real alert goes out
+then. Anything short of that explicit contradiction - no peer answering, or
+one peer seeing it down - alerts as usual: an outage seen from one region
+is still an outage for someone. Peers only probe targets that are in their
+own configuration, and the round never takes more than 10 seconds: a slow
+or unreachable peer only means the alert goes out without the annotation.
 
 ## 5. Topology: one alert for a cascade
 
