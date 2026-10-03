@@ -43,6 +43,14 @@ pub enum AlertMsg {
         name: String,
         notify: Option<Vec<String>>,
     },
+    /// A monitor task resumed an open incident whose down was local-only
+    /// (from its `local_only` column): the routing a restart lost, so the
+    /// recovery still goes only to whoever received the down. `confirmed`:
+    /// the peers later confirmed it and the usual down went out too.
+    ResumedLocalOnly {
+        id: String,
+        confirmed: bool,
+    },
 }
 
 /// A confirmed-down alert, with its topology annotations resolved.
@@ -249,6 +257,11 @@ impl Coalescer {
     /// Forget folded downs of monitors no longer configured: their recovery
     /// will never come, and a monitor re-added under the same id later must
     /// not have its first real recovery swallowed.
+    /// Seed the routing of a local-only down announced before a restart.
+    fn resume_local_only(&mut self, id: String, confirmed: bool) {
+        self.quiet.insert(id, Quiet { confirmed });
+    }
+
     fn retain_monitors(&mut self, known: impl Fn(&str) -> bool) {
         self.suppressed.retain(|id| known(id));
         self.quiet.retain(|id, _| known(id));
@@ -304,6 +317,9 @@ pub fn spawn(
                         Some(AlertMsg::Recovered { id, name, notify }) => {
                             let recipients = state.on_recovered(&id, now);
                             send_recovered(&notifier, &config, &name, notify, recipients).await;
+                        }
+                        Some(AlertMsg::ResumedLocalOnly { id, confirmed }) => {
+                            state.resume_local_only(id, confirmed);
                         }
                         None => break,
                     }

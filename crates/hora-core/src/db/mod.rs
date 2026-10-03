@@ -77,9 +77,9 @@ pub use compact::{
 };
 pub use incidents::{
     Incident, IncidentMarks, IncidentMarksCache, find_open_incident, incident_by_id,
-    incident_marks, incidents_between, insert_incident_start, latest_incident_id,
-    monitor_incidents, recent_incidents, set_incident_note, update_incident_end,
-    update_incident_vantage,
+    incident_local_only, incident_marks, incidents_between, insert_incident_start,
+    latest_incident_id, monitor_incidents, recent_incidents, set_incident_local_only,
+    set_incident_note, update_incident_end, update_incident_vantage,
 };
 pub use release::{StoredRelease, mark_release_notified, release_watch, upsert_release_watch};
 pub(crate) use retention::prune;

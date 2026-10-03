@@ -74,6 +74,41 @@ pub async fn insert_incident_start(
     Ok(result.last_insert_rowid())
 }
 
+/// Record how an incident's down was routed: `true` while it is local-only
+/// (sent to the quiet channels only), `false` once the peers confirmed it and
+/// the usual down went out too. Never set for an ordinary down.
+///
+/// # Errors
+///
+/// Returns an error if the update fails.
+pub async fn set_incident_local_only(
+    store: &Store,
+    incident_id: i64,
+    local_only: bool,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE incidents SET local_only = ? WHERE id = ?")
+        .bind(local_only)
+        .bind(incident_id)
+        .execute(store.sqlx())
+        .await?;
+    Ok(())
+}
+
+/// How an incident's down was routed (see [`set_incident_local_only`]):
+/// `None` for an ordinary down, or an incident that no longer exists.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn incident_local_only(store: &Store, incident_id: i64) -> sqlx::Result<Option<bool>> {
+    let row: Option<(Option<bool>,)> =
+        sqlx::query_as("SELECT local_only FROM incidents WHERE id = ?")
+            .bind(incident_id)
+            .fetch_optional(store.sqlx())
+            .await?;
+    Ok(row.and_then(|(local_only,)| local_only))
+}
+
 /// Record the multi-vantage verdict on an incident, once the peers answered
 /// (the incident row is written *before* the peers are consulted, so the
 /// history never waits on the network).

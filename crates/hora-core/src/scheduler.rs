@@ -236,13 +236,17 @@ async fn run(
     // The alert state of the previous task for this id, if the supervisor
     // restarted it; otherwise (daemon start) an open incident says the down
     // was already announced.
-    let mut state = alert_state.get().unwrap_or_else(|| {
-        if open_incident.is_some() {
-            AlertState::resumed_down(alert_settings(&config, &monitor.id).1)
-        } else {
-            AlertState::default()
-        }
-    });
+    let mut state = match alert_state.get() {
+        Some(state) => state,
+        None => match open_incident {
+            Some(incident_id) => {
+                let mut state = AlertState::resumed_down(alert_settings(&config, &monitor.id).1);
+                resume_local_only(&store, &alerts, &monitor.id, incident_id, &mut state).await;
+                state
+            }
+            None => AlertState::default(),
+        },
+    };
     alert_state.set(state);
     // Push monitors are judged from stored heartbeats against their cadence,
     // counted from the first heartbeat expected (persisted, so a monitor that
@@ -428,6 +432,9 @@ async fn confirm_down(
     // as it would without the feature.
     let verdict = ask_peers(store, confirm_client, config, monitor, *open_incident).await;
     let local_only = verdict.as_ref().is_some_and(|verdict| verdict.local_only);
+    if local_only {
+        record_routing(store, monitor, *open_incident, true).await;
+    }
 
     // The coalescer groups on the *configured* upstreams: in a cascade this
     // monitor often confirms a tick before its upstream is derivably down,
@@ -454,6 +461,40 @@ async fn confirm_down(
     local_only
 }
 
+/// A daemon start that finds an open incident whose down was local-only
+/// (recorded in its `local_only` column): tell the coalescer, whose routing
+/// memory the restart wiped, so the recovery goes only to whoever received
+/// the down; and, while the peers have not confirmed it, keep asking them.
+async fn resume_local_only(
+    store: &Store,
+    alerts: &mpsc::UnboundedSender<AlertMsg>,
+    monitor_id: &str,
+    incident_id: i64,
+    state: &mut AlertState,
+) {
+    let local_only = match db::incident_local_only(store, incident_id).await {
+        Ok(local_only) => local_only,
+        Err(err) => {
+            error!(monitor = %monitor_id, "failed to read the incident's routing: {err:#}");
+            None
+        }
+    };
+    let Some(still_local) = local_only else {
+        return;
+    };
+    send_alert(
+        alerts,
+        monitor_id,
+        AlertMsg::ResumedLocalOnly {
+            id: monitor_id.to_owned(),
+            confirmed: !still_local,
+        },
+    );
+    if still_local {
+        state.local_only_asked = Some(chrono::Utc::now().timestamp());
+    }
+}
+
 /// Multi-vantage confirmation: bounded (one concurrent round, hard deadline)
 /// and strictly fail-open - `None` means the alert reads exactly as it would
 /// without the feature. The verdict is recorded on the incident too (best
@@ -478,6 +519,22 @@ async fn ask_peers(
     verdict
 }
 
+/// Persist how the incident's down was routed (see
+/// [`db::set_incident_local_only`]), so a restart routes its recovery the
+/// same way. Best effort: a failed write only costs that after a restart.
+async fn record_routing(
+    store: &Store,
+    monitor: &Monitor,
+    open_incident: Option<i64>,
+    local_only: bool,
+) {
+    if let Some(incident_id) = open_incident
+        && let Err(err) = db::set_incident_local_only(store, incident_id, local_only).await
+    {
+        error!(monitor = %monitor.id, "failed to record the incident's routing: {err:#}");
+    }
+}
+
 /// A local-only down that lasts: ask the peers again. Once they no longer
 /// all see the target up - they see it down too, or can no longer answer,
 /// which is no contradiction either - the down goes out to the usual
@@ -499,6 +556,7 @@ async fn reconfirm_local_down(
         return true;
     }
     warn!(monitor = %monitor.id, "local-only down now confirmed: alerting");
+    record_routing(store, monitor, open_incident, false).await;
     let (cause, impacted_names) = down_context(config, store, monitor, threshold).await;
     send_alert(
         alerts,
@@ -832,6 +890,88 @@ mod tests {
         // Recovery ends it.
         assert!(state.observe_up());
         assert_eq!(state.local_only_asked, None);
+    }
+
+    /// A local-only down, then a daemon restart: the fresh monitor task seeds
+    /// the fresh coalescer from the incident, so the recovery reaches the
+    /// quiet channel only - not the usual one, which never got the down.
+    #[tokio::test]
+    async fn a_restart_keeps_a_local_only_recovery_quiet() {
+        let (main_url, main) = crate::testing::webhook_sink().await;
+        let (quiet_url, quiet) = crate::testing::webhook_sink().await;
+        let config = Arc::new(
+            crate::config::parse(&format!(
+                r#"
+                [page]
+                [server]
+                [alerts]
+                notify_unconfirmed = ["quiet"]
+                [[channels]]
+                name = "main"
+                type = "webhook"
+                url = "{main_url}"
+                [[channels]]
+                name = "quiet"
+                type = "webhook"
+                url = "{quiet_url}"
+                [[monitors]]
+                id = "api"
+                name = "API"
+                target = "https://example.com"
+                interval_secs = 60
+                notify = ["main"]
+                "#
+            ))
+            .unwrap(),
+        );
+        let store = Store::in_memory().await;
+        // Before the restart: the down was local-only, recorded as such.
+        let incident = db::insert_incident_start(&store, "api", None, None, None, &[], None, None)
+            .await
+            .unwrap();
+        record_routing(&store, &config.monitors[0], Some(incident), true).await;
+        assert_eq!(
+            db::incident_local_only(&store, incident).await.unwrap(),
+            Some(true)
+        );
+
+        // After it: a fresh coalescer, a fresh task resuming the incident.
+        let client = crate::http::client(None).unwrap();
+        let notifier = crate::notifications::shared(&config, &client);
+        let (_config_tx, config_rx) = watch::channel(Arc::clone(&config));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let coalescer = crate::coalesce::spawn(config_rx, notifier, rx, shutdown_rx);
+        // An ordinary incident seeds nothing (and does not ask the peers).
+        let ordinary = db::insert_incident_start(&store, "web", None, None, None, &[], None, None)
+            .await
+            .unwrap();
+        let mut state = AlertState::resumed_down(3);
+        resume_local_only(&store, &tx, "web", ordinary, &mut state).await;
+        assert_eq!(state.local_only_asked, None);
+
+        let mut state = AlertState::resumed_down(3);
+        resume_local_only(&store, &tx, "api", incident, &mut state).await;
+        // Still local-only: the peers keep being asked.
+        assert!(state.local_only_asked.is_some());
+
+        assert!(state.observe_up());
+        send_alert(
+            &tx,
+            "api",
+            AlertMsg::Recovered {
+                id: "api".to_owned(),
+                name: "API".to_owned(),
+                notify: Some(vec!["main".to_owned()]),
+            },
+        );
+        // Closing the inbox lets the coalescer finish what it received.
+        drop(tx);
+        coalescer.await.unwrap();
+        drop(shutdown_tx);
+        assert_eq!(crate::testing::events(&main), Vec::<String>::new());
+        assert_eq!(crate::testing::events(&quiet), ["recovered"]);
+        assert_eq!(quiet.lock().unwrap()[0]["local_only"], true);
     }
 
     #[test]
