@@ -1,6 +1,7 @@
 //! Incidents: one row per outage, opened and closed by the scheduler.
 
 use super::Store;
+use crate::probe::FailureKind;
 
 /// An automatically recorded incident from a down/up transition.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -13,6 +14,9 @@ pub struct Incident {
     pub cause: Option<String>,
     pub impacted: Option<String>,
     pub error: Option<String>,
+    /// What kind of failure `error` describes; `None` on incidents recorded
+    /// before the kind was stored.
+    pub reason: Option<FailureKind>,
     /// Operator-written annotation ("fiber cut"), set via `hora annotate`.
     pub note: Option<String>,
     /// What the service actually answered: the failing response's status line,
@@ -32,10 +36,15 @@ pub struct Incident {
 /// # Errors
 ///
 /// Returns an error if the insert fails.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one argument per column of the row it writes"
+)]
 pub async fn insert_incident_start(
     store: &Store,
     monitor_id: &str,
     error: Option<&str>,
+    reason: Option<FailureKind>,
     cause: Option<&str>,
     impacted: &[String],
     snapshot: Option<&str>,
@@ -45,12 +54,14 @@ pub async fn insert_incident_start(
     let impacted_json = serde_json::to_string(impacted).unwrap_or_else(|_| "[]".to_owned());
     let result = sqlx::query(
         "INSERT INTO incidents \
-            (monitor_id, started_at, error, cause, impacted, snapshot, event, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (monitor_id, started_at, error, reason, cause, impacted, snapshot, event, \
+             created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(monitor_id)
     .bind(now)
     .bind(error)
+    .bind(reason.map(FailureKind::code))
     .bind(cause)
     .bind(&impacted_json)
     .bind(snapshot)

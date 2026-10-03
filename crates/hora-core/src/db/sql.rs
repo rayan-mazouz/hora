@@ -6,8 +6,8 @@
 /// The `Incident` columns, in struct order.
 macro_rules! incident_columns {
     () => {
-        "id, monitor_id, started_at, ended_at, duration_s, cause, impacted, error, note, \
-         snapshot, event, vantage, created_at"
+        "id, monitor_id, started_at, ended_at, duration_s, cause, impacted, error, reason, \
+         note, snapshot, event, vantage, created_at"
     };
 }
 

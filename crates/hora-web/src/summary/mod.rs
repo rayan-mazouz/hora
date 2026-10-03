@@ -389,7 +389,7 @@ fn derive_view(
         if visibility.detailed(&view.id) {
             reason.to_owned()
         } else {
-            hora_core::probe::public_reason(reason).to_owned()
+            hora_core::probe::public_reason(view.last_reason, reason).to_owned()
         }
     });
     let (cause, impacted) = if view.status == MonitorState::Down {

@@ -14,65 +14,168 @@ use crate::config::{DnsRecord, Parsed, Secret};
 #[test]
 fn public_reason_collapses_detail() {
     // Remote-controlled or config-revealing detail is dropped.
-    assert_eq!(public_reason("HTTP 500: secret stack trace"), "HTTP 500");
     assert_eq!(
-        public_reason("expected 1.2.3.4, got 6.6.6.6"),
+        public_reason(None, "HTTP 500: secret stack trace"),
+        "HTTP 500"
+    );
+    assert_eq!(
+        public_reason(None, "expected 1.2.3.4, got 6.6.6.6"),
         "unexpected DNS answer"
     );
     assert_eq!(
-        public_reason("keyword missing: internal-marker"),
+        public_reason(None, "keyword missing: internal-marker"),
         "content check failed"
     );
     assert_eq!(
-        public_reason("JSON query $.status != ok"),
+        public_reason(None, "JSON query $.status != ok"),
         "content check failed"
     );
     assert_eq!(
-        public_reason("number 0 below min 1"),
+        public_reason(None, "number 0 below min 1"),
         "content check failed"
     );
     assert_eq!(
-        public_reason("number_regex matched nothing: ships (\\d+)"),
+        public_reason(None, "number_regex matched nothing: ships (\\d+)"),
         "content check failed"
     );
     assert_eq!(
-        public_reason("missed scheduled heartbeat (was due 03:00 UTC + 30m grace)"),
+        public_reason(
+            None,
+            "missed scheduled heartbeat (was due 03:00 UTC + 30m grace)"
+        ),
         "missed scheduled heartbeat"
     );
     assert_eq!(
-        public_reason("DNS lookup failed: proto error: io error"),
+        public_reason(None, "DNS lookup failed: proto error: io error"),
         "DNS lookup failed"
     );
     // Unknown text (raw TCP errors, push messages) falls back to generic.
     assert_eq!(
-        public_reason("Connection refused (os error 61)"),
+        public_reason(None, "Connection refused (os error 61)"),
         "check failed"
     );
     // Plugin output (device names, container ids) collapses to a category.
     assert_eq!(
-        public_reason("plugin timed out after 30s"),
+        public_reason(None, "plugin timed out after 30s"),
         "plugin check failed"
     );
     assert_eq!(
-        public_reason("plugin reported critical (exit 2)"),
+        public_reason(None, "plugin reported critical (exit 2)"),
         "plugin check failed"
     );
     // Safe statics pass through verbatim.
-    assert_eq!(public_reason("HTTP 503"), "HTTP 503");
-    assert_eq!(public_reason("request timed out"), "request timed out");
-    assert_eq!(public_reason("no A records found"), "no A records found");
+    assert_eq!(public_reason(None, "HTTP 503"), "HTTP 503");
+    assert_eq!(
+        public_reason(None, "request timed out"),
+        "request timed out"
+    );
+    assert_eq!(
+        public_reason(None, "no A records found"),
+        "no A records found"
+    );
     // A push msg crafted to look like a safe shape must not pass through:
     // the HTTP branch is anchored to a numeric status, the DNS one to the
     // record types the probe queries.
     assert_eq!(
-        public_reason("HTTP looks legit but is a push msg"),
+        public_reason(None, "HTTP looks legit but is a push msg"),
         "check failed"
     );
-    assert_eq!(public_reason("HTTP 99999: nope"), "check failed");
+    assert_eq!(public_reason(None, "HTTP 99999: nope"), "check failed");
     assert_eq!(
-        public_reason("no big deal, just injected records found"),
+        public_reason(None, "no big deal, just injected records found"),
         "check failed"
     );
+}
+
+#[test]
+fn a_stored_kind_decides_the_public_reason_whatever_the_wording() {
+    // The job's own message is never shown, even when it reads like a safe
+    // reason or a status line.
+    assert_eq!(
+        public_reason(Some(FailureKind::Pushed), "HTTP 503"),
+        "check failed"
+    );
+    assert_eq!(
+        public_reason(Some(FailureKind::Pushed), "request timed out"),
+        "check failed"
+    );
+    // Plugin output becomes the category whatever it starts with.
+    assert_eq!(
+        public_reason(Some(FailureKind::Plugin), "/dev/sda1 91% full"),
+        "plugin check failed"
+    );
+    assert_eq!(
+        public_reason(Some(FailureKind::Http), "HTTP 500: secret stack trace"),
+        "HTTP 500"
+    );
+    assert_eq!(
+        public_reason(Some(FailureKind::NoRecords), "no AAAA records found"),
+        "no AAAA records found"
+    );
+    assert_eq!(
+        public_reason(
+            Some(FailureKind::NoHeartbeatYet),
+            "no heartbeat received yet"
+        ),
+        "no heartbeat received yet"
+    );
+    // Codes round-trip; an unknown one is not a kind.
+    for kind in FailureKind::ALL {
+        assert_eq!(FailureKind::from_code(kind.code()), Some(kind));
+    }
+    assert_eq!(FailureKind::from_code("solar_flare"), None);
+}
+
+#[test]
+fn the_kinds_keep_the_public_words_of_the_old_classifier() {
+    // What the probes write, kind and detail: the public page must read the
+    // same with the kind as it did from the wording alone.
+    let produced = [
+        (FailureKind::Timeout, "request timed out"),
+        (FailureKind::ConnectionFailed, "connection failed"),
+        (FailureKind::ConnectionTimedOut, "connection timed out"),
+        (FailureKind::TooManyRedirects, "too many redirects"),
+        (FailureKind::InvalidBody, "invalid response body"),
+        (FailureKind::RequestError, "request error"),
+        (FailureKind::Unresolvable, "could not resolve host"),
+        (FailureKind::Http, "HTTP 502: bad gateway"),
+        (FailureKind::Http, "HTTP 404"),
+        (FailureKind::Content, "keyword missing: marker"),
+        (FailureKind::Content, "keyword present: marker"),
+        (FailureKind::Content, "JSON query $.ok != true"),
+        (FailureKind::Content, "response is not valid JSON"),
+        (FailureKind::Content, "number 3 above max 2"),
+        (FailureKind::DnsMismatch, "expected 1.2.3.4, got 6.6.6.6"),
+        (FailureKind::DnsFailed, "DNS lookup failed: no connections"),
+        (FailureKind::DnsFailed, "resolver setup failed: bad address"),
+        (FailureKind::DnsTimeout, "DNS lookup timed out"),
+        (FailureKind::NoRecords, "no MX records found"),
+        (FailureKind::Ping, "icmp error: host unreachable"),
+        (FailureKind::Ping, "icmp socket unavailable (denied)"),
+        (FailureKind::Plugin, "plugin timed out after 30s"),
+        (FailureKind::Plugin, "exec wait failed: interrupted"),
+        (FailureKind::Ipv4Failing, "IPv4 failing: timeout (IPv6 ok)"),
+        (FailureKind::Ipv6Failing, "IPv6 failing: refused (IPv4 ok)"),
+        (
+            FailureKind::BothFamiliesFailing,
+            "IPv4 and IPv6 failing: a; b",
+        ),
+        (FailureKind::MissingHeartbeat, "missing heartbeat"),
+        (
+            FailureKind::MissedSchedule,
+            "missed scheduled heartbeat (was due 03:00 UTC + 30m grace)",
+        ),
+        (FailureKind::Pushed, "backup failed"),
+        (FailureKind::Other, "Connection refused (os error 61)"),
+        (FailureKind::Other, "no IPv6 address for host"),
+    ];
+    for (kind, detail) in produced {
+        assert_eq!(
+            public_reason(Some(kind), detail),
+            public_reason(None, detail),
+            "{kind:?}: {detail}"
+        );
+    }
 }
 
 #[test]
@@ -108,7 +211,7 @@ fn millis_saturates() {
 
 #[test]
 fn a_down_outcome_is_stored_as_down() {
-    let down = Outcome::down("x".to_owned());
+    let down = Outcome::down(FailureKind::Other, "x".to_owned());
     assert_eq!(down.status, CheckStatus::Down);
     assert!(!down.is_up() && !down.is_degraded());
 }
@@ -146,7 +249,7 @@ fn dns_record_types_map_and_stay_public() {
     for record in DnsRecord::ALL {
         assert_eq!(record_type(record).to_string(), record.as_str());
         let reason = format!("no {} records found", record_type(record));
-        assert_eq!(public_reason(&reason), reason);
+        assert_eq!(public_reason(None, &reason), reason);
     }
 }
 
@@ -325,6 +428,7 @@ fn outcome(up: bool, latency_ms: Option<i64>, error: Option<&str>) -> Outcome {
         latency_ms,
         status_code: None,
         error: error.map(str::to_owned),
+        reason: error.map(|_| FailureKind::Other),
         snapshot: None,
     }
 }
@@ -436,15 +540,18 @@ fn snapshot_renders_status_headers_and_body_bounded() {
 #[test]
 fn public_reason_collapses_dual_stack_detail() {
     assert_eq!(
-        public_reason("IPv6 failing: Connection refused (os error 61) (IPv4 ok)"),
+        public_reason(
+            None,
+            "IPv6 failing: Connection refused (os error 61) (IPv4 ok)"
+        ),
         "IPv6 failing (IPv4 ok)"
     );
     assert_eq!(
-        public_reason("IPv4 failing: no IPv4 address for host (IPv6 ok)"),
+        public_reason(None, "IPv4 failing: no IPv4 address for host (IPv6 ok)"),
         "IPv4 failing (IPv6 ok)"
     );
     assert_eq!(
-        public_reason("IPv4 and IPv6 failing: timeout; refused"),
+        public_reason(None, "IPv4 and IPv6 failing: timeout; refused"),
         "IPv4 and IPv6 failing"
     );
 }

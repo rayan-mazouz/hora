@@ -127,7 +127,7 @@ impl<'a> Visibility<'a> {
             incident.error = incident
                 .error
                 .as_deref()
-                .map(|reason| hora_core::probe::public_reason(reason).to_owned());
+                .map(|reason| hora_core::probe::public_reason(incident.reason, reason).to_owned());
             incident.snapshot = None;
         }
         if !self.published.contains(id) {
@@ -226,6 +226,7 @@ mod tests {
             cause: Some("B Private".to_owned()),
             impacted: Some(r#"["A Private","B Private","Open"]"#.to_owned()),
             error: Some("HTTP 503: stack trace".to_owned()),
+            reason: None,
             note: Some("fiber cut".to_owned()),
             snapshot: Some("HTTP/2 503".to_owned()),
             event: Some("deploy api v2.3, 3m before".to_owned()),

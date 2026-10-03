@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt as _;
 
 use crate::config::Monitor;
-use crate::probe::Outcome;
+use crate::probe::{FailureKind, Outcome};
 
 /// Cap on the output kept from a plugin (the first line becomes the
 /// message). The pipe keeps being drained beyond it, so a chatty but healthy
@@ -43,11 +43,14 @@ const OUTPUT_GRACE: Duration = Duration::from_millis(500);
 pub(crate) async fn run(exec_dir: &Path, monitor: &Monitor) -> Outcome {
     let Some(name) = monitor.command.first() else {
         // Config validation rejects this; defensive only.
-        return Outcome::down("exec monitor has no command".to_owned());
+        return Outcome::down(
+            FailureKind::Plugin,
+            "exec monitor has no command".to_owned(),
+        );
     };
     let program = match resolve(exec_dir, name).await {
         Ok(program) => program,
-        Err(reason) => return Outcome::down(reason),
+        Err(reason) => return Outcome::down(FailureKind::Plugin, reason),
     };
 
     let start = Instant::now();
@@ -74,7 +77,9 @@ pub(crate) async fn run(exec_dir: &Path, monitor: &Monitor) -> Outcome {
     command.process_group(0);
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(err) => return Outcome::down(format!("could not run {name}: {err}")),
+        Err(err) => {
+            return Outcome::down(FailureKind::Plugin, format!("could not run {name}: {err}"));
+        }
     };
     // Declared after `child`, so dropped first: the group is killed while
     // its leader is still unreaped and the id cannot have been reused.
@@ -117,16 +122,16 @@ pub(crate) async fn run(exec_dir: &Path, monitor: &Monitor) -> Outcome {
             let message = first_line(&out).or_else(|| first_line(&err));
             outcome_for(status.code(), message, latency)
         }
-        Ok(Err(error)) => Outcome::down(format!("exec wait failed: {error}")),
+        Ok(Err(error)) => Outcome::down(FailureKind::Plugin, format!("exec wait failed: {error}")),
         Err(_elapsed) => {
             // SIGKILL, not a polite signal: a stuck plugin already had the
             // monitor's whole timeout to finish.
             group.kill();
             let _ = child.kill().await;
-            Outcome::down(format!(
-                "plugin timed out after {}s",
-                monitor.timeout().as_secs()
-            ))
+            Outcome::down(
+                FailureKind::Plugin,
+                format!("plugin timed out after {}s", monitor.timeout().as_secs()),
+            )
         }
     }
 }
@@ -210,18 +215,13 @@ fn first_line(output: &[u8]) -> Option<String> {
 /// by a signal) is down: a crashed check vouches for nothing.
 fn outcome_for(code: Option<i32>, message: Option<String>, latency_ms: i64) -> Outcome {
     match code {
-        Some(0) => Outcome {
-            status: CheckStatus::Up,
-            latency_ms: Some(latency_ms),
-            status_code: None,
-            error: None,
-            snapshot: None,
-        },
+        Some(0) => Outcome::up(false, Some(latency_ms), None),
         Some(1) => Outcome {
             status: CheckStatus::Degraded,
             latency_ms: Some(latency_ms),
             status_code: None,
             error: Some(message.unwrap_or_else(|| "plugin warning (exit 1)".to_owned())),
+            reason: Some(FailureKind::Plugin),
             snapshot: None,
         },
         Some(code) => Outcome {
@@ -231,9 +231,10 @@ fn outcome_for(code: Option<i32>, message: Option<String>, latency_ms: i64) -> O
             error: Some(
                 message.unwrap_or_else(|| format!("plugin reported critical (exit {code})")),
             ),
+            reason: Some(FailureKind::Plugin),
             snapshot: None,
         },
-        None => Outcome::down("plugin killed by a signal".to_owned()),
+        None => Outcome::down(FailureKind::Plugin, "plugin killed by a signal".to_owned()),
     }
 }
 

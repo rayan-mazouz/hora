@@ -212,6 +212,7 @@ mod tests {
             cause: None,
             impacted: None,
             error: Some("connection refused".to_owned()),
+            reason: None,
             note: None,
             snapshot: None,
             event: Some("deploy api v2.3, 3m before".to_owned()),

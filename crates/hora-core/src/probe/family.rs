@@ -1,6 +1,7 @@
 //! Dual-stack probing: run a check over IPv4 and IPv6 separately and combine
 //! the two results.
 
+use super::FailureKind;
 use crate::status::CheckStatus;
 use std::net::IpAddr;
 use std::sync::OnceLock;
@@ -69,14 +70,18 @@ async fn probe_family(monitor: &Monitor, family: Family) -> Outcome {
         // probes share one family-bound client per family.
         Kind::Http => match family_client(family) {
             Ok(client) => http(&client, monitor).await,
-            Err(err) => Outcome::down(format!("could not build probe client: {err}")),
+            Err(err) => Outcome::down(
+                FailureKind::Other,
+                format!("could not build probe client: {err}"),
+            ),
         },
         Kind::Tcp => tcp_family(monitor, family).await,
         Kind::Icmp => icmp_family(monitor, Some(family)).await,
         // Config validation restricts dual_stack to the three kinds above.
-        Kind::Dns | Kind::Push | Kind::Exec => {
-            Outcome::down("dual_stack unsupported for this monitor kind".to_owned())
-        }
+        Kind::Dns | Kind::Push | Kind::Exec => Outcome::down(
+            FailureKind::Other,
+            "dual_stack unsupported for this monitor kind".to_owned(),
+        ),
     }
 }
 
@@ -114,6 +119,7 @@ pub(super) fn combine(v4: &Outcome, v6: &Outcome) -> Outcome {
             },
             status_code: v4.status_code.or(v6.status_code),
             error: None,
+            reason: None,
             snapshot: None,
         },
         (false, true) => one_family_down(Family::V4, v4, v6),
@@ -127,6 +133,7 @@ pub(super) fn combine(v4: &Outcome, v6: &Outcome) -> Outcome {
                 v4.error.as_deref().unwrap_or("unknown error"),
                 v6.error.as_deref().unwrap_or("unknown error")
             )),
+            reason: Some(FailureKind::BothFamiliesFailing),
             snapshot: v4.snapshot.clone().or_else(|| v6.snapshot.clone()),
         },
     }
@@ -145,6 +152,10 @@ fn one_family_down(failed: Family, failure: &Outcome, healthy: &Outcome) -> Outc
             failure.error.as_deref().unwrap_or("unknown error"),
             failed.other().label()
         )),
+        reason: Some(match failed {
+            Family::V4 => FailureKind::Ipv4Failing,
+            Family::V6 => FailureKind::Ipv6Failing,
+        }),
         snapshot: failure.snapshot.clone(),
     }
 }

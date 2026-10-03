@@ -12,6 +12,7 @@ fn check(status: CheckStatus) -> Latest {
         latency_ms: None,
         status,
         error: None,
+        reason: None,
     }
 }
 #[test]

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use askama::Template;
 use chrono::{DateTime, Utc};
+use hora_core::probe::FailureKind;
 use hora_core::status::MonitorState;
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -135,6 +136,10 @@ pub(crate) struct MonitorView {
     /// the *why* behind a degraded/down card without opening the database.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) last_error: Option<String>,
+    /// What kind of failure `last_error` describes, kept to derive the
+    /// public form for the other audiences.
+    #[serde(skip)]
+    pub(crate) last_reason: Option<FailureKind>,
     pub(crate) last_checked: Option<String>,
     #[serde(rename = "uptime_24h_permille")]
     pub(crate) uptime_permille: Option<i64>,

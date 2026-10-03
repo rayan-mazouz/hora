@@ -1,5 +1,6 @@
 //! DNS checks: resolve a record and optionally compare the answer.
 
+use super::FailureKind;
 use crate::status::CheckStatus;
 use std::net::SocketAddr;
 use std::sync::OnceLock;
@@ -31,7 +32,12 @@ pub(super) async fn dns(monitor: &Monitor) -> Outcome {
     let custom = monitor.dns_resolver.as_ref().and_then(Parsed::get).copied();
     let resolver = match resolver_for(custom) {
         Ok(resolver) => resolver,
-        Err(err) => return Outcome::down(format!("resolver setup failed: {err}")),
+        Err(err) => {
+            return Outcome::down(
+                FailureKind::DnsFailed,
+                format!("resolver setup failed: {err}"),
+            );
+        }
     };
 
     let start = Instant::now();
@@ -53,7 +59,10 @@ pub(super) async fn dns(monitor: &Monitor) -> Outcome {
                 .map(|record| record.data.to_string().trim_end_matches('.').to_owned())
                 .collect();
             if answers.is_empty() {
-                return Outcome::down(format!("no {record_type} records found"));
+                return Outcome::down(
+                    FailureKind::NoRecords,
+                    format!("no {record_type} records found"),
+                );
             }
             answers.sort();
             let answer = answers.join(",");
@@ -81,21 +90,20 @@ pub(super) async fn dns(monitor: &Monitor) -> Outcome {
                         latency_ms: Some(latency),
                         status_code: None,
                         error: Some(format!("expected {wanted}, got {answer}")),
+                        reason: Some(FailureKind::DnsMismatch),
                         snapshot: Some(snapshot),
                     };
                 }
             }
 
-            Outcome {
-                status: CheckStatus::up_unless(over_threshold(latency, monitor.degraded_over_ms)),
-                latency_ms: Some(latency),
-                status_code: None,
-                error: None,
-                snapshot: None,
-            }
+            Outcome::up(
+                over_threshold(latency, monitor.degraded_over_ms),
+                Some(latency),
+                None,
+            )
         }
-        Ok(Err(err)) => Outcome::down(format!("DNS lookup failed: {err}")),
-        Err(_elapsed) => Outcome::down("DNS lookup timed out".to_owned()),
+        Ok(Err(err)) => Outcome::down(FailureKind::DnsFailed, format!("DNS lookup failed: {err}")),
+        Err(_elapsed) => Outcome::down(FailureKind::DnsTimeout, "DNS lookup timed out".to_owned()),
     }
 }
 

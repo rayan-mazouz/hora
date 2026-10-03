@@ -7,7 +7,7 @@ use tracing::error;
 
 use crate::config::Monitor;
 use crate::db;
-use crate::probe::Outcome;
+use crate::probe::{FailureKind, Outcome};
 
 /// How often a heartbeat (a push monitor's, or a watched peer's) is expected.
 pub(crate) enum Cadence {
@@ -25,20 +25,28 @@ impl Cadence {
     /// while it is on time. `seen` says whether `since` is a real heartbeat
     /// (or only when one was first expected): only a real one may count for
     /// the run it slightly precedes (see [`cron_due`]).
-    fn overdue(&self, since: i64, seen: bool, now: i64) -> Option<String> {
+    fn overdue(&self, since: i64, seen: bool, now: i64) -> Option<(FailureKind, String)> {
         match self {
             Self::Every(interval_secs) => {
                 let max_gap = i64::try_from(*interval_secs).unwrap_or(i64::MAX);
-                (now - since > max_gap).then(|| "missing heartbeat".to_owned())
+                (now - since > max_gap).then(|| {
+                    (
+                        FailureKind::MissingHeartbeat,
+                        "missing heartbeat".to_owned(),
+                    )
+                })
             }
             Self::Cron { cron, grace_secs } => {
                 let early_ok = seen.then_some(*grace_secs);
                 let due = cron_missed(cron, since, *grace_secs, early_ok, now)?;
                 let due_label = chrono::DateTime::from_timestamp(due, 0)
                     .map_or_else(|| due.to_string(), |dt| dt.format("%H:%M UTC").to_string());
-                Some(format!(
-                    "missed scheduled heartbeat (was due {due_label} + {}m grace)",
-                    grace_secs / 60
+                Some((
+                    FailureKind::MissedSchedule,
+                    format!(
+                        "missed scheduled heartbeat (was due {due_label} + {}m grace)",
+                        grace_secs / 60
+                    ),
                 ))
             }
         }
@@ -150,7 +158,7 @@ enum HeartbeatVerdict {
     /// Never pinged, and the first expected heartbeat is not late yet.
     Unknown,
     /// The heartbeat is overdue, for this reason.
-    Overdue(String),
+    Overdue(FailureKind, String),
     /// On time: the outcome of the latest heartbeat, as pushed.
     OnTime(Outcome),
 }
@@ -167,18 +175,22 @@ fn judge_heartbeat(
     now: i64,
 ) -> HeartbeatVerdict {
     let since = last.map_or(expected_since, |beat| beat.time);
-    if let Some(reason) = cadence.overdue(since, last.is_some(), now) {
-        return HeartbeatVerdict::Overdue(if last.is_some() {
-            reason
+    if let Some((kind, reason)) = cadence.overdue(since, last.is_some(), now) {
+        return if last.is_some() {
+            HeartbeatVerdict::Overdue(kind, reason)
         } else {
-            "no heartbeat received yet".to_owned()
-        });
+            HeartbeatVerdict::Overdue(
+                FailureKind::NoHeartbeatYet,
+                "no heartbeat received yet".to_owned(),
+            )
+        };
     }
     let Some(beat) = last else {
         return HeartbeatVerdict::Unknown;
     };
     HeartbeatVerdict::OnTime(match beat.status {
         CheckStatus::Down => Outcome::down(
+            FailureKind::Pushed,
             beat.error
                 .clone()
                 .unwrap_or_else(|| "push reported down".to_owned()),
@@ -194,6 +206,8 @@ fn judge_heartbeat(
             } else {
                 None
             },
+            reason: (status == CheckStatus::Degraded && beat.error.is_some())
+                .then_some(FailureKind::Pushed),
             snapshot: None,
         },
     })
@@ -225,13 +239,13 @@ pub(crate) async fn heartbeat_outcome_for(
     match judge_heartbeat(cadence, last.as_ref(), expected_since, now) {
         HeartbeatVerdict::Unknown => None,
         HeartbeatVerdict::OnTime(outcome) => Some(outcome),
-        HeartbeatVerdict::Overdue(reason) => {
+        HeartbeatVerdict::Overdue(kind, reason) => {
             // Recorded so the page and history show it; marked as a miss so it
             // never reads as a heartbeat (or as the job's own down).
-            if let Err(err) = db::insert_heartbeat_miss(store, id, &reason).await {
+            if let Err(err) = db::insert_heartbeat_miss(store, id, kind, &reason).await {
                 error!(monitor = %id, "failed to record heartbeat miss: {err:#}");
             }
-            Some(Outcome::down(reason))
+            Some(Outcome::down(kind, reason))
         }
     }
 }
@@ -371,7 +385,7 @@ mod tests {
         // Any of them, once stale, is a missing heartbeat.
         assert!(matches!(
             judge_heartbeat(&every, Some(&beat(900, CheckStatus::Down, Some("x"))), 0, now),
-            HeartbeatVerdict::Overdue(reason) if reason == "missing heartbeat"
+            HeartbeatVerdict::Overdue(_, reason) if reason == "missing heartbeat"
         ));
     }
 
@@ -386,7 +400,7 @@ mod tests {
         // ...then overdue, saying why.
         assert!(matches!(
             judge_heartbeat(&every, None, 1000, 1061),
-            HeartbeatVerdict::Overdue(reason) if reason == "no heartbeat received yet"
+            HeartbeatVerdict::Overdue(_, reason) if reason == "no heartbeat received yet"
         ));
 
         // Scheduled: the first run after it was expected, plus the grace.
@@ -399,7 +413,7 @@ mod tests {
         ));
         assert!(matches!(
             judge_heartbeat(&nightly(), None, since, run + 1801),
-            HeartbeatVerdict::Overdue(_)
+            HeartbeatVerdict::Overdue(..)
         ));
     }
 

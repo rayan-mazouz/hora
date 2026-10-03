@@ -529,7 +529,10 @@ async fn tick_outcome(
         match exec_dir {
             Some(dir) => crate::exec::run(dir, monitor).await,
             // Config validation guarantees the directory; defensive only.
-            None => crate::probe::Outcome::down("HORA_EXEC_DIR is not set".to_owned()),
+            None => crate::probe::Outcome::down(
+                crate::probe::FailureKind::Plugin,
+                "HORA_EXEC_DIR is not set".to_owned(),
+            ),
         }
     } else {
         probe::run(client, monitor).await
@@ -554,6 +557,7 @@ async fn open_incident_record(
         store,
         &monitor.id,
         outcome.error.as_deref(),
+        outcome.reason,
         cause,
         impacted,
         outcome.snapshot.as_deref(),

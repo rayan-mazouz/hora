@@ -10,6 +10,7 @@ async fn incident_page_sanitizes_for_anonymous_and_serves_markdown() {
         "web",
         Some("HTTP 503: secret stack trace"),
         None,
+        None,
         &[],
         Some("HTTP/2 503\n\nsecret body"),
         Some("deploy api v2.3, 3m before"),
@@ -54,9 +55,10 @@ async fn incident_page_sanitizes_for_anonymous_and_serves_markdown() {
 #[tokio::test]
 async fn private_monitor_incident_page_is_hidden_from_anonymous() {
     let (app, store) = test_app_with_pool().await;
-    let id = hora_core::db::insert_incident_start(&store, "intra", None, None, &[], None, None)
-        .await
-        .unwrap();
+    let id =
+        hora_core::db::insert_incident_start(&store, "intra", None, None, None, &[], None, None)
+            .await
+            .unwrap();
 
     // A private monitor's post-mortem answers like a missing page.
     let res = app
@@ -91,6 +93,7 @@ async fn timeline_merges_and_keeps_operator_streams_private() {
         &store,
         "web",
         Some("HTTP 503: secret detail"),
+        None,
         None,
         &[],
         None,
@@ -361,11 +364,20 @@ async fn anonymous_history_fills_its_page_past_private_incidents() {
     let (app, store) = test_app_with_pool().await;
     // One old public incident, buried under more private ones than the
     // page shows.
-    hora_core::db::insert_incident_start(&store, "web", Some("HTTP 503"), None, &[], None, None)
-        .await
-        .unwrap();
+    hora_core::db::insert_incident_start(
+        &store,
+        "web",
+        Some("HTTP 503"),
+        None,
+        None,
+        &[],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     for _ in 0..120 {
-        hora_core::db::insert_incident_start(&store, "intra", None, None, &[], None, None)
+        hora_core::db::insert_incident_start(&store, "intra", None, None, None, &[], None, None)
             .await
             .unwrap();
     }

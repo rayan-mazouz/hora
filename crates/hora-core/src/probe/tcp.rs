@@ -1,6 +1,6 @@
 //! TCP connect checks.
 
-use crate::status::CheckStatus;
+use super::FailureKind;
 use std::time::Instant;
 
 use tokio::net::TcpStream;
@@ -17,11 +17,17 @@ pub(super) async fn tcp(monitor: &Monitor) -> Outcome {
 /// connect to the first address of that family.
 pub(super) async fn tcp_family(monitor: &Monitor, family: Family) -> Outcome {
     let Ok(addrs) = tokio::net::lookup_host(&monitor.target).await else {
-        return Outcome::down("could not resolve host".to_owned());
+        return Outcome::down(
+            FailureKind::Unresolvable,
+            "could not resolve host".to_owned(),
+        );
     };
     match addrs.into_iter().find(|addr| family.matches(addr.ip())) {
         Some(addr) => tcp_connect(monitor, addr).await,
-        None => Outcome::down(format!("no {} address for host", family.label())),
+        None => Outcome::down(
+            FailureKind::Other,
+            format!("no {} address for host", family.label()),
+        ),
     }
 }
 
@@ -30,15 +36,16 @@ async fn tcp_connect<A: tokio::net::ToSocketAddrs>(monitor: &Monitor, addr: A) -
     match tokio::time::timeout(monitor.timeout(), TcpStream::connect(addr)).await {
         Ok(Ok(_stream)) => {
             let latency = millis(start.elapsed());
-            Outcome {
-                status: CheckStatus::up_unless(over_threshold(latency, monitor.degraded_over_ms)),
-                latency_ms: Some(latency),
-                status_code: None,
-                error: None,
-                snapshot: None,
-            }
+            Outcome::up(
+                over_threshold(latency, monitor.degraded_over_ms),
+                Some(latency),
+                None,
+            )
         }
-        Ok(Err(err)) => Outcome::down(err.to_string()),
-        Err(_elapsed) => Outcome::down("connection timed out".to_owned()),
+        Ok(Err(err)) => Outcome::down(FailureKind::Other, err.to_string()),
+        Err(_elapsed) => Outcome::down(
+            FailureKind::ConnectionTimedOut,
+            "connection timed out".to_owned(),
+        ),
     }
 }

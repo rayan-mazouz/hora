@@ -1,6 +1,6 @@
 //! ICMP echo (ping) checks.
 
-use crate::status::CheckStatus;
+use super::FailureKind;
 use socket2::Type;
 use surge_ping::{
     Client as PingClient, Config as PingConfig, ICMP, PingIdentifier, PingSequence, SurgeError,
@@ -21,10 +21,16 @@ pub(super) async fn icmp(monitor: &Monitor) -> Outcome {
 /// ICMP to the first resolved address - of one specific family when given.
 pub(super) async fn icmp_family(monitor: &Monitor, family: Option<Family>) -> Outcome {
     let Some(addr) = resolve(&monitor.target, family).await else {
-        return Outcome::down(match family {
-            Some(family) => format!("no {} address for host", family.label()),
-            None => "could not resolve host".to_owned(),
-        });
+        return match family {
+            Some(family) => Outcome::down(
+                FailureKind::Other,
+                format!("no {} address for host", family.label()),
+            ),
+            None => Outcome::down(
+                FailureKind::Unresolvable,
+                "could not resolve host".to_owned(),
+            ),
+        };
     };
 
     let kind = if addr.is_ipv4() { ICMP::V4 } else { ICMP::V6 };
@@ -37,9 +43,12 @@ pub(super) async fn icmp_family(monitor: &Monitor, family: Option<Family>) -> Ou
         // Usually a missing privilege: no unprivileged-ping permission and no
         // CAP_NET_RAW. Surface it clearly rather than as a generic failure.
         Err(err) => {
-            return Outcome::down(format!(
-                "icmp socket unavailable ({err}); needs net.ipv4.ping_group_range or CAP_NET_RAW"
-            ));
+            return Outcome::down(
+                FailureKind::Ping,
+                format!(
+                    "icmp socket unavailable ({err}); needs net.ipv4.ping_group_range or CAP_NET_RAW"
+                ),
+            );
         }
     };
 
@@ -48,15 +57,15 @@ pub(super) async fn icmp_family(monitor: &Monitor, family: Option<Family>) -> Ou
     match pinger.ping(PingSequence(0), &[0u8; 16]).await {
         Ok((_packet, rtt)) => {
             let latency = millis(rtt);
-            Outcome {
-                status: CheckStatus::up_unless(over_threshold(latency, monitor.degraded_over_ms)),
-                latency_ms: Some(latency),
-                status_code: None,
-                error: None,
-                snapshot: None,
-            }
+            Outcome::up(
+                over_threshold(latency, monitor.degraded_over_ms),
+                Some(latency),
+                None,
+            )
         }
-        Err(SurgeError::Timeout { .. }) => Outcome::down("request timed out".to_owned()),
-        Err(err) => Outcome::down(format!("icmp error: {err}")),
+        Err(SurgeError::Timeout { .. }) => {
+            Outcome::down(FailureKind::Timeout, "request timed out".to_owned())
+        }
+        Err(err) => Outcome::down(FailureKind::Ping, format!("icmp error: {err}")),
     }
 }

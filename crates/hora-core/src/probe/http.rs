@@ -1,5 +1,6 @@
 //! HTTP(S) checks: status, redirects, latency and body assertions.
 
+use super::FailureKind;
 use crate::status::CheckStatus;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -55,18 +56,18 @@ pub(super) async fn http(client: &Client, monitor: &Monitor) -> Outcome {
 
     match tokio::time::timeout(monitor.timeout(), attempt).await {
         Ok(Ok((code, status_ok, head, body, latency))) => {
-            let (up, error) = if !status_ok {
+            let (up, error, reason) = if !status_ok {
                 let snippet = snippet(&body);
                 let detail = if snippet.is_empty() {
                     format!("HTTP {code}")
                 } else {
                     format!("HTTP {code}: {snippet}")
                 };
-                (false, Some(detail))
+                (false, Some(detail), Some(FailureKind::Http))
             } else if let Some(failure) = check_assertions(monitor, &body) {
-                (false, Some(failure))
+                (false, Some(failure), Some(FailureKind::Content))
             } else {
-                (true, None)
+                (true, None, None)
             };
 
             let status = if up {
@@ -79,14 +80,21 @@ pub(super) async fn http(client: &Client, monitor: &Monitor) -> Outcome {
                 latency_ms: Some(latency),
                 status_code: Some(i64::from(code)),
                 error,
+                reason,
                 // The service answered something and the check failed: keep
                 // what it answered for the incident record.
                 snapshot: (!up).then(|| render_snapshot(&head, &body)),
             }
         }
-        Ok(Err(HttpError::TooManyRedirects)) => Outcome::down("too many redirects".to_owned()),
-        Ok(Err(HttpError::Request(err))) => Outcome::down(describe(&err).to_owned()),
-        Err(_elapsed) => Outcome::down("request timed out".to_owned()),
+        Ok(Err(HttpError::TooManyRedirects)) => Outcome::down(
+            FailureKind::TooManyRedirects,
+            "too many redirects".to_owned(),
+        ),
+        Ok(Err(HttpError::Request(err))) => {
+            let (kind, detail) = describe(&err);
+            Outcome::down(kind, detail.to_owned())
+        }
+        Err(_elapsed) => Outcome::down(FailureKind::Timeout, "request timed out".to_owned()),
     }
 }
 
@@ -282,16 +290,16 @@ pub(super) fn with_headers(
 
 /// A concise, URL-free description of a request error. The raw error embeds the
 /// target URL (which may carry credentials), so we categorize instead.
-fn describe(err: &reqwest::Error) -> &'static str {
+fn describe(err: &reqwest::Error) -> (FailureKind, &'static str) {
     if err.is_timeout() {
-        "request timed out"
+        (FailureKind::Timeout, "request timed out")
     } else if err.is_connect() {
-        "connection failed"
+        (FailureKind::ConnectionFailed, "connection failed")
     } else if err.is_redirect() {
-        "too many redirects"
+        (FailureKind::TooManyRedirects, "too many redirects")
     } else if err.is_body() || err.is_decode() {
-        "invalid response body"
+        (FailureKind::InvalidBody, "invalid response body")
     } else {
-        "request error"
+        (FailureKind::RequestError, "request error")
     }
 }

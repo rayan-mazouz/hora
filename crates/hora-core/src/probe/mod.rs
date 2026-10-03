@@ -14,7 +14,7 @@ mod tcp;
 #[cfg(test)]
 mod tests;
 
-pub use reason::public_reason;
+pub use reason::{FailureKind, public_reason};
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -37,6 +37,9 @@ pub struct Outcome {
     pub latency_ms: Option<i64>,
     pub status_code: Option<i64>,
     pub error: Option<String>,
+    /// What kind of failure `error` describes (set with it), stored so the
+    /// public page can show a safe category (see [`public_reason`]).
+    pub reason: Option<FailureKind>,
     /// The failing HTTP response (status line, headers, start of the body),
     /// bounded; only set when the probe got a response back. Stored on the
     /// incident when the down is confirmed.
@@ -56,12 +59,25 @@ impl Outcome {
         self.status == CheckStatus::Degraded
     }
 
-    pub(crate) fn down(error: String) -> Self {
+    pub(crate) fn down(kind: FailureKind, error: String) -> Self {
         Self {
             status: CheckStatus::Down,
             latency_ms: None,
             status_code: None,
             error: Some(error),
+            reason: Some(kind),
+            snapshot: None,
+        }
+    }
+
+    /// The outcome of a passing check: up, or degraded when `slow`.
+    pub(crate) fn up(slow: bool, latency_ms: Option<i64>, status_code: Option<i64>) -> Self {
+        Self {
+            status: CheckStatus::up_unless(slow),
+            latency_ms,
+            status_code,
+            error: None,
+            reason: None,
             snapshot: None,
         }
     }
@@ -107,8 +123,14 @@ async fn probe_once(client: &Client, monitor: &Monitor) -> Outcome {
         // Push monitors are evaluated from stored heartbeats, exec monitors by
         // the exec module - both routed by the scheduler before reaching here;
         // these arms are defensive only.
-        Kind::Push => Outcome::down("push monitor has no active probe".to_owned()),
-        Kind::Exec => Outcome::down("exec monitor is not a network probe".to_owned()),
+        Kind::Push => Outcome::down(
+            FailureKind::Other,
+            "push monitor has no active probe".to_owned(),
+        ),
+        Kind::Exec => Outcome::down(
+            FailureKind::Other,
+            "exec monitor is not a network probe".to_owned(),
+        ),
     }
 }
 

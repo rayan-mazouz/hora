@@ -8,6 +8,7 @@ use super::retention::{
 use super::*;
 use crate::SECONDS_PER_DAY;
 use crate::config::Config;
+use crate::probe::FailureKind;
 use crate::status::CheckStatus;
 
 #[tokio::test]
@@ -57,6 +58,56 @@ async fn insert(store: &Store, id: &str, time: i64, status: i64, latency: Option
     .execute(store.sqlx())
     .await
     .expect("insert check");
+}
+
+#[tokio::test]
+async fn the_failure_kind_is_stored_with_its_detail() {
+    let store = Store::in_memory().await;
+    let outcome =
+        crate::probe::Outcome::down(FailureKind::Content, "keyword missing: x".to_owned());
+    insert_check(&store, "m", &outcome).await.unwrap();
+    insert_push_at(&store, "m", CheckStatus::Down, None, Some("disk full"), 1)
+        .await
+        .unwrap();
+    // A row from before the column (NULL), and one from a newer version.
+    sqlx::query("INSERT INTO checks (time, monitor_id, status, error) VALUES (2, 'm', 0, 'x')")
+        .execute(store.sqlx())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO checks (time, monitor_id, status, error, reason) \
+         VALUES (3, 'm', 0, 'x', 'solar_flare')",
+    )
+    .execute(store.sqlx())
+    .await
+    .unwrap();
+
+    let rows = recent_checks(&store, "m", 10).await.unwrap();
+    let kinds: Vec<_> = rows.iter().map(|row| row.reason).collect();
+    assert_eq!(
+        kinds,
+        [
+            Some(FailureKind::Content),
+            Some(FailureKind::Other),
+            None,
+            Some(FailureKind::Pushed)
+        ]
+    );
+
+    let id = insert_incident_start(
+        &store,
+        "m",
+        Some("HTTP 500: trace"),
+        Some(FailureKind::Http),
+        None,
+        &[],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let incident = incident_by_id(&store, id).await.unwrap().unwrap();
+    assert_eq!(incident.reason, Some(FailureKind::Http));
 }
 
 #[tokio::test]
@@ -119,9 +170,15 @@ async fn explicit_down_push_is_a_heartbeat_but_a_miss_is_not() {
     )
     .await
     .unwrap();
-    insert_heartbeat_miss_at(&store, "job", "missing heartbeat", 300)
-        .await
-        .unwrap();
+    insert_heartbeat_miss_at(
+        &store,
+        "job",
+        FailureKind::MissingHeartbeat,
+        "missing heartbeat",
+        300,
+    )
+    .await
+    .unwrap();
 
     // The newest heartbeat is the explicit down push, message included;
     // the fresher recorded miss is skipped.
@@ -162,9 +219,15 @@ async fn push_replaces_a_same_second_miss_and_never_the_reverse() {
     let store = Store::in_memory().await;
     // The scheduler records a miss, then the late heartbeat lands in the
     // same second: the heartbeat wins, ending the miss streak.
-    insert_heartbeat_miss_at(&store, "job", "missing heartbeat", 100)
-        .await
-        .unwrap();
+    insert_heartbeat_miss_at(
+        &store,
+        "job",
+        FailureKind::MissingHeartbeat,
+        "missing heartbeat",
+        100,
+    )
+    .await
+    .unwrap();
     insert_push_at(&store, "job", CheckStatus::Up, None, None, 100)
         .await
         .unwrap();
@@ -175,9 +238,15 @@ async fn push_replaces_a_same_second_miss_and_never_the_reverse() {
     insert_push_at(&store, "job", CheckStatus::Up, None, None, 200)
         .await
         .unwrap();
-    insert_heartbeat_miss_at(&store, "job", "missing heartbeat", 200)
-        .await
-        .unwrap();
+    insert_heartbeat_miss_at(
+        &store,
+        "job",
+        FailureKind::MissingHeartbeat,
+        "missing heartbeat",
+        200,
+    )
+    .await
+    .unwrap();
     let beat = last_heartbeat(&store, "job").await.unwrap().unwrap();
     assert_eq!((beat.time, beat.status), (200, CheckStatus::Up));
     assert_eq!(
@@ -745,6 +814,7 @@ async fn incidents_open_close_and_prune() {
         "m",
         Some("boom"),
         None,
+        None,
         &["a".to_owned()],
         Some("HTTP/2 503\n\n<html>maintenance</html>"),
         Some("deploy api v2.3, 3m before"),
@@ -785,7 +855,7 @@ async fn incidents_open_close_and_prune() {
     assert!(incident_by_id(&store, 999).await.unwrap().is_none());
 
     // Closed incidents prune by age; open ones never do.
-    let open = insert_incident_start(&store, "m", None, None, &[], None, None)
+    let open = insert_incident_start(&store, "m", None, None, None, &[], None, None)
         .await
         .unwrap();
     prune_incidents(&store, chrono::Utc::now().timestamp() + 1000)
@@ -799,10 +869,10 @@ async fn incidents_open_close_and_prune() {
 #[tokio::test]
 async fn incident_notes_set_clear_and_resolve_last() {
     let store = Store::in_memory().await;
-    let first = insert_incident_start(&store, "m", None, None, &[], None, None)
+    let first = insert_incident_start(&store, "m", None, None, None, &[], None, None)
         .await
         .unwrap();
-    let second = insert_incident_start(&store, "m", None, None, &[], None, None)
+    let second = insert_incident_start(&store, "m", None, None, None, &[], None, None)
         .await
         .unwrap();
 

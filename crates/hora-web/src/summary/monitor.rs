@@ -140,9 +140,10 @@ pub(crate) fn build_monitor_view(
             if visibility.detailed(&monitor.id) {
                 reason.to_owned()
             } else {
-                hora_core::probe::public_reason(reason).to_owned()
+                hora_core::probe::public_reason(latest.and_then(|l| l.reason), reason).to_owned()
             }
         }),
+        last_reason: latest.and_then(|l| l.reason),
         last_checked: latest.and_then(|l| iso(l.time)),
         uptime_permille,
         uptime_label: uptime_permille.map(hora_core::fmt::permille),

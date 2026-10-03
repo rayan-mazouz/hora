@@ -2,7 +2,7 @@
 
 use super::Store;
 
-use crate::probe::Outcome;
+use crate::probe::{FailureKind, Outcome};
 use crate::status::{CheckStatus, MonitorState};
 
 /// Latest stored check for a monitor.
@@ -13,6 +13,9 @@ pub struct Latest {
     pub status: CheckStatus,
     /// Failure reason (or response snippet) when the check was not up.
     pub error: Option<String>,
+    /// What kind of failure `error` describes; `None` on rows written before
+    /// the kind was stored.
+    pub reason: Option<FailureKind>,
 }
 
 /// Where a check row came from (the `checks.source` column).
@@ -44,6 +47,7 @@ struct CheckRow<'a> {
     latency_ms: Option<i64>,
     status_code: Option<i64>,
     error: Option<&'a str>,
+    reason: Option<FailureKind>,
     source: CheckSource,
 }
 
@@ -56,16 +60,17 @@ struct CheckRow<'a> {
 /// is a no-op, and a miss must not erase the push it raced with.
 async fn insert_check_row(store: &Store, row: CheckRow<'_>) -> sqlx::Result<()> {
     let sql = if row.source == CheckSource::Push {
-        "INSERT INTO checks (time, monitor_id, status, latency_ms, status_code, error, source) \
-         VALUES (?, ?, ?, ?, ?, ?, ?) \
+        "INSERT INTO checks \
+            (time, monitor_id, status, latency_ms, status_code, error, reason, source) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(monitor_id, time) DO UPDATE SET \
             status = excluded.status, latency_ms = excluded.latency_ms, \
             status_code = excluded.status_code, error = excluded.error, \
-            source = excluded.source"
+            reason = excluded.reason, source = excluded.source"
     } else {
         "INSERT OR IGNORE INTO checks \
-            (time, monitor_id, status, latency_ms, status_code, error, source) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)"
+            (time, monitor_id, status, latency_ms, status_code, error, reason, source) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     };
     sqlx::query(sql)
         .bind(row.time)
@@ -74,6 +79,7 @@ async fn insert_check_row(store: &Store, row: CheckRow<'_>) -> sqlx::Result<()> 
         .bind(row.latency_ms)
         .bind(row.status_code)
         .bind(row.error)
+        .bind(row.reason.map(FailureKind::code))
         .bind(row.source.as_str())
         .execute(store.sqlx())
         .await?;
@@ -95,6 +101,7 @@ pub async fn insert_check(store: &Store, monitor_id: &str, outcome: &Outcome) ->
             latency_ms: outcome.latency_ms,
             status_code: outcome.status_code,
             error: outcome.error.as_deref(),
+            reason: outcome.reason,
             source: CheckSource::Probe,
         },
     )
@@ -111,14 +118,23 @@ pub async fn insert_check(store: &Store, monitor_id: &str, outcome: &Outcome) ->
 pub async fn insert_heartbeat_miss(
     store: &Store,
     monitor_id: &str,
+    kind: FailureKind,
     reason: &str,
 ) -> sqlx::Result<()> {
-    insert_heartbeat_miss_at(store, monitor_id, reason, chrono::Utc::now().timestamp()).await
+    insert_heartbeat_miss_at(
+        store,
+        monitor_id,
+        kind,
+        reason,
+        chrono::Utc::now().timestamp(),
+    )
+    .await
 }
 
 pub(super) async fn insert_heartbeat_miss_at(
     store: &Store,
     monitor_id: &str,
+    kind: FailureKind,
     reason: &str,
     time: i64,
 ) -> sqlx::Result<()> {
@@ -131,6 +147,7 @@ pub(super) async fn insert_heartbeat_miss_at(
             latency_ms: None,
             status_code: None,
             error: Some(reason),
+            reason: Some(kind),
             source: CheckSource::Miss,
         },
     )
@@ -178,6 +195,8 @@ pub(super) async fn insert_push_at(
             latency_ms,
             status_code: None,
             error: message,
+            // The job's own words: free text, never shown publicly.
+            reason: message.map(|_| FailureKind::Pushed),
             source: CheckSource::Push,
         },
     )
@@ -196,7 +215,7 @@ pub async fn recent_checks(
     limit: i64,
 ) -> sqlx::Result<Vec<Latest>> {
     sqlx::query_as::<_, Latest>(
-        "SELECT time, latency_ms, status, error FROM checks \
+        "SELECT time, latency_ms, status, error, reason FROM checks \
          WHERE monitor_id = ? ORDER BY time DESC LIMIT ?",
     )
     .bind(monitor_id)
