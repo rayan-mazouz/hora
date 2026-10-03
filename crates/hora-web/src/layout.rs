@@ -33,6 +33,7 @@ pub(crate) const REFRESH_SECS: std::ops::RangeInclusive<u16> = 10..=3600;
 
 /// The page chrome handed to every HTML template (as `chrome`), used by
 /// `base.html` and its partials.
+#[derive(Clone)]
 pub(crate) struct Chrome {
     /// The operator's name (`[page].title`), the sign in the header.
     pub(crate) site: String,
@@ -88,6 +89,8 @@ pub(crate) enum Hole {
     Live,
     /// The query in-site links carry.
     Query,
+    /// The same, to follow a link's own query: `&token=...`, or nothing.
+    QueryMore,
     /// The theme switch's link.
     ThemeHref,
     /// The theme switch's label.
@@ -97,12 +100,13 @@ pub(crate) enum Hole {
 }
 
 impl Hole {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::ThemeAttr,
         Self::Scheme,
         Self::Refresh,
         Self::Live,
         Self::Query,
+        Self::QueryMore,
         Self::ThemeHref,
         Self::ThemeLabel,
         Self::ThemeInput,
@@ -238,6 +242,11 @@ impl PerRequest {
                 })
                 .unwrap_or_default(),
             Hole::Query => self.q.replace('&', "&amp;"),
+            Hole::QueryMore => self
+                .q
+                .strip_prefix('?')
+                .map(|rest| format!("&amp;{}", rest.replace('&', "&amp;")))
+                .unwrap_or_default(),
             Hole::ThemeHref => self.theme_href.replace('&', "&amp;"),
             Hole::ThemeLabel => self.theme_label.to_owned(),
             Hole::ThemeInput => self
@@ -312,6 +321,11 @@ impl Chrome {
 
     pub(crate) fn q(&self) -> Cow<'_, str> {
         self.hole(Hole::Query)
+    }
+
+    /// [`Self::q`] for a link that has a query of its own.
+    pub(crate) fn q_more(&self) -> Cow<'_, str> {
+        self.hole(Hole::QueryMore)
     }
 
     pub(crate) fn theme_attr(&self) -> Cow<'_, str> {
@@ -573,7 +587,8 @@ mod tests {
         let page = |chrome: &Chrome| {
             format!(
                 "<html{}><meta content=\"{}\">{}<nav>{}<a href=\"/h{}\">h</a>\
-                 <a href=\"{}\">{}</a></nav><form>{}</form><a href=\"/m/x{}\">x</a></html>",
+                 <a href=\"{}\">{}</a></nav><form>{}</form><a href=\"/m/x{}\">x</a>\
+                 <a href=\"/r?group=g{}\">r</a></html>",
                 chrome.theme_attr(),
                 chrome.scheme(),
                 chrome.refresh_meta(),
@@ -583,6 +598,7 @@ mod tests {
                 chrome.theme_label(),
                 chrome.theme_input(),
                 chrome.q(),
+                chrome.q_more(),
             )
         };
         let cached = Spliced::new(page(&chrome("/").cached()));

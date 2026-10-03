@@ -27,9 +27,9 @@ pub(crate) struct ReportTemplate {
     /// The months around this one (`2026-04`, label), when there is one.
     pub(crate) prev: Option<(String, String)>,
     pub(crate) next: Option<(String, String)>,
-    /// The query of the month links: the viewer's token and theme, and the
-    /// group of a scoped report.
-    pub(crate) month_query: String,
+    /// The month links' own query: `?group=X` on a scoped report, else
+    /// empty (the viewer's token and theme follow it, spliced per request).
+    pub(crate) group_query: String,
 }
 
 /// The month at a glance.

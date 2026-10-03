@@ -5,7 +5,7 @@
 {% block body_class %} class="report"{% endblock %}
 {% block header %}
 <div class="toolbar">
-<nav class="nav" aria-label="Months">{% if let Some((month, name)) = prev %}<a class="btn quiet" href="/report/{{ month }}{{ month_query }}">{{ name }}</a>{% endif %}<span>{{ label }}</span>{% if let Some((month, name)) = next %}<a class="btn quiet" href="/report/{{ month }}{{ month_query }}">{{ name }}</a>{% endif %}</nav>
+<nav class="nav" aria-label="Months">{% if let Some((month, name)) = prev %}<a class="btn quiet" href="/report/{{ month }}{% if group_query.is_empty() %}{{ chrome.q()|safe }}{% else %}{{ group_query }}{{ chrome.q_more()|safe }}{% endif %}">{{ name }}</a>{% endif %}<span>{{ label }}</span>{% if let Some((month, name)) = next %}<a class="btn quiet" href="/report/{{ month }}{% if group_query.is_empty() %}{{ chrome.q()|safe }}{% else %}{{ group_query }}{{ chrome.q_more()|safe }}{% endif %}">{{ name }}</a>{% endif %}</nav>
 <span class="tools"><a class="btn quiet" href="/{{ chrome.q()|safe }}">Status page</a><span>{% call m::icon("print") %}{% endcall %} Print or save as PDF from your browser</span><a class="btn theme-btn" href="{{ chrome.theme_href()|safe }}" aria-label="Theme: {{ chrome.theme_label()|safe }}. Change theme">{% call m::icon("sun") %}{% endcall %}<span class="lbl">{{ chrome.theme_label()|safe }}</span></a></span>
 </div>
 {%- endblock %}

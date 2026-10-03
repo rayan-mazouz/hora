@@ -79,6 +79,10 @@ pub struct AppState {
     /// Built monthly reports by month (audience-independent: rows are
     /// filtered per request).
     reports: Arc<Memo<String, hora_core::report::MonthReport>>,
+    /// Rendered report pages, per month, audience and `?group=`: each with
+    /// the built report it was rendered from, so it lives exactly as long
+    /// as that report's memo entry (see `handlers::pages::report_page`).
+    report_pages: Arc<std::sync::Mutex<handlers::pages::ReportPages>>,
     /// Peer-probe clients by proxy, reused across `/api/peer/probe` calls.
     probe_clients: Arc<ProbeClients>,
     /// The scheduler's liveness beacon, written by the monitor loops and read by
@@ -110,6 +114,7 @@ impl AppState {
             refresher: Arc::new(Refresher::default()),
             heatmaps: Arc::new(Memo::new(VIEW_CACHE_TTL)),
             reports: Arc::new(Memo::new(VIEW_CACHE_TTL)),
+            report_pages: Arc::default(),
             probe_clients: Arc::new(ProbeClients::default()),
             last_tick,
             notifier,

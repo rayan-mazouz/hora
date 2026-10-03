@@ -663,6 +663,22 @@ async fn a_token_never_reaches_another_viewers_page() {
     let anonymous = fetch("/status/App", None).await;
     assert!(!anonymous.contains("appappappappapp1"), "{anonymous}");
     assert!(!anonymous.contains("Intra"), "{anonymous}");
+
+    // The report is cached the same way: a group's token stays in its own
+    // response, after the report's own `?group=` in the month links.
+    let month = this_month();
+    let scoped = fetch(
+        &format!("/report/{month}?group=App&token=appappappappapp1"),
+        None,
+    )
+    .await;
+    assert!(
+        scoped.contains("?group=App&amp;token=appappappappapp1\""),
+        "{scoped}"
+    );
+    let again = fetch(&format!("/report/{month}?group=App"), None).await;
+    assert!(!again.contains("appappappappapp1"), "{again}");
+    assert!(again.contains("?group=App\""), "{again}");
 }
 
 /// The page no longer reloads itself unless asked: `?refresh=` within
