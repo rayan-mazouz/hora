@@ -24,11 +24,9 @@ use tracing::{error, info, warn};
 
 use crate::config::{Config, Health, Peer};
 use crate::db;
+use crate::heartbeat::{Cadence, heartbeat_expected_since, heartbeat_outcome_for};
 use crate::notifications::Notifiers;
-use crate::scheduler::{
-    AlertCell, AlertLevel, AlertState, Cadence, heartbeat_expected_since, heartbeat_outcome_for,
-    silenced,
-};
+use crate::scheduler::{AlertCell, AlertLevel, AlertState, silenced};
 
 /// Floor on the scheduler-liveness tolerance, so a node whose fastest monitor
 /// ticks very frequently is not flagged unhealthy by a momentary scheduling jitter.
