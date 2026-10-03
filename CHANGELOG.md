@@ -189,7 +189,15 @@ check before upgrading.
   12-month aggregate retention answer 400.
 - **`/healthz` answers 503 when the node is degraded** (stalled scheduler,
   broken database), body unchanged - so the image's `HEALTHCHECK`, and any
-  orchestrator probing it, now sees an unhealthy node.
+  orchestrator probing it, now sees an unhealthy node. While the node is
+  still starting (before the scheduler's first tick) that 503 is logged at
+  debug, not as an ERROR line per health check.
+- **Less memory per monitor.** Monitors share their probe client (one per
+  proxy, instead of one per monitor at about 45 KB each), and the daily
+  bars keep numbers instead of a formatted title per day: a node with
+  10,000 monitors idles at 433 MB instead of 679 MB.
+- The WAL file (`<db>-wal`) is truncated back to 64 MiB after a
+  checkpoint; a burst of writes used to leave it at its high-water mark.
 - **Prometheus**: `hora_monitor_up` / `hora_monitor_degraded` are omitted
   while a monitor's status is unknown (they read as down after every
   deploy); `hora_monitor_latency_ms` is typed `gauge`.
@@ -248,6 +256,12 @@ check before upgrading.
 
 ### Fixed
 
+- **Checks were lost at every 6-hourly prune on large databases.** Once
+  the history reached its retention, the prune deleted six hours of checks
+  in one statement that held the write lock for 5 to 10 seconds, so the
+  scheduler's inserts failed with "database is locked". Retention (and the
+  sweep of a removed monitor's history) now deletes five minutes of checks
+  at a time, oldest first, pausing in between.
 - **Group pages leaked operator data**: a group token saw every group's
   deploy markers in the sparklines and the names of other groups' private
   monitors in "caused by" / "impacts". A group audience now names only

@@ -95,7 +95,10 @@ rolled up into an hourly bucket; hourly buckets become daily ones after 90
 days, kept for a year. The daily
 uptime bars keep working beyond the raw retention window, and the database
 never grows forever. Closed incidents age out after a year; expired silences
-are swept too.
+are swept too. The prune runs every 6 hours (the first one 5 minutes after
+start) and deletes five minutes of checks per statement, pausing in
+between, so the checks being recorded never wait on it. The WAL file
+(`<db>-wal`) is truncated back to 64 MiB after each checkpoint.
 
 ### Removed monitors
 
