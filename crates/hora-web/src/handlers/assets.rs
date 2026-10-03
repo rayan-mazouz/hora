@@ -1,13 +1,15 @@
 //! The compiled-in static assets: the one stylesheet, the brand fonts, the
-//! mark and the favicon. Every page links them with a `?v=` content hash,
+//! mark, the favicon and the home-screen icons, plus the web app manifest. Every page links them with a `?v=` content hash,
 //! so they are served `immutable`: a new build changes the hash, never the
 //! bytes behind an old URL.
 
 use std::sync::LazyLock;
 
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+
+use crate::AppState;
 
 /// The favicon, also served at the conventional `/favicon.svg`.
 pub(crate) const FAVICON_SVG: &str = include_str!("../../assets/favicon.svg");
@@ -22,6 +24,11 @@ const BOREL: &[u8] = include_bytes!("../../assets/fonts/BorelDisplay-Regular.wof
 /// Mona Sans Mono: "Mona" is a Reserved Font Name under the OFL, so the file
 /// ships exactly as released (not subset, converted or renamed).
 const MONA_SANS_MONO: &[u8] = include_bytes!("../../assets/fonts/MonaSansMono.woff2");
+/// The home-screen icons: the brand's maskable mark (full-bleed petrol, the
+/// owl inside the safe zone), rendered to PNG as the platforms want it.
+const ICON_192: &[u8] = include_bytes!("../../assets/icon-192.png");
+const ICON_512: &[u8] = include_bytes!("../../assets/icon-512.png");
+const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../../assets/apple-touch-icon.png");
 
 /// Every binary asset by its path under `/assets/`, with its media type.
 const BINARY: &[(&str, &[u8], &str)] = &[
@@ -31,6 +38,9 @@ const BINARY: &[(&str, &[u8], &str)] = &[
     ("fonts/MonaSansMono.woff2", MONA_SANS_MONO, "font/woff2"),
     ("mark.svg", MARK_SVG.as_bytes(), "image/svg+xml"),
     ("favicon.svg", FAVICON_SVG.as_bytes(), "image/svg+xml"),
+    ("icon-192.png", ICON_192, "image/png"),
+    ("icon-512.png", ICON_512, "image/png"),
+    ("apple-touch-icon.png", APPLE_TOUCH_ICON, "image/png"),
 ];
 
 /// A short hash of every asset's bytes: the `?v=` cache buster. FNV-1a, so
@@ -90,6 +100,54 @@ pub(crate) async fn favicon() -> impl IntoResponse {
         ],
         FAVICON_SVG,
     )
+}
+
+/// `GET /apple-touch-icon.png`, where iOS looks when a page names none.
+pub(crate) async fn apple_touch_icon() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        APPLE_TOUCH_ICON,
+    )
+}
+
+/// `GET /manifest.webmanifest`: what a phone needs to put the status page on
+/// its home screen as an app - the operator's name, the owl, the ground
+/// colour - opening on the status page, standalone. The pages run no script,
+/// so there is no service worker: the app shows the live page, never a
+/// stale copy.
+pub(crate) async fn manifest(State(state): State<AppState>) -> Response {
+    let title = state.config.borrow().page.title.clone();
+    let icon = |size: u32, purpose: &str| {
+        serde_json::json!({
+            "src": format!("/assets/icon-{size}.png?v={}", *ASSET_VERSION),
+            "sizes": format!("{size}x{size}"),
+            "type": "image/png",
+            "purpose": purpose,
+        })
+    };
+    let body = serde_json::json!({
+        "name": format!("{title} status"),
+        "short_name": title,
+        "description": format!("Live status of {title}."),
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#F2F0EA",
+        "theme_color": "#0E5E68",
+        "icons": [icon(192, "any"), icon(512, "any"), icon(512, "maskable")],
+    });
+    (
+        [
+            (header::CONTENT_TYPE, "application/manifest+json"),
+            // The title can change with a config reload.
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        body.to_string(),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

@@ -698,3 +698,34 @@ async fn refresh_is_off_by_default_and_bounded_when_asked() {
     // The shared render was not touched by the kiosk's request.
     assert!(!page("/").await.contains("http-equiv=\"refresh\""));
 }
+
+/// A phone can put the status page on its home screen: the manifest names
+/// the operator's page and points at icons that are served.
+#[tokio::test]
+async fn the_page_can_go_on_a_home_screen() {
+    let app = test_app().await;
+    let page = body_text(app.clone().oneshot(get("/")).await.unwrap()).await;
+    assert!(
+        page.contains("<link rel=\"manifest\" href=\"/manifest.webmanifest\">"),
+        "{page}"
+    );
+    assert!(page.contains("rel=\"apple-touch-icon\""), "{page}");
+
+    let res = app
+        .clone()
+        .oneshot(get("/manifest.webmanifest"))
+        .await
+        .unwrap();
+    assert_eq!(res.headers()["content-type"], "application/manifest+json");
+    let manifest: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+    assert_eq!(manifest["display"], "standalone");
+    assert_eq!(manifest["start_url"], "/");
+    for icon in manifest["icons"].as_array().unwrap() {
+        let src = icon["src"].as_str().unwrap();
+        let res = app.clone().oneshot(get(src)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{src}");
+        assert_eq!(res.headers()["content-type"], "image/png");
+    }
+    let res = app.oneshot(get("/apple-touch-icon.png")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
