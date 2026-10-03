@@ -1326,9 +1326,9 @@ async fn daily_cache_equals_daily_all_as_roll_ups_and_days_advance() {
                 .collect();
             assert_eq!(got, want, "step {step}, {id}");
         }
-        // Hours of new checks, rolled up on some steps only, and a step
-        // that crosses midnight.
-        let stride = [1800, 3 * 3600, 600, 20 * 3600][step % 4];
+        // Hours of new checks, rolled up on some steps only, a step inside
+        // the settled tail's lag, and a step that crosses midnight.
+        let stride = [1800, 3 * 3600, 90, 600, 20 * 3600][step % 5];
         seed_checks(&store, &["a", "b"], now, now + stride, 300).await;
         now += stride;
         if step % 2 == 0 {

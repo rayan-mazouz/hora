@@ -442,6 +442,13 @@ pub struct DailyCache {
     start: i64,
     end: i64,
     days: HashMap<String, BTreeMap<i64, DayCounts>>,
+    /// Settled raw rows `[tail_start, tail_end)` above the roll-up frontier
+    /// (older than [`TAIL_LAG_SECS`]), summed per day: a refresh then reads
+    /// the last minute of raw checks instead of everything since the
+    /// frontier (up to an hour and five minutes of every monitor).
+    tail_start: i64,
+    tail_end: i64,
+    tail: HashMap<String, BTreeMap<i64, DayCounts>>,
 }
 
 impl DailyCache {
@@ -479,7 +486,7 @@ impl DailyCache {
             *self = Self {
                 start: first_day,
                 end: first_day,
-                days: HashMap::new(),
+                ..Self::default()
             };
         }
         // Whole days slid out of the window.
@@ -503,9 +510,33 @@ impl DailyCache {
             self.end = cached_end;
         }
 
+        if self.tail_start != frontier || self.tail_end < frontier {
+            self.tail_start = frontier;
+            self.tail_end = frontier;
+            self.tail = HashMap::new();
+        }
+        let settled = (until - TAIL_LAG_SECS).max(self.tail_end);
+        if self.tail_end < settled {
+            // `read_raw_days` bounds are inclusive.
+            for (id, day, counts) in read_raw_days(store, self.tail_end, settled - 1).await? {
+                self.tail
+                    .entry(id)
+                    .or_default()
+                    .entry(day)
+                    .or_default()
+                    .add(counts);
+            }
+            self.tail_end = settled;
+        }
         let mut sums = self.days.clone();
+        for (id, days) in &self.tail {
+            let into = sums.entry(id.clone()).or_default();
+            for (&day, &counts) in days {
+                into.entry(day).or_default().add(counts);
+            }
+        }
         let head = hourly_days(store, since, first_day.min(frontier)).await?;
-        let raw = read_raw_days(store, frontier, until).await?;
+        let raw = read_raw_days(store, self.tail_end, until).await?;
         for (id, day, counts) in head.into_iter().chain(raw) {
             sums.entry(id)
                 .or_default()
