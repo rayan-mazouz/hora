@@ -353,6 +353,36 @@ async fn an_assertion_on_a_cut_body_says_so() {
 }
 
 #[tokio::test]
+async fn compressed_bodies_are_decoded_before_the_assertions() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    // gzip("all systems operational"), sent whatever the request accepted.
+    const GZIP: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\x4b\xcc\xc9\x51\x28\xae\x2c\
+        \x2e\x49\xcd\x2d\x56\xc8\x2f\x48\x2d\x4a\x2c\xc9\xcc\xcf\x4b\xcc\x01\x00\x18\x3a\x50\x79\
+        \x17\x00\x00\x00";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = socket.read(&mut buf).await;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            GZIP.len()
+        );
+        socket.write_all(head.as_bytes()).await.unwrap();
+        socket.write_all(GZIP).await.unwrap();
+    });
+    let client = crate::http::probe_client(None).unwrap();
+    let mut monitor = http_monitor(&format!("http://{addr}/"));
+    spec_mut(&mut monitor).keyword = Some(KeywordAssert {
+        text: "operational".to_owned(),
+        invert: false,
+    });
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert!(outcome.is_up(), "{:?}", outcome.error);
+}
+
+#[tokio::test]
 async fn transport_failures_name_their_cause() {
     let client = crate::http::probe_client(None).unwrap();
     // Plain HTTP where TLS was expected: rustls names the problem.
