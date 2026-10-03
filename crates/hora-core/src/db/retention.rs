@@ -2,6 +2,7 @@
 //! every table out, and sweeping the rows of monitors removed from the config.
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
 
 use super::Store;
 
@@ -242,17 +243,14 @@ pub async fn downsample_daily(store: &Store, cutoff: i64) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// Prune old hourly aggregates beyond the retention period.
+/// Prune old hourly aggregates beyond the retention period, an hour of
+/// buckets per statement (see [`delete_sliced`]).
 ///
 /// # Errors
 ///
 /// Returns an error if the deletion fails.
-pub async fn prune_hourly(store: &Store, cutoff: i64) -> sqlx::Result<()> {
-    sqlx::query("DELETE FROM checks_hourly WHERE hour < ?")
-        .bind(cutoff)
-        .execute(store.sqlx())
-        .await?;
-    Ok(())
+pub async fn prune_hourly(store: &Store, cutoff: i64, pause: Duration) -> sqlx::Result<()> {
+    delete_sliced(store, HOURLY, None, cutoff, 3600, pause).await
 }
 
 /// Prune old daily aggregates beyond the retention period.
@@ -270,7 +268,7 @@ pub async fn prune_daily(store: &Store, cutoff: i64) -> sqlx::Result<()> {
 
 /// Downsample old history and age the aggregates out. Failures are logged and
 /// non-fatal: the retention pruning in [`prune`] still runs.
-async fn roll_up_history(store: &Store, now: i64) {
+async fn roll_up_history(store: &Store, now: i64, pause: Duration) {
     // Downsample before any deletion: every ended hour rolls up into an hourly
     // bucket, hourly buckets older than 90 days into daily ones. Each bucket is
     // written exactly once (see `downsample_hourly`), so the aggregates survive
@@ -287,7 +285,7 @@ async fn roll_up_history(store: &Store, now: i64) {
     // only hours already rolled up into a *complete* daily bucket are dropped),
     // daily beyond a year.
     let hourly_prune_cutoff = (daily_cutoff / 86400) * 86400;
-    if let Err(err) = prune_hourly(store, hourly_prune_cutoff).await {
+    if let Err(err) = prune_hourly(store, hourly_prune_cutoff, pause).await {
         tracing::warn!("hourly prune failed: {err}");
     }
     let yearly_cutoff = now - AGGREGATE_RETENTION_DAYS * SECONDS_PER_DAY;
@@ -318,24 +316,26 @@ async fn roll_up_history(store: &Store, now: i64) {
 }
 
 pub(crate) async fn prune(store: &Store, config: &Config) -> anyhow::Result<()> {
-    prune_with(store, config, false).await
+    prune_with(store, config, false, ONLINE_SLICE_PAUSE).await
 }
 
 /// [`prune`], deleting the rows of removed monitors at once when
 /// `purge_removed` (the explicit `hora compact --purge-removed`) instead of
-/// after their grace period.
+/// after their grace period. `pause` is the breather between two delete
+/// slices (see [`delete_sliced`]): zero offline, where no writer waits.
 pub(super) async fn prune_with(
     store: &Store,
     config: &Config,
     purge_removed: bool,
+    pause: Duration,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
 
-    roll_up_history(store, now).await;
+    roll_up_history(store, now, pause).await;
 
     // Trim each monitor's history to its retention window. Monitors are grouped
-    // by cutoff (most share the default), so this is one DELETE per distinct
-    // retention rather than one per monitor.
+    // by cutoff (most share the default), so this is one sliced delete per
+    // distinct retention rather than one per monitor.
     let mut ids_by_cutoff: HashMap<i64, Vec<&str>> = HashMap::new();
     for monitor in &config.monitors {
         let retention = i64::from(monitor.retention_days(config.alerts.default_retention_days));
@@ -356,23 +356,130 @@ pub(super) async fn prune_with(
     }
     for (cutoff, ids) in ids_by_cutoff {
         let ids = serde_json::to_string(&ids)?;
-        sqlx::query(
-            "DELETE FROM checks WHERE time < ? \
-             AND monitor_id IN (SELECT value FROM json_each(?))",
-        )
-        .bind(cutoff)
-        .bind(&ids)
-        .execute(store.sqlx())
-        .await?;
+        delete_sliced(store, CHECKS, Some(&ids), cutoff, PRUNE_SLICE_SECS, pause).await?;
     }
 
-    delete_orphans(store, config, now, purge_removed).await?;
+    delete_orphans(store, config, now, purge_removed, pause).await?;
 
     // Keep the planner statistics current as the tables grow and the prunes
     // reshape them - same rationale as the call in [`connect`]; cheap unless
     // the data actually drifted.
     sqlx::query("PRAGMA optimize").execute(store.sqlx()).await?;
     Ok(())
+}
+
+/// The time span one retention `DELETE` on `checks` covers. A prune tick
+/// deletes six hours of checks once the retention is reached (1.5M rows at
+/// 700 monitors every 10 s): in one statement that held the write lock for
+/// 5-10 s, past the 5 s busy timeout, so the scheduler's inserts failed with
+/// "database is locked" and those checks were lost. Five minutes is ~21k
+/// rows there, a fraction of a second.
+pub(super) const PRUNE_SLICE_SECS: i64 = 300;
+/// The span of one orphan-sweep `DELETE` on `checks`: a single monitor's
+/// rows, so a day of them (8,640 at a 10 s interval) weighs about what five
+/// minutes of a whole fleet does.
+const ORPHAN_SLICE_SECS: i64 = SECONDS_PER_DAY;
+/// The daemon's breather between two slices that deleted rows. It outlasts
+/// SQLite's longest busy-retry sleep (100 ms), so an insert waiting on the
+/// lock gets it before the next slice takes it again.
+const ONLINE_SLICE_PAUSE: Duration = Duration::from_millis(100);
+
+/// A time-keyed table whose old rows are deleted a slice at a time.
+#[derive(Clone, Copy)]
+pub(super) struct Sliced {
+    table: &'static str,
+    time: &'static str,
+}
+
+pub(super) const CHECKS: Sliced = Sliced {
+    table: "checks",
+    time: "time",
+};
+const HOURLY: Sliced = Sliced {
+    table: "checks_hourly",
+    time: "hour",
+};
+
+/// Delete the rows of `target` older than `cutoff` - of the monitors in `ids`
+/// (a JSON array), or of all of them with `None` - oldest first, one
+/// `slice_secs` span per statement (see [`delete_oldest_slice`]), sleeping
+/// `pause` after each slice that deleted rows so the scheduler's inserts get
+/// the write lock in between. One big `DELETE` held it for seconds.
+async fn delete_sliced(
+    store: &Store,
+    target: Sliced,
+    ids: Option<&str>,
+    cutoff: i64,
+    slice_secs: i64,
+    pause: Duration,
+) -> sqlx::Result<()> {
+    while let Some(deleted) = delete_oldest_slice(store, target, ids, cutoff, slice_secs).await? {
+        if deleted > 0 && !pause.is_zero() {
+            tokio::time::sleep(pause).await;
+        }
+    }
+    Ok(())
+}
+
+/// Delete one slice: the rows in `[oldest, oldest + slice_secs)` (capped at
+/// `cutoff`), where `oldest` is the oldest row of the monitors concerned.
+/// Returns how many rows went, or `None` once nothing is left below `cutoff`.
+/// Seeking the oldest row each time (an index seek per monitor) skips the
+/// gaps, so a sparse history never costs a statement per empty slice.
+pub(super) async fn delete_oldest_slice(
+    store: &Store,
+    target: Sliced,
+    ids: Option<&str>,
+    cutoff: i64,
+    slice_secs: i64,
+) -> sqlx::Result<Option<u64>> {
+    let Sliced { table, time } = target;
+    // The interpolated names come from the `Sliced` consts, not input.
+    let oldest: Option<i64> = match ids {
+        Some(ids) => {
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT MIN((SELECT MIN({time}) FROM {table} WHERE monitor_id = ids.value)) \
+             FROM json_each(?) AS ids"
+            )))
+            .bind(ids)
+            .fetch_one(store.sqlx())
+            .await?
+        }
+        None => {
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT MIN({time}) FROM {table}"
+            )))
+            .fetch_one(store.sqlx())
+            .await?
+        }
+    };
+    let Some(from) = oldest.filter(|&oldest| oldest < cutoff) else {
+        return Ok(None);
+    };
+    let to = from.saturating_add(slice_secs.max(1)).min(cutoff);
+    let deleted = match ids {
+        Some(ids) => {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {table} WHERE {time} >= ? AND {time} < ? \
+             AND monitor_id IN (SELECT value FROM json_each(?))"
+            )))
+            .bind(from)
+            .bind(to)
+            .bind(ids)
+            .execute(store.sqlx())
+            .await?
+        }
+        None => {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {table} WHERE {time} >= ? AND {time} < ?"
+            )))
+            .bind(from)
+            .bind(to)
+            .execute(store.sqlx())
+            .await?
+        }
+    };
+    Ok(Some(deleted.rows_affected()))
 }
 
 /// The tables swept for rows left behind by removed monitors, all keyed by a
@@ -407,12 +514,15 @@ const ORPHAN_TABLES: [&str; 9] = [
 /// inside a write transaction - on `checks` that held the write lock for
 /// seconds every prune tick, timing out the scheduler's inserts, all to
 /// usually delete nothing. Reads don't block writers under WAL, and the
-/// targeted deletes only run once a removed monitor's grace has run out.
+/// targeted deletes only run once a removed monitor's grace has run out; a
+/// monitor's `checks` (months of them) go a day at a time, `pause` apart
+/// (see [`delete_sliced`]), the other tables hold little per monitor.
 pub(super) async fn delete_orphans(
     store: &Store,
     config: &Config,
     now: i64,
     purge: bool,
+    pause: Duration,
 ) -> anyhow::Result<()> {
     let keep: std::collections::HashSet<&str> = config
         .monitors
@@ -474,7 +584,13 @@ pub(super) async fn delete_orphans(
         let since = missing_since.get(id).copied();
         let expired = since.is_some_and(|since| now - since >= ORPHAN_GRACE_SECS);
         if purge || expired {
-            for table in tables {
+            for &table in tables {
+                if table == CHECKS.table {
+                    let ids = serde_json::to_string(&[id])?;
+                    let all = i64::MAX;
+                    delete_sliced(store, CHECKS, Some(&ids), all, ORPHAN_SLICE_SECS, pause).await?;
+                    continue;
+                }
                 sqlx::query(sqlx::AssertSqlSafe(format!(
                     "DELETE FROM {table} WHERE monitor_id = ?"
                 )))

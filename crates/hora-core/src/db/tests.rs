@@ -2,14 +2,15 @@ use super::aggregates::iso_day;
 use super::certs::cert_not_after;
 use super::checks::{insert_heartbeat_miss_at, insert_push_at};
 use super::retention::{
-    ORPHAN_GRACE_SECS, delete_orphans, prune_announcements, prune_events, prune_incidents,
-    prune_silences,
+    CHECKS, ORPHAN_GRACE_SECS, PRUNE_SLICE_SECS, delete_oldest_slice, delete_orphans,
+    prune_announcements, prune_events, prune_incidents, prune_silences,
 };
 use super::*;
 use crate::SECONDS_PER_DAY;
 use crate::config::Config;
 use crate::probe::FailureKind;
 use crate::status::CheckStatus;
+use std::time::Duration;
 
 #[tokio::test]
 async fn a_release_alerts_once_and_a_new_project_starts_afresh() {
@@ -450,9 +451,15 @@ async fn prune_removes_orphans_and_expired_rows() {
     assert_eq!(expected("never").await, None, "nothing to wait for");
 
     // A week later the sweep deletes it entirely, mark included.
-    delete_orphans(&store, &config, now + ORPHAN_GRACE_SECS + 60, false)
-        .await
-        .unwrap();
+    delete_orphans(
+        &store,
+        &config,
+        now + ORPHAN_GRACE_SECS + 60,
+        false,
+        Duration::ZERO,
+    )
+    .await
+    .unwrap();
     assert!(recent_checks(&store, "gone", 10).await.unwrap().is_empty());
     assert_eq!(cert_not_after(&store, "gone").await.unwrap(), None);
     assert_eq!(meta_get(&store, "orphan_since:gone").await.unwrap(), None);
@@ -463,6 +470,60 @@ async fn prune_removes_orphans_and_expired_rows() {
     );
     assert!(expected("keep").await.is_some());
     assert_eq!(recent_checks(&store, "keep", 10).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_prune_slice_never_deletes_more_than_one_slice() {
+    let store = Store::in_memory().await;
+    let base = 1_000_000;
+    // Two pruned monitors checked every minute for an hour, one more check
+    // after a ten-day gap, one just past the cutoff, and a monitor with
+    // another retention.
+    for t in (0..3600).step_by(60) {
+        insert(&store, "a", base + t, 1, Some(5)).await;
+        insert(&store, "b", base + t, 1, Some(5)).await;
+    }
+    let cutoff = base + 20 * SECONDS_PER_DAY;
+    insert(&store, "a", base + 10 * SECONDS_PER_DAY, 1, Some(5)).await;
+    insert(&store, "a", cutoff, 1, Some(5)).await;
+    insert(&store, "other", base, 1, Some(5)).await;
+    let pruned = || async {
+        sqlx::query_as::<_, (i64, Option<i64>)>(
+            "SELECT COUNT(*), MIN(time) FROM checks WHERE monitor_id IN ('a', 'b')",
+        )
+        .fetch_one(store.sqlx())
+        .await
+        .unwrap()
+    };
+
+    let ids = r#"["a", "b"]"#;
+    let mut slices = 0;
+    loop {
+        let (before, oldest) = pruned().await;
+        let Some(deleted) =
+            delete_oldest_slice(&store, CHECKS, Some(ids), cutoff, PRUNE_SLICE_SECS)
+                .await
+                .unwrap()
+        else {
+            break;
+        };
+        slices += 1;
+        let (after, next) = pruned().await;
+        let oldest = oldest.expect("a slice ran, so rows were left");
+        // Exactly the rows of one slice went: five minutes of two monitors.
+        assert!(deleted <= 10, "slice {slices} deleted {deleted} rows");
+        assert_eq!(before - after, i64::try_from(deleted).unwrap());
+        assert!(next.is_none_or(|next| next >= oldest + PRUNE_SLICE_SECS));
+    }
+    // Twelve slices for the hour, one for the lone check: the gap between
+    // them costs no statement.
+    assert_eq!(slices, 13);
+    assert_eq!(
+        pruned().await,
+        (1, Some(cutoff)),
+        "the cutoff's own row stays"
+    );
+    assert_eq!(recent_checks(&store, "other", 10).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -480,7 +541,7 @@ async fn an_orphan_that_comes_back_keeps_its_history() {
     };
 
     // Renamed away: marked, not deleted.
-    delete_orphans(&store, &config_with(&["other"]), now, false)
+    delete_orphans(&store, &config_with(&["other"]), now, false, Duration::ZERO)
         .await
         .unwrap();
     assert!(
@@ -491,20 +552,38 @@ async fn an_orphan_that_comes_back_keeps_its_history() {
     );
 
     // Back before the grace ran out: the mark is cleared, the data kept.
-    delete_orphans(&store, &config_with(&["api"]), now + 3600, false)
-        .await
-        .unwrap();
+    delete_orphans(
+        &store,
+        &config_with(&["api"]),
+        now + 3600,
+        false,
+        Duration::ZERO,
+    )
+    .await
+    .unwrap();
     assert_eq!(meta_get(&store, "orphan_since:api").await.unwrap(), None);
 
     // Removed again much later: a fresh grace period starts then, so the
     // old (cleared) sighting can never shortcut it.
     let later = now + 30 * SECONDS_PER_DAY;
-    delete_orphans(&store, &config_with(&["other"]), later, false)
-        .await
-        .unwrap();
-    delete_orphans(&store, &config_with(&["other"]), later + 3600, false)
-        .await
-        .unwrap();
+    delete_orphans(
+        &store,
+        &config_with(&["other"]),
+        later,
+        false,
+        Duration::ZERO,
+    )
+    .await
+    .unwrap();
+    delete_orphans(
+        &store,
+        &config_with(&["other"]),
+        later + 3600,
+        false,
+        Duration::ZERO,
+    )
+    .await
+    .unwrap();
     assert_eq!(recent_checks(&store, "api", 10).await.unwrap().len(), 1);
     assert_eq!(
         meta_get(&store, "orphan_since:api").await.unwrap(),
@@ -1226,7 +1305,9 @@ async fn daily_cache_equals_daily_all_as_roll_ups_and_days_advance() {
     downsample_daily(&store, day0 + 2 * SECONDS_PER_DAY)
         .await
         .unwrap();
-    prune_hourly(&store, day0 + SECONDS_PER_DAY).await.unwrap();
+    prune_hourly(&store, day0 + SECONDS_PER_DAY, Duration::ZERO)
+        .await
+        .unwrap();
 
     let mut cache = DailyCache::default();
     for step in 0..10 {

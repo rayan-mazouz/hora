@@ -282,7 +282,9 @@ pub async fn apply_retention(
     config: &Config,
     purge_removed: bool,
 ) -> anyhow::Result<()> {
-    super::retention::prune_with(store, config, purge_removed).await
+    // Offline (the daemon is stopped): nothing waits on the write lock, so
+    // the delete slices run back to back.
+    super::retention::prune_with(store, config, purge_removed, Duration::ZERO).await
 }
 
 /// How a compaction went.
