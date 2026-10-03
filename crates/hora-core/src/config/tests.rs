@@ -1050,6 +1050,34 @@ fn rejects_notify_unknown_channel() {
 }
 
 #[test]
+fn notify_unconfirmed_names_real_channels() {
+    let config = |routes: &str| {
+        format!(
+            r#"
+            [page]
+            [server]
+            [alerts]
+            notify_unconfirmed = {routes}
+            [[channels]]
+            name = "ops"
+            type = "slack"
+            webhook_url = "https://x/1"
+            "#
+        )
+    };
+    let loaded = load(&config(r#"["ops"]"#)).expect("valid");
+    assert_eq!(
+        loaded.alerts.notify_unconfirmed.as_deref(),
+        Some(["ops".to_owned()].as_slice())
+    );
+    let error = load(&config(r#"["typo"]"#)).unwrap_err().to_string();
+    assert!(
+        error.contains("alerts.notify_unconfirmed: notify references unknown channel"),
+        "got: {error}"
+    );
+}
+
+#[test]
 fn parses_health_and_peers() {
     let config = parse(
         r#"

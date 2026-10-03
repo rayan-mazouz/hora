@@ -93,6 +93,7 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert_eq!(down, "\u{1F534} <b>API</b> is DOWN\n<code>boom</code>");
 
@@ -103,6 +104,7 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert!(symptom.contains("caused by DB"));
 
@@ -113,10 +115,14 @@ mod tests {
             impacted: &["API", "Web"],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert!(root.contains("impacts 2") && root.contains("API"));
 
-        let recovered = TelegramNotifier::render(Event::Recovered { monitor: "API" });
+        let recovered = TelegramNotifier::render(Event::Recovered {
+            monitor: "API",
+            local_only: false,
+        });
         assert!(recovered.contains("recovered"));
 
         let degraded = TelegramNotifier::render(Event::Degraded {
@@ -156,6 +162,7 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert!(down.contains("<b>&lt;API&gt;</b>"));
         assert!(down.contains("<code>a&lt;b</code>"));

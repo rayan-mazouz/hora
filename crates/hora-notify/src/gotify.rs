@@ -88,6 +88,7 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert_eq!(down.message, "API is DOWN\nno response");
         assert_eq!(down.priority, 8);

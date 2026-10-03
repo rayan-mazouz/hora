@@ -100,7 +100,7 @@ target = "https://example.com"</pre>
     </table>
   </div>
 {%- endfor %}
-  <p class="muted small">This node asks its peers before it alerts: a down seen from here only is sent as a softened alert, never as an outage. <a href="/watchers{{ chrome.q()|safe }}">See all watchers</a></p>
+  <p class="muted small">{{ local.routing }} <a href="/watchers{{ chrome.q()|safe }}">See all watchers</a></p>
 </div>
 </details>
 {%- endif %}

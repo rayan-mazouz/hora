@@ -103,11 +103,15 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert_eq!(text, "API is DOWN\nboom\ncaused by DB");
         assert_eq!((tags, priority), ("rotating_light", 4));
 
-        let (_, tags, priority) = NtfyNotifier::message(Event::Recovered { monitor: "API" });
+        let (_, tags, priority) = NtfyNotifier::message(Event::Recovered {
+            monitor: "API",
+            local_only: false,
+        });
         assert_eq!((tags, priority), ("white_check_mark", 2));
 
         let (text, tags, priority) = NtfyNotifier::message(Event::Alert {

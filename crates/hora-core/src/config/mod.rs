@@ -301,6 +301,13 @@ pub struct Alerts {
     /// themselves. Default 3.
     #[serde(default = "default_channel_fail_threshold")]
     pub channel_fail_threshold: u32,
+    /// Where a *local-only* down goes: a monitor down from this node while
+    /// every peer that answered the confirmation sees it up. Such a down never
+    /// reaches the monitor's own channels (it is a problem near this node, not
+    /// an outage); it goes to these channels, or, without this key, is only
+    /// recorded (incident, timeline, the status page's "Not an outage").
+    #[serde(default)]
+    pub notify_unconfirmed: Option<Vec<String>>,
 }
 
 impl Default for Alerts {
@@ -314,6 +321,7 @@ impl Default for Alerts {
             group_window_secs: default_group_window(),
             push_alert_window_secs: default_push_alert_window(),
             channel_fail_threshold: default_channel_fail_threshold(),
+            notify_unconfirmed: None,
         }
     }
 }

@@ -308,6 +308,7 @@ pub(crate) fn spawn_watch(
                             &peer,
                             Event::Recovered {
                                 monitor: &peer.name,
+                                local_only: false,
                             },
                         )
                         .await;
@@ -370,6 +371,7 @@ async fn announce_verdict(
                     impacted: &[],
                     vantage: None,
                     event: None,
+                    local_only: false,
                 },
             )
             .await;

@@ -164,6 +164,11 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
     validate_confirm(config)?;
     validate_exec(config)?;
     validate_digest(config, &channel_names)?;
+    validate_routes(
+        "alerts.notify_unconfirmed",
+        config.alerts.notify_unconfirmed.as_deref(),
+        &channel_names,
+    )?;
     Ok(())
 }
 

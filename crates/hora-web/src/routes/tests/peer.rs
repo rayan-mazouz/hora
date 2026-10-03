@@ -320,8 +320,10 @@ async fn multi_vantage_confirms_across_two_real_nodes() {
         hora_core::mesh::confirm::confirm_with_peers(&client, &config_a, &config_a.monitors[0])
             .await
             .expect("peers were asked");
-    assert!(verdict.contains("seen UP by Hora B"), "{verdict}");
-    assert!(verdict.contains("network issue"), "{verdict}");
+    assert!(verdict.text.contains("seen UP by Hora B"), "{verdict:?}");
+    assert!(verdict.text.contains("network issue"), "{verdict:?}");
+    // B, the only peer, sees it up: down from A only.
+    assert!(verdict.local_only);
 
     // Real outage: the service is gone for B too.
     drop(service);
@@ -329,7 +331,8 @@ async fn multi_vantage_confirms_across_two_real_nodes() {
         hora_core::mesh::confirm::confirm_with_peers(&client, &config_a, &config_a.monitors[0])
             .await
             .expect("peers were asked");
-    assert_eq!(verdict, "confirmed down from 2/2 vantage points");
+    assert_eq!(verdict.text, "confirmed down from 2/2 vantage points");
+    assert!(!verdict.local_only);
 
     // Fail open: a wrong token makes B answer 401 - the alert is
     // annotated as unconfirmed, never blocked.
@@ -359,7 +362,12 @@ async fn multi_vantage_confirms_across_two_real_nodes() {
         hora_core::mesh::confirm::confirm_with_peers(&client, &config_bad, &config_bad.monitors[0])
             .await
             .expect("peers were asked");
-    assert!(verdict.contains("no peer vantage reachable"), "{verdict}");
+    assert!(
+        verdict.text.contains("no peer vantage reachable"),
+        "{verdict:?}"
+    );
+    // No answer is no contradiction: the alert goes out as usual.
+    assert!(!verdict.local_only);
 
     // Fail open: a peer that is not even listening behaves the same.
     config_bad.peers[0].ping_url = Some(hora_core::config::Secret(
@@ -369,5 +377,10 @@ async fn multi_vantage_confirms_across_two_real_nodes() {
         hora_core::mesh::confirm::confirm_with_peers(&client, &config_bad, &config_bad.monitors[0])
             .await
             .expect("peers were asked");
-    assert!(verdict.contains("no peer vantage reachable"), "{verdict}");
+    assert!(
+        verdict.text.contains("no peer vantage reachable"),
+        "{verdict:?}"
+    );
+    // No answer is no contradiction: the alert goes out as usual.
+    assert!(!verdict.local_only);
 }

@@ -611,6 +611,11 @@ async fn a_down_seen_from_here_only_reads_as_up_with_the_notice() {
     )
     .await;
     assert!(operator.contains("Why nobody was woken"), "{operator}");
+    // The footnote says what this config does with such a down.
+    assert!(
+        operator.contains("does not page the usual channels: it is only recorded"),
+        "{operator}"
+    );
     // The monitor's own page agrees.
     let page = body_text(app.oneshot(get("/monitor/web")).await.unwrap()).await;
     assert!(page.contains("Not an outage"), "{page}");

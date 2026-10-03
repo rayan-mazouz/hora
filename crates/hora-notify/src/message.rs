@@ -193,7 +193,7 @@ impl Message {
                     latency_ms.map_or_else(String::new, |ms| format!(" ({ms}ms)"))
                 ),
             ),
-            Event::Recovered { monitor } => {
+            Event::Recovered { monitor, .. } => {
                 (Kind::Recovered, monitor.to_owned(), " recovered".to_owned())
             }
             Event::CertExpiring { monitor, secs_left } => (
@@ -546,6 +546,7 @@ mod tests {
             impacted,
             vantage: None,
             event: None,
+            local_only: false,
         }
     }
 
@@ -558,6 +559,7 @@ mod tests {
             impacted: &[],
             vantage: Some("confirmed down from 3/3 vantage points"),
             event: Some("deploy api v2.3, 3m before"),
+            local_only: false,
         });
         assert_eq!(msg.headline(), "API is DOWN");
         assert_eq!(msg.tagged_headline(), "[DOWN] API is DOWN");
@@ -584,7 +586,13 @@ mod tests {
                 },
                 "API is slow (1234ms)",
             ),
-            (Event::Recovered { monitor: "API" }, "API recovered"),
+            (
+                Event::Recovered {
+                    monitor: "API",
+                    local_only: false,
+                },
+                "API recovered",
+            ),
             (
                 Event::CertExpiring {
                     monitor: "API",

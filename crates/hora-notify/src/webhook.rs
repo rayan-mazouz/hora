@@ -19,6 +19,10 @@ impl WebhookNotifier {
         Self { client, url }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat arm per event, each a struct update"
+    )]
     fn payload(event: Event<'_>) -> Payload<'_> {
         match event {
             Event::Down {
@@ -28,8 +32,10 @@ impl WebhookNotifier {
                 impacted,
                 vantage,
                 event,
+                local_only,
             } => Payload {
                 message: error,
+                local_only: Some(local_only),
                 cause,
                 impacted: if impacted.is_empty() {
                     None
@@ -49,7 +55,13 @@ impl WebhookNotifier {
                 message: detail,
                 ..Payload::new("degraded", monitor)
             },
-            Event::Recovered { monitor } => Payload::new("recovered", monitor),
+            Event::Recovered {
+                monitor,
+                local_only,
+            } => Payload {
+                local_only: Some(local_only),
+                ..Payload::new("recovered", monitor)
+            },
             Event::CertExpiring { monitor, secs_left } => Payload {
                 days_left: Some(secs_left / 86_400),
                 ..Payload::new("cert_expiring", monitor)
@@ -134,6 +146,11 @@ struct Payload<'a> {
     cause: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     impacted: Option<&'a [&'a str]>,
+    /// On down and recovered events: the down was seen from this node only
+    /// (every peer that answered sees the target up), so it went to the
+    /// `notify_unconfirmed` channels rather than the usual ones.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_only: Option<bool>,
     /// Multi-vantage verdict, on down events when peers were asked.
     #[serde(skip_serializing_if = "Option::is_none")]
     vantage: Option<&'a str>,
@@ -189,6 +206,7 @@ impl<'a> Payload<'a> {
             message: None,
             cause: None,
             impacted: None,
+            local_only: None,
             vantage: None,
             change: None,
             witness: None,
@@ -264,6 +282,7 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert_eq!(down.event, "down");
         assert_eq!(down.monitor, "API");
@@ -278,6 +297,7 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert_eq!(symptom.cause, Some("DB"));
 
@@ -288,6 +308,7 @@ mod tests {
             impacted: &["API", "Web"],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert_eq!(root.impacted, Some(["API", "Web"].as_slice()));
 

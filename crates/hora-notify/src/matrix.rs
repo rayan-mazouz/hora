@@ -132,10 +132,14 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert!(down.contains("is DOWN") && down.contains("boom"));
 
-        let recovered = MatrixNotifier::render(Event::Recovered { monitor: "API" });
+        let recovered = MatrixNotifier::render(Event::Recovered {
+            monitor: "API",
+            local_only: false,
+        });
         assert!(recovered.contains("recovered"));
 
         let cert = MatrixNotifier::render(Event::CertExpiring {

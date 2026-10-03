@@ -61,7 +61,15 @@ pub(crate) struct AlertState {
     consecutive_down: u32,
     consecutive_degraded: u32,
     burn: BurnAlerts,
+    /// The current down was announced as local-only (every peer that
+    /// answered saw the target up): when the peers were last asked, unix
+    /// seconds. They are asked again every [`LOCAL_ONLY_REASK_SECS`] while
+    /// the down lasts, until they confirm it.
+    local_only_asked: Option<i64>,
 }
+
+/// How often the peers are asked again about a local-only down.
+const LOCAL_ONLY_REASK_SECS: i64 = 300;
 
 impl AlertState {
     /// The state of a monitor found mid-outage at startup (an incident is
@@ -97,7 +105,16 @@ impl AlertState {
     pub(crate) fn observe_up(&mut self) -> bool {
         self.consecutive_down = 0;
         self.consecutive_degraded = 0;
+        self.local_only_asked = None;
         self.level != AlertLevel::Healthy
+    }
+
+    /// Whether a local-only down is due for another round of peer questions.
+    fn reask_due(&self, now: i64) -> bool {
+        self.level == AlertLevel::Down
+            && self
+                .local_only_asked
+                .is_some_and(|asked| now - asked >= LOCAL_ONLY_REASK_SECS)
     }
 }
 
@@ -310,7 +327,7 @@ async fn run(
             if state.observe_down(threshold) {
                 error!(monitor = %monitor.id, failures = state.consecutive_down, "confirmed down");
                 let snapshot = config.borrow().clone();
-                confirm_down(
+                let local_only = confirm_down(
                     &snapshot,
                     &store,
                     &confirm_client,
@@ -322,6 +339,21 @@ async fn run(
                 )
                 .await;
                 state.level = AlertLevel::Down;
+                state.local_only_asked = local_only.then(|| chrono::Utc::now().timestamp());
+            } else if state.reask_due(chrono::Utc::now().timestamp()) {
+                let snapshot = config.borrow().clone();
+                let still_local = reconfirm_local_down(
+                    &snapshot,
+                    &store,
+                    &confirm_client,
+                    &alerts,
+                    &monitor,
+                    &outcome,
+                    threshold,
+                    open_incident,
+                )
+                .await;
+                state.local_only_asked = still_local.then(|| chrono::Utc::now().timestamp());
             }
         } else if outcome.is_degraded() && alert_on_degraded {
             // Up but slow: same anti-flap threshold as down, separate state.
@@ -355,7 +387,9 @@ async fn run(
 /// A monitor just confirmed down: resolve the topology context, open (or
 /// resume) the incident record, ask the peers for a multi-vantage verdict,
 /// and hand the alert to the coalescer, which may fold it into its root
-/// cause's single notification.
+/// cause's single notification. Returns whether the down is local-only (the
+/// peers that answered all see the target up): the coalescer then sends it
+/// to the quiet channels only, and the caller asks the peers again later.
 #[allow(clippy::too_many_arguments)]
 async fn confirm_down(
     config: &Config,
@@ -366,7 +400,7 @@ async fn confirm_down(
     outcome: &Outcome,
     threshold: u32,
     open_incident: &mut Option<i64>,
-) {
+) -> bool {
     let (cause, impacted_names) = down_context(config, store, monitor, threshold).await;
 
     // "What changed?": the most recent event marker (`hora event`) within the
@@ -392,17 +426,8 @@ async fn confirm_down(
     // Multi-vantage confirmation: bounded (one concurrent round, hard
     // deadline) and strictly fail-open - `None` means the alert reads exactly
     // as it would without the feature.
-    let vantage = crate::mesh::confirm::confirm_with_peers(confirm_client, config, monitor).await;
-    if let Some(verdict) = &vantage {
-        info!(monitor = %monitor.id, %verdict, "multi-vantage verdict");
-        // Recorded on the incident too (best effort), so the post-mortem can
-        // replay what the mesh saw, not just what this node saw.
-        if let Some(incident_id) = *open_incident
-            && let Err(err) = db::update_incident_vantage(store, incident_id, verdict).await
-        {
-            error!(monitor = %monitor.id, "failed to record vantage verdict: {err:#}");
-        }
-    }
+    let verdict = ask_peers(store, confirm_client, config, monitor, *open_incident).await;
+    let local_only = verdict.as_ref().is_some_and(|verdict| verdict.local_only);
 
     // The coalescer groups on the *configured* upstreams: in a cascade this
     // monitor often confirms a tick before its upstream is derivably down,
@@ -421,10 +446,80 @@ async fn confirm_down(
             cause_name: cause.map(|(_, name)| name),
             impacted: impacted_names,
             notify: monitor.notify.clone(),
-            vantage,
+            vantage: verdict.map(|verdict| verdict.text),
             event,
+            local_only,
         }),
     );
+    local_only
+}
+
+/// Multi-vantage confirmation: bounded (one concurrent round, hard deadline)
+/// and strictly fail-open - `None` means the alert reads exactly as it would
+/// without the feature. The verdict is recorded on the incident too (best
+/// effort), so the post-mortem can replay what the mesh saw, not just what
+/// this node saw.
+async fn ask_peers(
+    store: &Store,
+    confirm_client: &Client,
+    config: &Config,
+    monitor: &Monitor,
+    open_incident: Option<i64>,
+) -> Option<crate::mesh::confirm::DownVerdict> {
+    let verdict = crate::mesh::confirm::confirm_with_peers(confirm_client, config, monitor).await;
+    if let Some(verdict) = &verdict {
+        info!(monitor = %monitor.id, verdict = %verdict.text, "multi-vantage verdict");
+        if let Some(incident_id) = open_incident
+            && let Err(err) = db::update_incident_vantage(store, incident_id, &verdict.text).await
+        {
+            error!(monitor = %monitor.id, "failed to record vantage verdict: {err:#}");
+        }
+    }
+    verdict
+}
+
+/// A local-only down that lasts: ask the peers again. Once they no longer
+/// all see the target up - they see it down too, or can no longer answer,
+/// which is no contradiction either - the down goes out to the usual
+/// channels (once: the caller stops asking). Returns whether it is still
+/// local-only.
+#[allow(clippy::too_many_arguments)]
+async fn reconfirm_local_down(
+    config: &Config,
+    store: &Store,
+    confirm_client: &Client,
+    alerts: &mpsc::UnboundedSender<AlertMsg>,
+    monitor: &Monitor,
+    outcome: &Outcome,
+    threshold: u32,
+    open_incident: Option<i64>,
+) -> bool {
+    let verdict = ask_peers(store, confirm_client, config, monitor, open_incident).await;
+    if verdict.as_ref().is_some_and(|verdict| verdict.local_only) {
+        return true;
+    }
+    warn!(monitor = %monitor.id, "local-only down now confirmed: alerting");
+    let (cause, impacted_names) = down_context(config, store, monitor, threshold).await;
+    send_alert(
+        alerts,
+        &monitor.id,
+        AlertMsg::Down(DownAlert {
+            id: monitor.id.clone(),
+            name: monitor.name.clone(),
+            error: outcome.error.clone(),
+            upstreams: topology::transitive_upstreams(&config.monitors, &monitor.id)
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            cause_name: cause.map(|(_, name)| name),
+            impacted: impacted_names,
+            notify: monitor.notify.clone(),
+            vantage: verdict.map(|verdict| verdict.text),
+            event: correlated_event(store, chrono::Utc::now().timestamp()).await,
+            local_only: false,
+        }),
+    );
+    false
 }
 
 /// How far back a recorded event still counts as "what changed" for a down
@@ -721,6 +816,22 @@ mod tests {
         assert!(stagger_offset("api", five_secs) < five_secs);
         let daily = std::time::Duration::from_hours(24);
         assert!(stagger_offset("api", daily) < minute);
+    }
+
+    #[test]
+    fn a_local_only_down_is_asked_about_again_until_it_recovers() {
+        let mut state = AlertState::default();
+        assert!(state.observe_down(1));
+        state.level = AlertLevel::Down;
+        // A down the peers confirmed (or could not judge) is never re-asked.
+        assert!(!state.reask_due(10_000));
+        // A local-only one is, every LOCAL_ONLY_REASK_SECS.
+        state.local_only_asked = Some(1_000);
+        assert!(!state.reask_due(1_000 + LOCAL_ONLY_REASK_SECS - 1));
+        assert!(state.reask_due(1_000 + LOCAL_ONLY_REASK_SECS));
+        // Recovery ends it.
+        assert!(state.observe_up());
+        assert_eq!(state.local_only_asked, None);
     }
 
     #[test]

@@ -80,11 +80,15 @@ pub(crate) async fn test_alert(monitor_id: Option<&str>) -> Result<(), CliError>
         impacted: &[],
         vantage: None,
         event: None,
+        local_only: false,
     };
     let mut failed = dispatcher.dispatch(event, notify.as_deref()).await;
     let failed_recovery = dispatcher
         .dispatch(
-            hora_core::notifications::Event::Recovered { monitor: &name },
+            hora_core::notifications::Event::Recovered {
+                monitor: &name,
+                local_only: false,
+            },
             notify.as_deref(),
         )
         .await;

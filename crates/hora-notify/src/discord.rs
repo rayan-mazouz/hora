@@ -137,6 +137,7 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert_eq!(down.title, "\u{1F534} API is DOWN");
         assert_eq!(
@@ -145,7 +146,10 @@ mod tests {
         );
         assert_eq!(down.color, COLOR_DOWN);
 
-        let recovered = DiscordNotifier::embed(Event::Recovered { monitor: "API" });
+        let recovered = DiscordNotifier::embed(Event::Recovered {
+            monitor: "API",
+            local_only: false,
+        });
         assert!(recovered.title.contains("recovered"));
         assert!(recovered.description.is_none());
         assert_eq!(recovered.color, COLOR_UP);
@@ -185,6 +189,7 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         let body = down.description.expect("down has a body");
         assert!(

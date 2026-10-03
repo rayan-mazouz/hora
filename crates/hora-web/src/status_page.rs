@@ -119,6 +119,8 @@ pub(crate) struct Window {
 /// Monitors down from this node only, and what the page says about them.
 pub(crate) struct LocalNotice<'a> {
     pub(crate) sentence: String,
+    /// For the operator: where such a down goes, as configured.
+    pub(crate) routing: String,
     /// The first few, detailed for the operator.
     pub(crate) monitors: Vec<LocalDetail<'a>>,
 }
@@ -344,7 +346,7 @@ pub(crate) fn build<'a>(summary: &'a Summary, config: &Config, ask: &Ask) -> Sta
             ),
             when: None,
         }),
-        local: local_notice(&local_monitors),
+        local: local_notice(&local_monitors, config),
         attention,
         attention_more,
         scale,
@@ -670,7 +672,10 @@ fn chips(
 /// "Not an outage": what the page says when only this node sees some
 /// monitors down. Public visitors read one calm sentence; the operator also
 /// gets who saw what.
-fn local_notice<'a>(local: &[&'a MonitorView]) -> Option<LocalNotice<'a>> {
+fn local_notice<'a>(
+    local: &[&'a MonitorView],
+    config: &hora_core::config::Config,
+) -> Option<LocalNotice<'a>> {
     let first = local.first()?;
     let sentence = if local.len() == 1 {
         let others: Vec<&str> = first.vantages.iter().map(|v| v.peer.as_str()).collect();
@@ -734,7 +739,30 @@ fn local_notice<'a>(local: &[&'a MonitorView]) -> Option<LocalNotice<'a>> {
             }
         })
         .collect();
-    Some(LocalNotice { sentence, monitors })
+    Some(LocalNotice {
+        sentence,
+        routing: local_routing(config),
+        monitors,
+    })
+}
+
+/// What happens to a down seen from this node only, as configured - the
+/// operator panel's footnote.
+fn local_routing(config: &hora_core::config::Config) -> String {
+    const LEAD: &str = "This node asks its peers before it alerts. A down seen from here only, \
+        while every peer that answers sees the service up, does not page the usual channels:";
+    const TAIL: &str = "The peers are asked again every 5 minutes; once they see it down too, \
+        or stop answering, the usual alert goes out.";
+    match config.alerts.notify_unconfirmed.as_deref() {
+        Some(quiet) if !quiet.is_empty() => format!(
+            "{LEAD} it goes to {} instead (alerts.notify_unconfirmed). {TAIL}",
+            join_and(quiet)
+        ),
+        _ => format!(
+            "{LEAD} it is only recorded (set alerts.notify_unconfirmed to send it to a quiet \
+             channel). {TAIL}"
+        ),
+    }
 }
 
 /// How urgent a display state is, for "problems first".

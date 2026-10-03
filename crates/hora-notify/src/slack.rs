@@ -87,10 +87,14 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert_eq!(down, "\u{1F534} *API* is DOWN\n```boom```");
 
-        let recovered = SlackNotifier::render(Event::Recovered { monitor: "API" });
+        let recovered = SlackNotifier::render(Event::Recovered {
+            monitor: "API",
+            local_only: false,
+        });
         assert!(recovered.contains("recovered"));
 
         let cert = SlackNotifier::render(Event::CertExpiring {
@@ -110,6 +114,7 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert!(down.contains("caused by &lt;!channel&gt;"), "{down}");
 

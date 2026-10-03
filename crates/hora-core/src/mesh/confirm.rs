@@ -14,8 +14,12 @@
 //!    only probes targets present in *its own* configuration, so a leaked
 //!    token cannot turn a peer into an SSRF relay. Both nodes must know the
 //!    monitor - which pairs naturally with sharing the config in git.
-//! 3. **A disputed down still alerts.** A peer seeing the target up softens
-//!    the message, never silences it: geo-partial outages are real outages.
+//! 3. **Only an explicit contradiction quiets a down.** When every peer that
+//!    answered sees the target up, the down is local-only: it goes to
+//!    `alerts.notify_unconfirmed` (or is only recorded) instead of the
+//!    monitor's channels, and the peers are asked again while it lasts. No
+//!    answer, or any peer seeing it down too, alerts as usual: geo-partial
+//!    outages are real outages.
 
 use std::time::Duration;
 
@@ -86,15 +90,40 @@ pub async fn confirm_verdict(
     Some(summarize(local_up, &borrowed))
 }
 
+/// The peers' answer to a local down, for the alert path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownVerdict {
+    /// The annotation ("confirmed down from 3/3 vantage points", "seen UP by
+    /// hora-b - ...").
+    pub text: String,
+    /// Every peer that answered sees the target up, and at least one did:
+    /// down from this node only. Only this explicit contradiction makes a
+    /// down local-only - no peer, no answer, or any peer seeing it down all
+    /// leave the alert as it was.
+    pub local_only: bool,
+}
+
 /// The down-perspective verdict, for the alert path: a monitor confirmed down
-/// locally asks the peers before alerting. `None` reads exactly as the alert
-/// always did. Thin wrapper over [`confirm_verdict`].
+/// locally asks the peers before alerting. `None` (confirmation off, no peer
+/// to ask) reads exactly as the alert always did.
 pub async fn confirm_with_peers(
     client: &reqwest::Client,
     config: &Config,
     monitor: &Monitor,
-) -> Option<String> {
-    confirm_verdict(client, config, monitor, false).await
+) -> Option<DownVerdict> {
+    let views = peer_verdicts(client, config, monitor).await?;
+    let borrowed: Vec<(&str, Verdict)> =
+        views.iter().map(|(name, v)| (name.as_str(), *v)).collect();
+    Some(DownVerdict {
+        text: summarize(false, &borrowed),
+        local_only: local_only(&borrowed),
+    })
+}
+
+/// Whether a local down is contradicted by every peer that answered (see
+/// [`DownVerdict::local_only`]).
+pub(crate) fn local_only(views: &[(&str, Verdict)]) -> bool {
+    count(views, Verdict::Up) > 0 && count(views, Verdict::Down) == 0
 }
 
 /// Ask every confirmable peer to probe `monitor`'s target, concurrently with a
@@ -296,6 +325,21 @@ mod tests {
         let none = vec![("hora-b", Verdict::Unknown)];
         let text = summarize(false, &none);
         assert!(text.contains("no peer vantage reachable"), "{text}");
+    }
+
+    #[test]
+    fn only_an_explicit_contradiction_is_local_only() {
+        use Verdict::{Down, Unknown, Up};
+        // Every peer that answered sees it up (the silent one counts for
+        // nothing): down from here only.
+        assert!(local_only(&[("b", Up)]));
+        assert!(local_only(&[("b", Up), ("c", Unknown)]));
+        // Anything else alerts normally: no answer at all, or one peer
+        // seeing it down too (a geo-partial outage is an outage).
+        assert!(!local_only(&[]));
+        assert!(!local_only(&[("b", Unknown)]));
+        assert!(!local_only(&[("b", Up), ("c", Down)]));
+        assert!(!local_only(&[("b", Down)]));
     }
 
     #[test]

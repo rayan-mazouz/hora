@@ -144,6 +144,10 @@ pub enum Event<'a> {
         /// The correlated event marker, when one was recorded shortly before
         /// the down ("deploy api v2.3, 3m before") - the "what changed?" line.
         event: Option<&'a str>,
+        /// Down from this node only: every peer that answered sees it up.
+        /// Such a down goes to `alerts.notify_unconfirmed` (or nowhere), not
+        /// to the monitor's usual channels.
+        local_only: bool,
     },
     /// A monitor is up but degraded: slower than its `degraded_over_ms` budget.
     Degraded {
@@ -154,7 +158,8 @@ pub enum Event<'a> {
         detail: Option<&'a str>,
     },
     /// A previously-down (or degraded) monitor is fully healthy again.
-    Recovered { monitor: &'a str },
+    /// `local_only`: the down it ends was only ever announced as local-only.
+    Recovered { monitor: &'a str, local_only: bool },
     /// A monitor's TLS certificate is within the warning window (or expired).
     /// `secs_left` is negative once expired: whole days alone would read
     /// "has expired" with hours still to go.
@@ -513,6 +518,12 @@ mod tests {
         }
     }
 
+    /// Any event will do for the dispatcher's bookkeeping.
+    const RECOVERED: Event<'static> = Event::Recovered {
+        monitor: "x",
+        local_only: false,
+    };
+
     fn channel(name: &'static str, fail: bool) -> (String, Box<dyn Notifier>) {
         (name.to_owned(), Box::new(MockNotifier::new(name, fail)))
     }
@@ -532,7 +543,7 @@ mod tests {
                 },
             );
         }
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
         let snap = d.health_snapshot();
         assert_eq!(snap[0].health.consecutive_failures, 0);
         assert!(snap[0].health.first_failure_at.is_none());
@@ -543,12 +554,12 @@ mod tests {
         let d = Dispatcher::new(vec![channel("broken", true), channel("ok", false)], 2);
 
         // First failure: counter goes to 1, no watchdog yet.
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
         assert_eq!(d.health_snapshot()[0].health.consecutive_failures, 1);
         assert!(!d.health_snapshot()[0].health.watchdog_alerted);
 
         // Second failure: counter hits 2 = threshold, watchdog fires to "ok".
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
         assert!(d.health_snapshot()[0].health.watchdog_alerted);
 
         // The "ok" channel should have received a watchdog Event::Alert.
@@ -556,7 +567,7 @@ mod tests {
         // the actual cross-channel delivery would need downcasting the trait
         // object, which the test mock does not support.
         // Also verify a third failure does NOT re-trigger (already alerted).
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
         assert_eq!(d.health_snapshot()[0].health.consecutive_failures, 3);
     }
 
@@ -564,8 +575,8 @@ mod tests {
     async fn recovery_clears_watchdog_so_new_streak_re_alerts() {
         let d = Dispatcher::new(vec![channel("flaky", true), channel("ok", false)], 2);
         // Two failures → watchdog.
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
+        d.dispatch(RECOVERED, None).await;
         assert!(d.health_snapshot()[0].health.watchdog_alerted);
 
         // Simulate recovery: swap the notifier for a succeeding one.
@@ -574,7 +585,7 @@ mod tests {
             2,
             d.health(),
         );
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
         assert!(!d.health_snapshot()[0].health.watchdog_alerted);
         assert_eq!(d.health_snapshot()[0].health.consecutive_failures, 0);
 
@@ -584,8 +595,8 @@ mod tests {
             2,
             d.health(),
         );
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
+        d.dispatch(RECOVERED, None).await;
         assert!(d.health_snapshot()[0].health.watchdog_alerted);
     }
 
@@ -593,8 +604,7 @@ mod tests {
     async fn only_filter_does_not_touch_excluded_channels() {
         let d = Dispatcher::new(vec![channel("a", true), channel("b", true)], 5);
         let only = vec!["a".to_owned()];
-        d.dispatch(Event::Recovered { monitor: "x" }, Some(&only))
-            .await;
+        d.dispatch(RECOVERED, Some(&only)).await;
         // "b" was not dispatched to: its health stays at default (0 failures).
         assert_eq!(d.health_snapshot()[1].health.consecutive_failures, 0);
         assert_eq!(d.health_snapshot()[0].health.consecutive_failures, 1);
@@ -603,14 +613,14 @@ mod tests {
     #[tokio::test]
     async fn with_health_drops_removed_channels() {
         let d = Dispatcher::new(vec![channel("old", true)], 3);
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
         assert!(d.health.lock().unwrap().contains_key("old"));
 
         let d = Dispatcher::with_health(vec![channel("new", false)], 3, d.health());
         // "old" is gone from the config → its counter is dropped.
         assert!(!d.health.lock().unwrap().contains_key("old"));
         // "new" has no entry yet (it gets one on first dispatch).
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
         assert!(d.health.lock().unwrap().contains_key("new"));
     }
 
@@ -641,7 +651,7 @@ mod tests {
             2,
         );
         for _ in 0..3 {
-            let failed = d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+            let failed = d.dispatch(RECOVERED, None).await;
             // Still reported as a failed delivery (test-alert's exit code)...
             assert_eq!(failed, ["big"]);
         }
@@ -659,7 +669,7 @@ mod tests {
                 watchdog_alerted: false,
             },
         );
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
         assert_eq!(d.health_snapshot()[0].health.consecutive_failures, 1);
     }
 
@@ -669,8 +679,8 @@ mod tests {
         // silent (watchdog_alerted never latches), but the failure is still
         // counted for doctor/top to surface.
         let d = Dispatcher::new(vec![channel("lonely", true)], 2);
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
+        d.dispatch(RECOVERED, None).await;
         assert!(!d.health_snapshot()[0].health.watchdog_alerted);
         assert_eq!(d.health_snapshot()[0].health.consecutive_failures, 2);
     }
@@ -680,8 +690,8 @@ mod tests {
         // A lone channel fails past threshold with nobody to alert, so the
         // watchdog stays unlatched.
         let d = Dispatcher::new(vec![channel("lonely", true)], 2);
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
+        d.dispatch(RECOVERED, None).await;
         assert!(!d.health_snapshot()[0].health.watchdog_alerted);
 
         // A second channel is added via reload while "lonely" is still failing.
@@ -692,7 +702,7 @@ mod tests {
             2,
             d.health(),
         );
-        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        d.dispatch(RECOVERED, None).await;
         assert!(d.health_snapshot()[0].health.watchdog_alerted);
     }
 }

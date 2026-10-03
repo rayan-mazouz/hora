@@ -80,10 +80,14 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert_eq!(down, "API is DOWN\nboom");
 
-        let recovered = FreeMobileNotifier::render(Event::Recovered { monitor: "API" });
+        let recovered = FreeMobileNotifier::render(Event::Recovered {
+            monitor: "API",
+            local_only: false,
+        });
         assert!(recovered.contains("recovered"));
 
         let cert = FreeMobileNotifier::render(Event::CertExpiring {
