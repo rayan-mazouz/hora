@@ -142,7 +142,7 @@ mod tests {
 
         let (subject, _) = EmailNotifier::render(Event::CertExpiring {
             monitor: "API",
-            days_left: 3,
+            secs_left: 3 * 86_400,
         });
         assert!(subject.contains("expires in 3 days"));
 

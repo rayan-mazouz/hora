@@ -88,7 +88,7 @@ mod tests {
 
         let cert = FreeMobileNotifier::render(Event::CertExpiring {
             monitor: "API",
-            days_left: 3,
+            secs_left: 3 * 86_400,
         });
         assert!(cert.contains("expires in 3 days"));
         // No emoji, to keep the SMS in the cheaper GSM-7 encoding.

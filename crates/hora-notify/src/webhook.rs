@@ -50,17 +50,17 @@ impl WebhookNotifier {
                 ..Payload::new("degraded", monitor)
             },
             Event::Recovered { monitor } => Payload::new("recovered", monitor),
-            Event::CertExpiring { monitor, days_left } => Payload {
-                days_left: Some(days_left),
+            Event::CertExpiring { monitor, secs_left } => Payload {
+                days_left: Some(secs_left / 86_400),
                 ..Payload::new("cert_expiring", monitor)
             },
             Event::DomainExpiring {
                 monitor,
                 domain,
-                days_left,
+                secs_left,
             } => Payload {
                 domain: Some(domain),
-                days_left: Some(days_left),
+                days_left: Some(secs_left / 86_400),
                 ..Payload::new("domain_expiring", monitor)
             },
             Event::ReleaseAvailable(release) => Payload {
@@ -289,7 +289,7 @@ mod tests {
 
         let cert = WebhookNotifier::payload(Event::CertExpiring {
             monitor: "API",
-            days_left: 5,
+            secs_left: 5 * 86_400 + 7,
         });
         assert_eq!(cert.event, "cert_expiring");
         assert_eq!(cert.days_left, Some(5));

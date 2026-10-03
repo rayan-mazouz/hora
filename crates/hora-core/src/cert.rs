@@ -481,7 +481,7 @@ async fn check_certs(
                     .dispatch(
                         Event::CertExpiring {
                             monitor: &monitor.name,
-                            days_left,
+                            secs_left: not_after - now,
                         },
                         monitor.notify.as_deref(),
                     )

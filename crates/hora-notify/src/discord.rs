@@ -148,7 +148,7 @@ mod tests {
 
         let cert = DiscordNotifier::embed(Event::CertExpiring {
             monitor: "API",
-            days_left: 3,
+            secs_left: 3 * 86_400,
         });
         assert!(cert.title.contains("expires in 3 days"));
         assert_eq!(cert.color, COLOR_CERT);

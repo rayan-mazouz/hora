@@ -84,7 +84,7 @@ pub(crate) async fn check_domains(
                     Event::DomainExpiring {
                         monitor: &monitor.name,
                         domain,
-                        days_left,
+                        secs_left: expires_at - now,
                     },
                     monitor.notify.as_deref(),
                 )

@@ -194,19 +194,19 @@ impl Message {
             Event::Recovered { monitor } => {
                 (Kind::Recovered, monitor.to_owned(), " recovered".to_owned())
             }
-            Event::CertExpiring { monitor, days_left } => (
+            Event::CertExpiring { monitor, secs_left } => (
                 Kind::CertExpiring,
                 monitor.to_owned(),
-                format!(" TLS certificate {}", expiry_phrase(days_left)),
+                format!(" TLS certificate {}", expiry_phrase(secs_left)),
             ),
             Event::DomainExpiring {
                 monitor,
                 domain,
-                days_left,
+                secs_left,
             } => (
                 Kind::DomainExpiring,
                 monitor.to_owned(),
-                format!(" domain {domain} {}", expiry_phrase(days_left)),
+                format!(" domain {domain} {}", expiry_phrase(secs_left)),
             ),
             Event::ReleaseAvailable(release) => (
                 Kind::Release,
@@ -474,14 +474,23 @@ fn details(event: Event<'_>) -> (Option<String>, Vec<Line>) {
     }
 }
 
-/// `"expires in 3 days"`, `"expires in 1 day"`, `"has expired"`.
-fn expiry_phrase(days_left: i64) -> String {
-    if days_left <= 0 {
-        "has expired".to_owned()
-    } else if days_left == 1 {
-        "expires in 1 day".to_owned()
-    } else {
-        format!("expires in {days_left} days")
+/// `"expires in 3 days"`, `"expires in 1 day"`, `"expires in 10 hours"`,
+/// `"has expired"`. Under a day the hours count: "has expired" with ten
+/// hours still to go sends someone to renew in a panic, or not at all.
+fn expiry_phrase(secs_left: i64) -> String {
+    const HOUR: i64 = 3_600;
+    const DAY: i64 = 86_400;
+    match secs_left {
+        ..=0 => "has expired".to_owned(),
+        1..HOUR => "expires in less than an hour".to_owned(),
+        HOUR..DAY => match secs_left / HOUR {
+            1 => "expires in 1 hour".to_owned(),
+            hours => format!("expires in {hours} hours"),
+        },
+        _ => match secs_left / DAY {
+            1 => "expires in 1 day".to_owned(),
+            days => format!("expires in {days} days"),
+        },
     }
 }
 
@@ -566,7 +575,7 @@ mod tests {
             (
                 Event::CertExpiring {
                     monitor: "API",
-                    days_left: 3,
+                    secs_left: 3 * 86_400,
                 },
                 "API TLS certificate expires in 3 days",
             ),
@@ -574,7 +583,7 @@ mod tests {
                 Event::DomainExpiring {
                     monitor: "API",
                     domain: "example.com",
-                    days_left: 1,
+                    secs_left: 86_400,
                 },
                 "API domain example.com expires in 1 day",
             ),
@@ -661,10 +670,14 @@ mod tests {
 
     #[test]
     fn expiry_and_burn_phrasing() {
+        const DAY: i64 = 86_400;
         assert_eq!(expiry_phrase(-1), "has expired");
         assert_eq!(expiry_phrase(0), "has expired");
-        assert_eq!(expiry_phrase(1), "expires in 1 day");
-        assert_eq!(expiry_phrase(3), "expires in 3 days");
+        assert_eq!(expiry_phrase(59 * 60), "expires in less than an hour");
+        assert_eq!(expiry_phrase(3_600), "expires in 1 hour");
+        assert_eq!(expiry_phrase(10 * 3_600), "expires in 10 hours");
+        assert_eq!(expiry_phrase(DAY), "expires in 1 day");
+        assert_eq!(expiry_phrase(3 * DAY + 5), "expires in 3 days");
         assert_eq!(
             budget_burn_phrase(60, "6h", Some(200_000)),
             "burning error budget at 6x (6h) - exhausted in ~2d 7h at this rate"

@@ -183,7 +183,7 @@ async fn print_probe_report(
         match cert {
             Ok(cert) => println!(
                 "  cert      {} (expires {})",
-                cert_days_phrase(cert.days_left),
+                cert_left_phrase(cert.not_after - chrono::Utc::now().timestamp()),
                 format_date(cert.not_after)
             ),
             Err(err) => println!("  cert      could not read certificate: {err}"),
@@ -225,12 +225,21 @@ fn parse_probe_kind(raw: &str) -> Option<hora_core::config::Kind> {
     }
 }
 
-/// Human phrase for certificate days-left, handling the already-expired case.
-fn cert_days_phrase(days_left: i64) -> String {
-    if days_left < 0 {
-        format!("EXPIRED {} days ago", -days_left)
+/// Human phrase for the time a certificate has left, handling the
+/// already-expired case. Under a day it counts hours: "0 days left" with ten
+/// hours to go reads as already gone.
+fn cert_left_phrase(secs_left: i64) -> String {
+    let span = |secs: i64| match secs {
+        ..3_600 => "less than an hour".to_owned(),
+        3_600..7_200 => "1 hour".to_owned(),
+        7_200..86_400 => format!("{} hours", secs / 3_600),
+        86_400..172_800 => "1 day".to_owned(),
+        _ => format!("{} days", secs / 86_400),
+    };
+    if secs_left < 0 {
+        format!("EXPIRED {} ago", span(-secs_left))
     } else {
-        format!("{days_left} days left")
+        format!("{} left", span(secs_left))
     }
 }
 
@@ -286,6 +295,15 @@ fn probe_target(kind: Kind, raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cert_time_left_counts_hours_under_a_day() {
+        assert_eq!(cert_left_phrase(10 * 3_600 + 5), "10 hours left");
+        assert_eq!(cert_left_phrase(90 * 60), "1 hour left");
+        assert_eq!(cert_left_phrase(30 * 86_400), "30 days left");
+        assert_eq!(cert_left_phrase(-5 * 3_600), "EXPIRED 5 hours ago");
+        assert_eq!(cert_left_phrase(-3 * 86_400), "EXPIRED 3 days ago");
+    }
 
     #[test]
     fn infer_probe_classifies_targets_and_normalizes() {

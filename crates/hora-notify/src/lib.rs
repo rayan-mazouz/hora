@@ -156,13 +156,16 @@ pub enum Event<'a> {
     /// A previously-down (or degraded) monitor is fully healthy again.
     Recovered { monitor: &'a str },
     /// A monitor's TLS certificate is within the warning window (or expired).
-    CertExpiring { monitor: &'a str, days_left: i64 },
+    /// `secs_left` is negative once expired: whole days alone would read
+    /// "has expired" with hours still to go.
+    CertExpiring { monitor: &'a str, secs_left: i64 },
     /// A monitor's registered domain is within the warning window (or expired),
     /// as reported by the registry over RDAP.
     DomainExpiring {
         monitor: &'a str,
         domain: &'a str,
-        days_left: i64,
+        /// Negative once expired.
+        secs_left: i64,
     },
     /// A newer upstream release of the software behind a monitor is out
     /// (`release = { github = "owner/repo", ... }`). Nothing is failing: the
