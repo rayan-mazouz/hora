@@ -2,7 +2,6 @@
 //! per audience), and the heatmap and report bodies. Every entry is tied to
 //! the config snapshot it was built from, so a reload busts it at once.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -124,32 +123,34 @@ impl Cache {
 /// Probe clients for `/api/peer/probe`, one per proxy setting, so a mesh
 /// confirming flaps reuses connection pools and TLS setup instead of building
 /// a client per call. Rebuilt (emptied) when the config changes, since a
-/// monitor's proxy may have.
-///
-/// Type-erased: hora-web does not depend on reqwest directly, so the client
-/// type is only known to the generic accessor (inferred from the builder).
-#[derive(Default)]
-pub(crate) struct ProbeClients {
-    inner: Mutex<Option<ProbeClientSet>>,
+/// monitor's proxy may have. Generic over the client only so the tests can
+/// count builds without a network stack.
+pub(crate) struct ProbeClients<C = reqwest::Client> {
+    inner: Mutex<Option<ProbeClientSet<C>>>,
 }
 
-struct ProbeClientSet {
+impl<C> Default for ProbeClients<C> {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
+    }
+}
+
+struct ProbeClientSet<C> {
     config: Arc<Config>,
-    clients: HashMap<Option<String>, Box<dyn Any + Send + Sync>>,
+    clients: HashMap<Option<String>, C>,
 }
 
-impl ProbeClients {
+impl<C: Clone> ProbeClients<C> {
     /// The cached client for `proxy` under `config`, or a fresh one from
     /// `build` (cached on success).
-    pub(crate) fn get_or_build<C, E>(
+    pub(crate) fn get_or_build<E>(
         &self,
         config: &Arc<Config>,
         proxy: Option<&str>,
         build: impl FnOnce(Option<&str>) -> Result<C, E>,
-    ) -> Result<C, E>
-    where
-        C: Clone + Send + Sync + 'static,
-    {
+    ) -> Result<C, E> {
         let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let set = match guard.take() {
             Some(set) if Arc::ptr_eq(&set.config, config) => set,
@@ -160,15 +161,11 @@ impl ProbeClients {
         };
         let set = guard.insert(set);
         let key = proxy.map(str::to_owned);
-        if let Some(client) = set
-            .clients
-            .get(&key)
-            .and_then(|client| client.downcast_ref::<C>())
-        {
+        if let Some(client) = set.clients.get(&key) {
             return Ok(client.clone());
         }
         let client = build(proxy)?;
-        set.clients.insert(key, Box::new(client.clone()));
+        set.clients.insert(key, client.clone());
         Ok(client)
     }
 }
@@ -206,7 +203,7 @@ mod tests {
 
     #[test]
     fn probe_clients_are_reused_per_proxy_and_rebuilt_on_reload() {
-        let clients = ProbeClients::default();
+        let clients = ProbeClients::<String>::default();
         let config = config();
         let mut builds = 0;
         let mut build = |proxy: Option<&str>| -> Result<String, ()> {
