@@ -6,7 +6,9 @@
 //! free pages that later inserts reuse, but the file keeps its high-water
 //! mark. Rewriting it needs the database to itself, so the daemon holds an
 //! advisory lock on `<db>.lock` for as long as it runs, and compaction takes
-//! the same lock or refuses.
+//! the same lock or refuses. CLI commands hold `<db>.writers.lock` shared
+//! while they have the database open, and compaction takes it exclusive, so
+//! a command never writes into a file that is being replaced.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -67,10 +69,34 @@ impl std::error::Error for LockError {}
 /// [`LockError::Busy`] when another process holds it; [`LockError::Io`] when
 /// the lock file cannot be created.
 pub fn lock_exclusive(database_path: &str) -> Result<Option<DbLock>, LockError> {
+    take_lock(database_path, "lock", true)
+}
+
+/// Take the lock on `<database_path>.writers.lock`, without waiting: shared
+/// for every CLI command that opens the database (several run at once, next
+/// to the daemon), exclusive for `hora compact` while it rewrites the file.
+/// The daemon's own lock keeps the daemon out of a compaction; this one keeps
+/// out the commands that write beside it (`announce`, `event`, `silence`...),
+/// whose rows would otherwise land in the file about to be swapped away.
+///
+/// # Errors
+///
+/// [`LockError::Busy`] when the other mode is held (a compaction runs, or a
+/// command still has the database open); [`LockError::Io`] when the lock file
+/// cannot be created.
+pub fn lock_writers(database_path: &str, exclusive: bool) -> Result<Option<DbLock>, LockError> {
+    take_lock(database_path, "writers.lock", exclusive)
+}
+
+fn take_lock(
+    database_path: &str,
+    suffix: &str,
+    exclusive: bool,
+) -> Result<Option<DbLock>, LockError> {
     if database_path == ":memory:" || database_path.starts_with("file:") {
         return Ok(None);
     }
-    let path = PathBuf::from(format!("{database_path}.lock"));
+    let path = PathBuf::from(format!("{database_path}.{suffix}"));
     let mut options = std::fs::OpenOptions::new();
     // Never truncated nor removed: deleting a lock file another process has
     // open is how two holders end up locking two different files.
@@ -83,7 +109,12 @@ pub fn lock_exclusive(database_path: &str) -> Result<Option<DbLock>, LockError> 
     let file = options
         .open(&path)
         .map_err(|err| LockError::Io(path.clone(), err))?;
-    match file.try_lock() {
+    let taken = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    match taken {
         Ok(()) => Ok(Some(DbLock { _file: file, path })),
         Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Busy(path)),
         Err(std::fs::TryLockError::Error(err)) => Err(LockError::Io(path, err)),
@@ -413,6 +444,29 @@ mod tests {
         drop(held);
         assert!(lock_exclusive(&path).unwrap().is_some());
         assert!(lock_exclusive(":memory:").unwrap().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn commands_share_the_writers_lock_and_compaction_excludes_them() {
+        let (dir, path) = temp_db("writers");
+        // Two commands at once (an announce while an event is recorded).
+        let first = lock_writers(&path, false).unwrap().unwrap();
+        let second = lock_writers(&path, false).unwrap().unwrap();
+        // A compaction waits for both to finish.
+        assert!(matches!(lock_writers(&path, true), Err(LockError::Busy(_))));
+        drop((first, second));
+        let compacting = lock_writers(&path, true).unwrap().unwrap();
+        // A command started during the rewrite refuses.
+        assert!(matches!(
+            lock_writers(&path, false),
+            Err(LockError::Busy(_))
+        ));
+        // The daemon's lock is a different file: commands never wait for it.
+        let daemon = lock_exclusive(&path).unwrap().unwrap();
+        drop(compacting);
+        assert!(lock_writers(&path, false).unwrap().is_some());
+        drop(daemon);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

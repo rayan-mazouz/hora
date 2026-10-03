@@ -173,20 +173,57 @@ pub(crate) fn print_help() {
     println!("  --help, -h          Show this help message");
 }
 
+/// The CLI's hold on `<db>.writers.lock`, kept for the life of the process
+/// (one command per process): see [`hora_core::db::lock_writers`].
+static WRITERS_LOCK: std::sync::OnceLock<Option<hora_core::db::DbLock>> =
+    std::sync::OnceLock::new();
+
+/// How [`open_database_with`] treats `<db>.writers.lock`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WritersLock {
+    /// Take it shared, like every command: refuses while `hora compact`
+    /// rewrites the file.
+    Shared,
+    /// The caller (`hora compact`) already holds it exclusive.
+    HeldExclusive,
+}
+
 /// Open the daemon's database for a CLI subcommand. Refuses to *create* one: a
 /// missing file means the config points somewhere the daemon never wrote (a
 /// different working directory, usually), and silently creating an empty
 /// database there would only hide the mistake.
 pub(crate) async fn open_database()
 -> anyhow::Result<(hora_core::config::Config, hora_core::db::Store)> {
-    let config_path = config::path();
-    let config = config::load_from(&config_path).context("loading configuration")?;
+    let config = load_config()?;
+    open_database_with(config, WritersLock::Shared).await
+}
+
+/// The configuration the daemon would load.
+pub(crate) fn load_config() -> anyhow::Result<hora_core::config::Config> {
+    config::load_from(&config::path()).context("loading configuration")
+}
+
+/// [`open_database`] for an already loaded config, taking (or not) the writers
+/// lock.
+pub(crate) async fn open_database_with(
+    config: hora_core::config::Config,
+    writers: WritersLock,
+) -> anyhow::Result<(hora_core::config::Config, hora_core::db::Store)> {
     let path = &config.server.database_path;
     if path != ":memory:" && !path.starts_with("file:") && !std::path::Path::new(path).exists() {
         anyhow::bail!(
             "database {path} not found - run from the daemon's working directory, \
              or point HORA_CONFIG at its config"
         );
+    }
+    if writers == WritersLock::Shared && WRITERS_LOCK.get().is_none() {
+        let lock = hora_core::db::lock_writers(path, false).map_err(|err| match err {
+            hora_core::db::LockError::Busy(_) => {
+                anyhow::anyhow!("hora compact is rewriting {path} - try again once it has finished")
+            }
+            other @ hora_core::db::LockError::Io(..) => anyhow::Error::new(other),
+        })?;
+        let _ = WRITERS_LOCK.set(lock);
     }
     let store = hora_core::db::connect(path)
         .await

@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use hora_core::db::{self, LockError, SizeReport};
 use hora_core::fmt::bytes;
 
-use super::{CliError, open_database, usage};
+use super::{CliError, WritersLock, load_config, open_database, open_database_with, usage};
 
 /// Room the copy needs on top of its expected size (the estimate is rough,
 /// and the retention pass writes a WAL first).
@@ -23,18 +23,25 @@ pub(crate) async fn compact(args: &[String]) -> Result<(), CliError> {
         purge_removed,
         keep,
     } = Flags::parse(args)?;
-    let (config, store) = open_database().await?;
-    let path = config.server.database_path.clone();
-    println!("hora compact - {path}");
     if dry_run {
+        let (config, store) = open_database().await?;
+        let path = config.server.database_path.clone();
+        println!("hora compact - {path}");
         return report(&store, &path, purge_removed).await;
     }
-    // Taken before anything writes, and held to the end.
+    let config = load_config()?;
+    let path = config.server.database_path.clone();
+    println!("hora compact - {path}");
+    // Both taken before anything writes, and held to the end: the daemon's
+    // lock keeps the daemon out, the writers lock keeps out the commands that
+    // write beside it (announce, event, silence...).
     let Some(lock) = take_lock(&path)? else {
         return Err(CliError::Failed(
             "An in-memory database has nothing to compact.".to_owned(),
         ));
     };
+    let _writers = take_writers_lock(&path)?;
+    let (config, store) = open_database_with(config, WritersLock::HeldExclusive).await?;
 
     let size = store.size().await?;
     println!(
@@ -164,6 +171,19 @@ fn take_lock(path: &str) -> Result<Option<db::DbLock>, CliError> {
             "The database is in use: {} is held by the Hora daemon (or another \
              hora compact). Stop the daemon first, then run hora compact again. \
              (hora compact --dry-run works while it runs.)",
+            lock.display()
+        ))),
+        Err(err) => Err(anyhow::Error::new(err).into()),
+    }
+}
+
+/// Every other command out of the file while it is rewritten.
+fn take_writers_lock(path: &str) -> Result<Option<db::DbLock>, CliError> {
+    match db::lock_writers(path, true) {
+        Ok(lock) => Ok(lock),
+        Err(LockError::Busy(lock)) => Err(CliError::Failed(format!(
+            "Another hora command has the database open ({} is held). Let it finish, \
+             then run hora compact again.",
             lock.display()
         ))),
         Err(err) => Err(anyhow::Error::new(err).into()),

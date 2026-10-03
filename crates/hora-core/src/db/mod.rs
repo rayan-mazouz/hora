@@ -73,7 +73,7 @@ pub use checks::{
 };
 pub use compact::{
     Compacted, DbLock, LockError, ObjectSize, SizeReport, StoreSize, apply_retention,
-    free_disk_bytes, lock_exclusive, size_report, vacuum_swap,
+    free_disk_bytes, lock_exclusive, lock_writers, size_report, vacuum_swap,
 };
 pub use incidents::{
     Incident, IncidentMarks, IncidentMarksCache, find_open_incident, incident_by_id,
