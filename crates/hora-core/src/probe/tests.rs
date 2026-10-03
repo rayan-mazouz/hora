@@ -3,7 +3,9 @@ use std::net::SocketAddr;
 
 use super::dns::{record_type, resolver_for};
 use super::family::combine;
-use super::http::{check_assertions, check_json, check_number, same_origin, with_headers};
+use super::http::{
+    check_assertions, check_json, check_number, is_downgrade, same_origin, with_headers,
+};
 use super::snapshot::{
     MAX_SNAPSHOT_BODY_CHARS, MAX_SNAPSHOT_HEADER_CHARS, MAX_SNAPSHOT_HEADERS, render_head,
     render_snapshot,
@@ -324,6 +326,105 @@ async fn truncated_body_is_a_body_error_not_an_assertion_failure() {
     let outcome = http(&client, &monitor, spec(&monitor)).await;
     assert!(!outcome.is_up());
     assert_eq!(outcome.error.as_deref(), Some("invalid response body"));
+}
+
+#[tokio::test]
+async fn an_assertion_on_a_cut_body_says_so() {
+    let body: &'static str = Box::leak(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2048\r\nConnection: close\r\n\r\n{}",
+            "x".repeat(2048)
+        )
+        .into_boxed_str(),
+    );
+    let (url, _hits) = serve(body).await;
+    let client = crate::http::probe_client(None).unwrap();
+    let mut monitor = http_monitor(&url);
+    spec_mut(&mut monitor).keyword = Some(KeywordAssert {
+        text: "operational".to_owned(),
+        invert: false,
+    });
+    spec_mut(&mut monitor).max_body_kb = Some(1);
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("keyword missing: operational (body cut at 1.0 KiB)")
+    );
+}
+
+#[tokio::test]
+async fn transport_failures_name_their_cause() {
+    let client = crate::http::probe_client(None).unwrap();
+    // Plain HTTP where TLS was expected: rustls names the problem.
+    let (url, _hits) =
+        serve("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await;
+    let monitor = http_monitor(&url.replace("http://", "https://"));
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    let error = outcome.error.unwrap();
+    assert!(error.starts_with("connection failed: TLS "), "{error}");
+
+    // A closed port.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let monitor = http_monitor(&format!("http://{addr}/"));
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("connection failed: connection refused")
+    );
+}
+
+#[tokio::test]
+async fn a_proxy_refusing_us_is_blamed_not_the_target() {
+    let (proxy, _hits) = serve(
+        "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    let client = crate::http::probe_client(Some(&proxy)).unwrap();
+    // Plain http goes through the proxy as a request: the 407 is an answer.
+    let mut monitor = http_monitor("http://target.invalid/");
+    spec_mut(&mut monitor).proxy = Some(proxy.clone());
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("proxy failed: HTTP 407 Proxy Authentication Required")
+    );
+    assert_eq!(outcome.reason, Some(FailureKind::ConnectionFailed));
+    assert_eq!(outcome.status_code, None);
+
+    // https tunnels through CONNECT: the 407 is a tunnel error.
+    let mut monitor = http_monitor("https://target.invalid/");
+    spec_mut(&mut monitor).proxy = Some(proxy);
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("proxy failed: tunnel error: proxy authorization required")
+    );
+}
+
+#[test]
+fn only_https_to_http_is_a_downgrade() {
+    let parse = |u: &str| reqwest::Url::parse(u).unwrap();
+    assert!(is_downgrade(
+        &parse("https://example.com/"),
+        &parse("http://example.com/login")
+    ));
+    assert!(!is_downgrade(
+        &parse("http://example.com/"),
+        &parse("https://example.com/")
+    ));
+    assert!(!is_downgrade(
+        &parse("https://example.com/"),
+        &parse("https://www.example.com/")
+    ));
+    assert_eq!(
+        public_reason(
+            Some(FailureKind::InsecureRedirect),
+            "redirected to plain http (http://x)"
+        ),
+        "redirected to plain http"
+    );
 }
 
 fn http_monitor(target: &str) -> Monitor {

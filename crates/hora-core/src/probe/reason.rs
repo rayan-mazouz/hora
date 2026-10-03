@@ -15,6 +15,8 @@ pub enum FailureKind {
     /// The TCP connection ran out of time.
     ConnectionTimedOut,
     TooManyRedirects,
+    /// An `https` request was redirected to plain `http`.
+    InsecureRedirect,
     /// The body could not be read or decoded.
     InvalidBody,
     /// Any other HTTP client error.
@@ -56,11 +58,12 @@ pub enum FailureKind {
 }
 
 impl FailureKind {
-    pub(crate) const ALL: [Self; 23] = [
+    pub(crate) const ALL: [Self; 24] = [
         Self::Timeout,
         Self::ConnectionFailed,
         Self::ConnectionTimedOut,
         Self::TooManyRedirects,
+        Self::InsecureRedirect,
         Self::InvalidBody,
         Self::RequestError,
         Self::Unresolvable,
@@ -90,6 +93,7 @@ impl FailureKind {
             Self::ConnectionFailed => "connection_failed",
             Self::ConnectionTimedOut => "connection_timeout",
             Self::TooManyRedirects => "too_many_redirects",
+            Self::InsecureRedirect => "insecure_redirect",
             Self::InvalidBody => "invalid_body",
             Self::RequestError => "request_error",
             Self::Unresolvable => "unresolvable",
@@ -161,6 +165,8 @@ pub fn public_reason(kind: Option<FailureKind>, reason: &str) -> &str {
         FailureKind::ConnectionFailed => "connection failed",
         FailureKind::ConnectionTimedOut => "connection timed out",
         FailureKind::TooManyRedirects => "too many redirects",
+        // The detail names the plain-http origin; the category is enough.
+        FailureKind::InsecureRedirect => "redirected to plain http",
         FailureKind::InvalidBody => "invalid response body",
         FailureKind::RequestError => "request error",
         FailureKind::Unresolvable => "could not resolve host",

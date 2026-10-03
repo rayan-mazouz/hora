@@ -30,7 +30,7 @@ pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) ->
         // (status line + headers) is captured first - reading the body
         // consumes the response - in case this turns into a failure snapshot.
         let assertions = spec.asserts_body();
-        let (head, body) = if !status_ok || assertions {
+        let (head, body, cut_at) = if !status_ok || assertions {
             let head = snapshot_head(&response);
             let cap = if assertions {
                 spec.assertion_body_cap()
@@ -45,15 +45,25 @@ pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) ->
             let body = crate::http::read_capped(&mut response, cap)
                 .await
                 .map_err(HttpError::Request)?;
-            (head, body.bytes)
+            (head, body.bytes, body.truncated.then_some(cap))
         } else {
-            (String::new(), Vec::new())
+            (String::new(), Vec::new(), None)
         };
-        Ok::<_, HttpError>((code, status_ok, head, body, latency))
+        Ok::<_, HttpError>((code, status_ok, head, body, cut_at, latency))
     };
 
     match tokio::time::timeout(monitor.timeout(), attempt).await {
-        Ok(Ok((code, status_ok, head, body, latency))) => {
+        // Through a proxy, a 407 is the proxy refusing us, not the target
+        // answering: blame the proxy.
+        Ok(Ok((407, _, head, body, _, _))) if spec.proxy.is_some() => Outcome {
+            status: CheckStatus::Down,
+            latency_ms: None,
+            status_code: None,
+            error: Some("proxy failed: HTTP 407 Proxy Authentication Required".to_owned()),
+            reason: Some(FailureKind::ConnectionFailed),
+            snapshot: Some(render_snapshot(&head, &body)),
+        },
+        Ok(Ok((code, status_ok, head, body, cut_at, latency))) => {
             let (up, error, reason) = if !status_ok {
                 let snippet = snippet(&body);
                 let detail = if snippet.is_empty() {
@@ -63,6 +73,15 @@ pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) ->
                 };
                 (false, Some(detail), Some(FailureKind::Http))
             } else if let Some(failure) = check_assertions(spec, &body) {
+                // The assertion judged a body cut at the cap: say so, what
+                // it looked for may well sit past the cut.
+                let failure = match cut_at {
+                    Some(cap) => format!(
+                        "{failure} (body cut at {})",
+                        crate::fmt::bytes(u64::try_from(cap).unwrap_or(u64::MAX))
+                    ),
+                    None => failure,
+                };
                 (false, Some(failure), Some(FailureKind::Content))
             } else {
                 (true, None, None)
@@ -88,9 +107,27 @@ pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) ->
             FailureKind::TooManyRedirects,
             "too many redirects".to_owned(),
         ),
+        Ok(Err(HttpError::InsecureRedirect(to))) => Outcome::down(
+            FailureKind::InsecureRedirect,
+            format!("redirected to plain http ({to})"),
+        ),
         Ok(Err(HttpError::Request(err))) => {
+            // A proxy that refused us (407 on CONNECT, SOCKS credentials) is
+            // not the target failing: say so.
+            if spec.proxy.is_some()
+                && let Some(cause) = proxy_failure(&err)
+            {
+                return Outcome::down(FailureKind::ConnectionFailed, cause);
+            }
             let (kind, detail) = describe(&err);
-            Outcome::down(kind, detail.to_owned())
+            // The category alone ("connection failed") reads the same for a
+            // refused port and an expired certificate: name the cause when the
+            // error chain carries one (never the URL, which may hold secrets).
+            let detail = match transport_cause(&err) {
+                Some(cause) => format!("{detail}: {cause}"),
+                None => detail.to_owned(),
+            };
+            Outcome::down(kind, detail)
         }
         Err(_elapsed) => Outcome::down(FailureKind::Timeout, "request timed out".to_owned()),
     }
@@ -100,12 +137,14 @@ pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) ->
 /// the same bound.
 const MAX_REDIRECTS: usize = 10;
 
-/// Either a transport error or our own redirect-budget exhaustion. The probe
+/// Either a transport error or one of our own redirect verdicts. The probe
 /// client never auto-follows, so reqwest can't produce a "too many redirects"
 /// error of its own.
 enum HttpError {
     Request(reqwest::Error),
     TooManyRedirects,
+    /// An `https` hop redirected to plain `http`; holds the target origin.
+    InsecureRedirect(String),
 }
 
 /// Send the monitor's GET, following redirects manually so the configured
@@ -148,11 +187,24 @@ async fn send_following_redirects(
             .and_then(|value| value.to_str().ok())
             .and_then(|location| url.join(location).ok());
         match next {
+            // Following it would carry the request (cookies, query string,
+            // whatever the client sends next) in clear text: a monitor that
+            // says https means it, so this is a down, not a silent downgrade.
+            Some(next) if is_downgrade(&url, &next) => {
+                return Err(HttpError::InsecureRedirect(
+                    next.origin().ascii_serialization(),
+                ));
+            }
             Some(next) => url = next,
             None => return Ok(response),
         }
     }
     Err(HttpError::TooManyRedirects)
+}
+
+/// Whether a redirect from `from` to `to` drops TLS.
+pub(super) fn is_downgrade(from: &reqwest::Url, to: &reqwest::Url) -> bool {
+    from.scheme() == "https" && to.scheme() == "http"
 }
 
 /// Whether `url` shares an origin (scheme + host + port) with the original
@@ -259,6 +311,64 @@ pub(super) fn with_headers(
         request = request.header(name, value.as_ref());
     }
     request
+}
+
+/// The root cause of a transport error worth naming - a TLS failure
+/// (`invalid peer certificate: Expired`, `peer is incompatible`...) or a
+/// refused / reset connection - found by walking the error chain. rustls and
+/// io errors never embed the request URL.
+fn transport_cause(err: &reqwest::Error) -> Option<String> {
+    let mut source = std::error::Error::source(err);
+    while let Some(current) = source {
+        if let Some(tls) = tls_error(current) {
+            return Some(format!("TLS {tls}"));
+        }
+        if let Some(io) = current.downcast_ref::<std::io::Error>() {
+            match io.kind() {
+                std::io::ErrorKind::ConnectionRefused => {
+                    return Some("connection refused".to_owned());
+                }
+                std::io::ErrorKind::ConnectionReset => return Some("connection reset".to_owned()),
+                _ => {}
+            }
+        }
+        source = current.source();
+    }
+    None
+}
+
+/// The failure of the proxy itself, when that is what broke the request: an
+/// HTTP proxy refusing the CONNECT tunnel (`407`, or any non-2xx answer) or a
+/// SOCKS proxy refusing the handshake (bad credentials, unreachable proxy).
+/// hyper-util's error types are not reachable from here (reqwest wraps them in
+/// a private type), so they are recognised by their stable `Display`
+/// prefixes; neither embeds the request URL.
+fn proxy_failure(err: &reqwest::Error) -> Option<String> {
+    let mut source = std::error::Error::source(err);
+    let mut socks = false;
+    while let Some(current) = source {
+        let text = current.to_string();
+        if text.starts_with("tunnel error: ") || text.starts_with("SOCKS error: ") {
+            return Some(format!("proxy failed: {text}"));
+        }
+        socks |= text.starts_with("error connecting to socks proxy");
+        source = current.source();
+    }
+    socks.then(|| "proxy failed: could not connect through the SOCKS proxy".to_owned())
+}
+
+/// The rustls error behind `err`, looking through the `io::Error` wrappers
+/// hyper-rustls nests it in (`io::Error::source` skips the wrapped error
+/// itself, so the chain alone never reaches it).
+fn tls_error<'a>(
+    mut err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a tokio_rustls::rustls::Error> {
+    loop {
+        if let Some(tls) = err.downcast_ref::<tokio_rustls::rustls::Error>() {
+            return Some(tls);
+        }
+        err = err.downcast_ref::<std::io::Error>()?.get_ref()?;
+    }
 }
 
 /// A concise, URL-free description of a request error. The raw error embeds the
