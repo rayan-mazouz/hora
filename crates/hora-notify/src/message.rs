@@ -182,6 +182,7 @@ impl Message {
             Event::Degraded {
                 monitor,
                 latency_ms,
+                ..
             } => (
                 Kind::Degraded,
                 monitor.to_owned(),
@@ -460,6 +461,10 @@ fn details(event: Event<'_>) -> (Option<String>, Vec<Line>) {
         Event::Alert { message, .. } if !message.is_empty() => {
             (None, vec![Line::Text(message.to_owned())])
         }
+        Event::Degraded {
+            detail: Some(detail),
+            ..
+        } if !detail.is_empty() => (None, vec![Line::Text(detail.to_owned())]),
         Event::Degraded { .. }
         | Event::Recovered { .. }
         | Event::CertExpiring { .. }
@@ -553,6 +558,7 @@ mod tests {
                 Event::Degraded {
                     monitor: "API",
                     latency_ms: Some(1234),
+                    detail: None,
                 },
                 "API is slow (1234ms)",
             ),

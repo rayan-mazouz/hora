@@ -156,6 +156,7 @@ mod tests {
         let degraded = DiscordNotifier::embed(Event::Degraded {
             monitor: "API",
             latency_ms: Some(1234),
+            detail: None,
         });
         assert!(degraded.title.contains("slow") && degraded.title.contains("1234ms"));
         assert_eq!(degraded.color, COLOR_DEGRADED);

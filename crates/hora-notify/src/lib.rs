@@ -149,6 +149,9 @@ pub enum Event<'a> {
     Degraded {
         monitor: &'a str,
         latency_ms: Option<i64>,
+        /// What the monitor said about itself: a push job's `msg` sent with
+        /// `status=degraded` ("disk 91% full").
+        detail: Option<&'a str>,
     },
     /// A previously-down (or degraded) monitor is fully healthy again.
     Recovered { monitor: &'a str },

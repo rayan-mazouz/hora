@@ -122,8 +122,10 @@ mod tests {
         let degraded = TelegramNotifier::render(Event::Degraded {
             monitor: "API",
             latency_ms: Some(1234),
+            detail: Some("disk 91% full"),
         });
         assert!(degraded.contains("slow") && degraded.contains("1234ms"));
+        assert!(degraded.contains("disk 91% full"), "{degraded}");
 
         let cert = TelegramNotifier::render(Event::CertExpiring {
             monitor: "API",

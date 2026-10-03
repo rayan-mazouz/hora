@@ -325,7 +325,7 @@ async fn run(
         } else if outcome.degraded && alert_on_degraded {
             // Up but slow: same anti-flap threshold as down, separate state.
             if state.observe_degraded(threshold) {
-                alert_degraded(&notifier, &monitor, outcome.latency_ms).await;
+                alert_degraded(&notifier, &monitor, &outcome).await;
                 state.level = AlertLevel::Degraded;
             }
         } else if state.observe_up() {
@@ -463,7 +463,8 @@ fn alert_settings(config: &watch::Receiver<Arc<Config>>, monitor_id: &str) -> (b
 }
 
 /// Announce a confirmed-degraded monitor (up, but over its latency budget).
-async fn alert_degraded(notifier: &Notifiers, monitor: &Monitor, latency_ms: Option<i64>) {
+async fn alert_degraded(notifier: &Notifiers, monitor: &Monitor, outcome: &Outcome) {
+    let latency_ms = outcome.latency_ms;
     warn!(monitor = %monitor.id, ?latency_ms, "degraded");
     notifier
         .load_full()
@@ -471,6 +472,8 @@ async fn alert_degraded(notifier: &Notifiers, monitor: &Monitor, latency_ms: Opt
             Event::Degraded {
                 monitor: &monitor.name,
                 latency_ms,
+                // Only a push carries one: the job's own `msg`.
+                detail: outcome.error.as_deref(),
             },
             monitor.notify.as_deref(),
         )
@@ -871,7 +874,13 @@ fn judge_heartbeat(
             degraded: status == 2,
             latency_ms: beat.latency_ms,
             status_code: None,
-            error: None,
+            // A degraded push keeps the job's words for the degraded alert;
+            // an up one has nothing to say.
+            error: if status == 2 {
+                beat.error.clone()
+            } else {
+                None
+            },
             snapshot: None,
         },
     })
@@ -1079,13 +1088,15 @@ mod tests {
         };
         assert_eq!(outcome.error.as_deref(), Some("push reported down"));
 
-        // Degraded is up-but-degraded, so `alert_on_degraded` applies.
+        // Degraded is up-but-degraded, so `alert_on_degraded` applies; the
+        // job's message rides along for the degraded alert.
         let HeartbeatVerdict::OnTime(outcome) =
-            judge_heartbeat(&every, Some(&beat(990, 2, None)), 0, now)
+            judge_heartbeat(&every, Some(&beat(990, 2, Some("disk 91% full"))), 0, now)
         else {
             panic!("on time");
         };
         assert!(outcome.up && outcome.degraded);
+        assert_eq!(outcome.error.as_deref(), Some("disk 91% full"));
 
         // Up is up.
         let HeartbeatVerdict::OnTime(outcome) =

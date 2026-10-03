@@ -43,8 +43,10 @@ impl WebhookNotifier {
             Event::Degraded {
                 monitor,
                 latency_ms,
+                detail,
             } => Payload {
                 latency_ms,
+                message: detail,
                 ..Payload::new("degraded", monitor)
             },
             Event::Recovered { monitor } => Payload::new("recovered", monitor),
@@ -295,7 +297,9 @@ mod tests {
         let degraded = WebhookNotifier::payload(Event::Degraded {
             monitor: "API",
             latency_ms: Some(1234),
+            detail: Some("disk 91% full"),
         });
+        assert_eq!(degraded.message, Some("disk 91% full"));
         assert_eq!(degraded.event, "degraded");
         assert_eq!(degraded.latency_ms, Some(1234));
 
