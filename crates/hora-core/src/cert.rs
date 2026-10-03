@@ -335,7 +335,13 @@ fn sha256_hex(data: &[u8]) -> String {
 /// Extract `(host, port)` from a monitor target URL (port defaults to 443).
 fn host_port(target: &str) -> Option<(String, u16)> {
     let url = reqwest::Url::parse(target).ok()?;
-    let host = url.host_str()?.to_owned();
+    // `host_str` keeps an IPv6 literal's brackets; the TLS `ServerName` and
+    // the socket address want the bare address.
+    let host = url
+        .host_str()?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_owned();
     let port = url.port_or_known_default()?;
     Some((host, port))
 }
@@ -348,12 +354,8 @@ pub fn monitor_endpoint(monitor: &crate::config::Monitor) -> Option<(String, u16
     use crate::config::Kind;
     match monitor.kind {
         Kind::Http => host_port(&monitor.target),
-        Kind::Tcp => {
-            let (host, port) = monitor.target.rsplit_once(':')?;
-            let port: u16 = port.parse().ok()?;
-            let host = host.trim_start_matches('[').trim_end_matches(']');
-            (!host.is_empty()).then(|| (host.to_owned(), port))
-        }
+        Kind::Tcp => crate::config::split_host_port(&monitor.target)
+            .map(|(host, port)| (host.to_owned(), port)),
         _ => None,
     }
 }
@@ -997,6 +999,18 @@ mod tests {
             name = "Web"
             target = "https://example.com:8443/x"
             interval_secs = 60
+            [[monitors]]
+            id = "v6"
+            name = "V6"
+            kind = "tcp"
+            target = "[2001:db8::1]:993"
+            interval_secs = 60
+            starttls = "imap"
+            [[monitors]]
+            id = "web6"
+            name = "Web6"
+            target = "https://[2001:db8::2]/"
+            interval_secs = 60
             "#,
         )
         .expect("config");
@@ -1010,6 +1024,15 @@ mod tests {
         assert_eq!(
             monitor_endpoint(&config.monitors[1]),
             Some(("example.com".to_owned(), 8443))
+        );
+        // IPv6 literals come out bare, whichever kind carries them.
+        assert_eq!(
+            monitor_endpoint(&config.monitors[2]),
+            Some(("2001:db8::1".to_owned(), 993))
+        );
+        assert_eq!(
+            monitor_endpoint(&config.monitors[3]),
+            Some(("2001:db8::2".to_owned(), 443))
         );
     }
 }
