@@ -7,6 +7,7 @@ use sqlx::SqlitePool;
 
 use crate::SECONDS_PER_DAY;
 use crate::config::{Config, Peer};
+use crate::histogram::LatencyHistogram;
 
 use super::annotations::{meta_delete, meta_set};
 use super::{CERT_PIN_AGAINST_META_PREFIX, HEARTBEAT_EXPECTED_META_PREFIX};
@@ -94,6 +95,12 @@ pub async fn downsample_hourly(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<(
         .fetch_one(pool)
         .await?;
     let floor = newest.map_or(i64::MIN, |hour| hour + 3600);
+    // Only whole hours below the cutoff: with none ended since the newest
+    // bucket (most ticks), there is nothing to scan at all.
+    let end = cutoff.div_euclid(3600) * 3600;
+    if end <= floor {
+        return Ok(());
+    }
     sqlx::query(
         "INSERT OR IGNORE INTO checks_hourly \
             (monitor_id, hour, up_count, down_count, degraded_count, avg_latency_ms) \
@@ -106,15 +113,92 @@ pub async fn downsample_hourly(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<(
            CAST(AVG(latency_ms) AS INTEGER) \
          FROM checks \
          WHERE time >= ? AND time < ? \
-         GROUP BY monitor_id, hour \
-         HAVING hour + 3600 <= ?",
+         GROUP BY monitor_id, hour",
     )
     .bind(floor)
-    .bind(cutoff)
-    .bind(cutoff)
+    .bind(end)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Hours whose latency histograms one [`fill_latency_histograms`] call
+/// computes at most: a day and a bit, what the 24h window reads.
+const MAX_HISTOGRAM_HOURS_PER_FILL: usize = 26;
+
+/// Compute the latency histogram (see [`crate::histogram`]) of every hourly
+/// bucket at or after `since` that lacks one: the hours just rolled up, and
+/// after an upgrade the last day's buckets written before histograms existed.
+/// One hour of raw checks is read per bucket hour (outside any write lock);
+/// the hour's histograms are then written in one short transaction. Monitors
+/// without a latency sample that hour get the empty histogram, so "not
+/// computed" (NULL) never lingers.
+///
+/// # Errors
+///
+/// Returns an error if a query fails.
+pub async fn fill_latency_histograms(pool: &SqlitePool, since: i64) -> sqlx::Result<()> {
+    let hours: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT hour FROM checks_hourly \
+         WHERE hour >= ? AND latency_hist IS NULL ORDER BY hour DESC LIMIT ?",
+    )
+    .bind(since)
+    .bind(i64::try_from(MAX_HISTOGRAM_HOURS_PER_FILL).unwrap_or(i64::MAX))
+    .fetch_all(pool)
+    .await?;
+    for hour in hours {
+        let rows = sqlx::query_as::<_, (String, i64, i64)>(
+            "SELECT monitor_id, latency_ms, COUNT(*) FROM checks \
+             WHERE time >= ? AND time < ? AND latency_ms IS NOT NULL \
+             GROUP BY monitor_id, latency_ms",
+        )
+        .bind(hour)
+        .bind(hour + 3600)
+        .fetch_all(pool)
+        .await?;
+        let mut histograms: HashMap<String, LatencyHistogram> = HashMap::new();
+        for (id, latency_ms, count) in rows {
+            histograms
+                .entry(id)
+                .or_default()
+                .record(latency_ms, u64::try_from(count).unwrap_or(0));
+        }
+        let mut tx = pool.begin().await?;
+        for (id, histogram) in &histograms {
+            sqlx::query(
+                "UPDATE checks_hourly SET latency_hist = ? \
+                 WHERE monitor_id = ? AND hour = ? AND latency_hist IS NULL",
+            )
+            .bind(histogram.encode())
+            .bind(id)
+            .bind(hour)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE checks_hourly SET latency_hist = ? WHERE hour = ? AND latency_hist IS NULL",
+        )
+        .bind(LatencyHistogram::default().encode())
+        .bind(hour)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
+/// Roll every ended hour up (counts, then latency histograms). Cheap when
+/// no hour ended since the last call, so the maintenance task runs it every
+/// few minutes: the status page reads ended hours from the buckets and only
+/// the raw rows above them, so a fresh frontier keeps that raw tail short.
+///
+/// # Errors
+///
+/// Returns an error if a query fails.
+pub async fn roll_up_recent(pool: &SqlitePool, now: i64) -> sqlx::Result<()> {
+    downsample_hourly(pool, now - HOURLY_ROLLUP_LAG_SECS).await?;
+    // The 24h window's hours, plus the one it starts in.
+    fill_latency_histograms(pool, now - SECONDS_PER_DAY - 3600).await
 }
 
 /// Aggregate hourly buckets into daily ones for even longer-term storage.
@@ -191,8 +275,7 @@ async fn roll_up_history(pool: &SqlitePool, now: i64) {
     // bucket, hourly buckets older than 90 days into daily ones. Each bucket is
     // written exactly once (see `downsample_hourly`), so the aggregates survive
     // after retention prunes the raw rows they came from.
-    let hourly_cutoff = now - HOURLY_ROLLUP_LAG_SECS;
-    if let Err(err) = downsample_hourly(pool, hourly_cutoff).await {
+    if let Err(err) = roll_up_recent(pool, now).await {
         tracing::warn!("hourly downsampling failed: {err}");
     }
     let daily_cutoff = now - DOWNSAMPLE_DAILY_AFTER_DAYS * SECONDS_PER_DAY;

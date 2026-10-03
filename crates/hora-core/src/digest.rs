@@ -160,7 +160,14 @@ pub async fn build_summary(
         fmt::short_date(now)
     );
 
-    let availability = db::availability_all(pool, since).await?;
+    // A week of checks: the hourly roll-ups plus the raw edges, not a scan
+    // of every raw row in the window.
+    let availability: std::collections::HashMap<String, (i64, i64)> =
+        db::window_stats_all(pool, since)
+            .await?
+            .into_iter()
+            .map(|(id, stats)| (id, (stats.available, stats.total)))
+            .collect();
     // Incidents that overlapped the window: still open, ended inside it, or
     // started inside it. Selected in SQL, so a busy week is never truncated.
     let incidents = db::incidents_between(pool, since, now).await?;

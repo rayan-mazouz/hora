@@ -112,10 +112,11 @@ pub async fn availability_all(
 ///
 /// Every ended hour is rolled up into `checks_hourly` (see
 /// `retention::HOURLY_ROLLUP_LAG_SECS`), so the hourly buckets cover everything
-/// below the newest bucket and the raw checks are only read above it: a few
-/// hours (one `maintenance::PRUNE_INTERVAL` at most) instead of re-aggregating
-/// days of raw rows on every status-page rebuild. Both reads are bounded by the same frontier,
-/// so they stay disjoint (and add up) even if a roll-up commits in between.
+/// below the newest bucket and the raw checks are only read above it: about
+/// an hour (the roll-up runs every few minutes, `maintenance::ROLLUP_INTERVAL`)
+/// instead of re-aggregating days of raw rows. Both reads are bounded by the
+/// same frontier, so they stay disjoint (and add up) even if a roll-up
+/// commits in between.
 /// `checks_daily` takes over once the hourly buckets age out; for each
 /// `(monitor, day)` the source with the most samples wins, which resolves the
 /// boundary day whose hours were partly pruned after their daily roll-up.
@@ -133,28 +134,96 @@ pub async fn daily_all(
         .await?;
     // Past `until` nothing is read, so the frontier never needs to exceed it.
     let frontier = newest_hour.map_or(since, |hour| since.max(hour + 3600).min(until + 1));
-    // Days are grouped as integer UTC day numbers (`time / 86400`) and only
-    // formatted once per bucket below: a per-row `strftime` string, and the
-    // string-keyed GROUP BY it forces, was half of this scan's cost.
-    let raw = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+    let raw = read_raw_days(pool, frontier, until).await?;
+    let hourly = read_hourly_days(pool, since, frontier).await?;
+    let daily = read_daily_buckets(pool, since, until).await?;
+
+    // Hourly buckets and raw rows cover disjoint ranges of the same day: sum.
+    let mut sums: HashMap<String, BTreeMap<i64, DayCounts>> = HashMap::new();
+    for (id, day, counts) in raw.into_iter().chain(hourly) {
+        sums.entry(id)
+            .or_default()
+            .entry(day)
+            .or_default()
+            .add(counts);
+    }
+    Ok(merge_days(sums, daily))
+}
+
+/// Up / down / degraded check counts of one monitor-day.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct DayCounts {
+    up: i64,
+    down: i64,
+    degraded: i64,
+}
+
+impl DayCounts {
+    pub(super) fn add(&mut self, other: Self) {
+        self.up += other.up;
+        self.down += other.down;
+        self.degraded += other.degraded;
+    }
+
+    fn total(self) -> i64 {
+        self.up + self.down + self.degraded
+    }
+}
+
+type DayCountRow = (String, i64, DayCounts);
+
+fn day_count_rows(rows: Vec<(String, i64, i64, i64, i64)>) -> Vec<DayCountRow> {
+    rows.into_iter()
+        .map(|(id, day, up, down, degraded)| (id, day, DayCounts { up, down, degraded }))
+        .collect()
+}
+
+/// Raw checks in `[since, until]` per monitor and UTC day number. Days are
+/// grouped as integers (`time / 86400`) and only formatted once per bucket:
+/// a per-row `strftime` string, and the string-keyed GROUP BY it forces, was
+/// half of this scan's cost.
+pub(super) async fn read_raw_days(
+    pool: &SqlitePool,
+    since: i64,
+    until: i64,
+) -> sqlx::Result<Vec<DayCountRow>> {
+    let rows = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
         "SELECT monitor_id, time / 86400 AS day, \
             SUM(status = 1), SUM(status = 0), SUM(status = 2) \
          FROM checks WHERE time >= ? AND time <= ? GROUP BY monitor_id, day",
     )
-    .bind(frontier)
+    .bind(since)
     .bind(until)
     .fetch_all(pool)
     .await?;
-    let hourly = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+    Ok(day_count_rows(rows))
+}
+
+/// Hourly buckets starting in `[since, until)` per monitor and UTC day.
+pub(super) async fn read_hourly_days(
+    pool: &SqlitePool,
+    since: i64,
+    until: i64,
+) -> sqlx::Result<Vec<DayCountRow>> {
+    let rows = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
         "SELECT monitor_id, hour / 86400 AS day, \
             SUM(up_count), SUM(down_count), SUM(degraded_count) \
          FROM checks_hourly WHERE hour >= ? AND hour < ? GROUP BY monitor_id, day",
     )
     .bind(since)
-    .bind(frontier)
+    .bind(until)
     .fetch_all(pool)
     .await?;
-    let daily = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+    Ok(day_count_rows(rows))
+}
+
+/// Daily buckets starting in `[since, until]`.
+pub(super) async fn read_daily_buckets(
+    pool: &SqlitePool,
+    since: i64,
+    until: i64,
+) -> sqlx::Result<Vec<DayCountRow>> {
+    let rows = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
         "SELECT monitor_id, day / 86400 AS day, \
             up_count, down_count, degraded_count \
          FROM checks_daily WHERE day >= ? AND day <= ?",
@@ -163,35 +232,38 @@ pub async fn daily_all(
     .bind(until)
     .fetch_all(pool)
     .await?;
+    Ok(day_count_rows(rows))
+}
 
-    // Hourly buckets and raw rows cover disjoint ranges of the same day: sum.
-    let mut best: HashMap<String, BTreeMap<i64, (i64, i64, i64)>> = HashMap::new();
-    for (id, day, up, down, degraded) in raw.into_iter().chain(hourly) {
-        let slot = best.entry(id).or_default().entry(day).or_insert((0, 0, 0));
-        *slot = (slot.0 + up, slot.1 + down, slot.2 + degraded);
-    }
-    for (id, day, up, down, degraded) in daily {
-        let slot = best.entry(id).or_default().entry(day).or_insert((0, 0, 0));
-        if up + down + degraded > slot.0 + slot.1 + slot.2 {
-            *slot = (up, down, degraded);
+/// The bars from the summed raw + hourly counts and the daily buckets: for
+/// each `(monitor, day)` the source with the most samples wins, which
+/// resolves the boundary day whose hours were partly pruned after their
+/// daily roll-up.
+pub(super) fn merge_days(
+    mut sums: HashMap<String, BTreeMap<i64, DayCounts>>,
+    daily: Vec<DayCountRow>,
+) -> HashMap<String, Vec<DayRow>> {
+    for (id, day, counts) in daily {
+        let slot = sums.entry(id).or_default().entry(day).or_default();
+        if counts.total() > slot.total() {
+            *slot = counts;
         }
     }
     // BTreeMap keys are day numbers, so iteration order is oldest-first already.
-    Ok(best
-        .into_iter()
+    sums.into_iter()
         .map(|(id, days)| {
             let rows = days
                 .into_iter()
-                .map(|(day, (up, down, degraded))| DayRow {
+                .map(|(day, counts)| DayRow {
                     day: iso_day(day),
-                    up,
-                    down,
-                    degraded,
+                    up: counts.up,
+                    down: counts.down,
+                    degraded: counts.degraded,
                 })
                 .collect();
             (id, rows)
         })
-        .collect())
+        .collect()
 }
 
 /// A UTC day number (`unix_secs / 86400`) as `YYYY-MM-DD`, the format SQLite's
@@ -272,10 +344,12 @@ pub async fn latency_sparkline_all(
 }
 
 /// Hourly average latency for one monitor since `since`: `(hour, avg_ms)`
-/// pairs, hour-aligned, oldest first. Reads the raw checks *and* the
-/// downsampled `checks_hourly` buckets so the series extends beyond the raw
-/// retention window; where both cover an hour the raw average wins (it is
-/// authoritative while complete). Feeds the latency heatmap.
+/// pairs, hour-aligned, oldest first. Feeds the latency heatmap. Rolled-up
+/// hours come from `checks_hourly` (written once, from the complete hour, so
+/// they hold exactly the raw average - and outlive the raw rows); only the
+/// hours above the roll-up frontier are averaged from raw checks, the same
+/// split as [`daily_all`]. Reading four weeks of raw rows per heatmap cost
+/// ~0.4 s on a large database; this reads a few hundred.
 ///
 /// # Errors
 ///
@@ -285,12 +359,17 @@ pub async fn latency_hourly(
     monitor_id: &str,
     since: i64,
 ) -> sqlx::Result<Vec<(i64, i64)>> {
+    let newest_hour: Option<i64> = sqlx::query_scalar("SELECT MAX(hour) FROM checks_hourly")
+        .fetch_one(pool)
+        .await?;
+    let frontier = newest_hour.map_or(since, |hour| since.max(hour + 3600));
     let buckets = sqlx::query_as::<_, (i64, i64)>(
         "SELECT hour, avg_latency_ms FROM checks_hourly \
-         WHERE monitor_id = ?1 AND hour >= ?2 AND avg_latency_ms IS NOT NULL",
+         WHERE monitor_id = ?1 AND hour >= ?2 AND hour < ?3 AND avg_latency_ms IS NOT NULL",
     )
     .bind(monitor_id)
     .bind(since)
+    .bind(frontier)
     .fetch_all(pool)
     .await?;
     let raw = sqlx::query_as::<_, (i64, i64)>(
@@ -298,11 +377,11 @@ pub async fn latency_hourly(
          WHERE monitor_id = ?1 AND time >= ?2 AND latency_ms IS NOT NULL GROUP BY hour",
     )
     .bind(monitor_id)
-    .bind(since)
+    .bind(frontier)
     .fetch_all(pool)
     .await?;
 
-    // Buckets first, raw second: on overlap the raw average overwrites.
+    // Disjoint ranges; the map only orders them.
     let merged: BTreeMap<i64, i64> = buckets.into_iter().chain(raw).collect();
     Ok(merged.into_iter().collect())
 }

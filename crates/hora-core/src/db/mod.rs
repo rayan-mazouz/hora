@@ -15,6 +15,7 @@ mod release;
 mod retention;
 #[cfg(test)]
 mod tests;
+mod window;
 
 pub use aggregates::{
     DayRow, Point, availability, availability_all, daily_all, latency_hourly,
@@ -43,8 +44,10 @@ pub use incidents::{
 pub use release::{StoredRelease, mark_release_notified, release_watch, upsert_release_watch};
 pub(crate) use retention::prune;
 pub use retention::{
-    AGGREGATE_RETENTION_DAYS, downsample_daily, downsample_hourly, prune_daily, prune_hourly,
+    AGGREGATE_RETENTION_DAYS, downsample_daily, downsample_hourly, fill_latency_histograms,
+    prune_daily, prune_hourly, roll_up_recent,
 };
+pub use window::{DailyCache, SparklineCache, WindowCache, WindowStats, window_stats_all};
 
 use std::time::Duration;
 

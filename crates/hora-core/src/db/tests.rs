@@ -254,13 +254,13 @@ async fn daily_aggregates_by_utc_day() {
 }
 
 #[tokio::test]
-async fn latency_hourly_merges_raw_and_buckets() {
+async fn latency_hourly_reads_buckets_below_the_frontier_and_raw_above() {
     let pool = memory_pool().await;
     let hour0 = 10 * 86_400;
     let hour1 = hour0 + 3600;
 
-    // hour0 exists in both sources with different averages; hour1 only as
-    // raw checks; an older hour only as a downsampled bucket.
+    // hour0 is rolled up (with a doctored average) and still has raw rows;
+    // hour1 is raw only; an older hour is a bucket only.
     sqlx::query(
         "INSERT INTO checks_hourly \
                 (monitor_id, hour, up_count, down_count, degraded_count, avg_latency_ms) \
@@ -276,8 +276,9 @@ async fn latency_hourly_merges_raw_and_buckets() {
     insert(&pool, "m", hour1 + 10, 1, Some(300)).await;
 
     let cells = latency_hourly(&pool, "m", 0).await.unwrap();
-    // Oldest first; on the hour0 overlap the raw average (150) wins.
-    assert_eq!(cells, vec![(hour0 - 3600, 50), (hour0, 150), (hour1, 300)]);
+    // Oldest first; a rolled-up hour answers from its bucket (the raw rows
+    // below the frontier are never scanned), the hour above it from raw.
+    assert_eq!(cells, vec![(hour0 - 3600, 50), (hour0, 999), (hour1, 300)]);
 
     // `since` trims the window.
     let recent = latency_hourly(&pool, "m", hour0).await.unwrap();
@@ -883,5 +884,231 @@ async fn backup_into_snapshots_and_refuses_overwrite() {
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{src_s}{suffix}"));
         let _ = std::fs::remove_file(format!("{dest_s}{suffix}"));
+    }
+}
+
+// --- Rolling windows: roll-ups + raw edges must equal the raw-only reads ---
+
+/// A deterministic spread of checks for `monitors` over `[start, end)`: a
+/// sample every `step` seconds, mostly up with varied latency, some
+/// degraded and down (down checks without latency), so every aggregate has
+/// something to count.
+async fn seed_checks(pool: &SqlitePool, monitors: &[&str], start: i64, end: i64, step: i64) {
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut tx = pool.begin().await.unwrap();
+    let mut time = start;
+    while time < end {
+        for id in monitors {
+            let roll = next() % 100;
+            let (status, latency) = match roll {
+                0..=2 => (0, None),
+                3..=7 => (2, Some(1500 + i64::try_from(next() % 900).unwrap())),
+                _ => (1, Some(20 + i64::try_from(next() % 400).unwrap())),
+            };
+            sqlx::query(
+                "INSERT INTO checks (time, monitor_id, status, latency_ms) VALUES (?, ?, ?, ?)",
+            )
+            .bind(time + i64::try_from(next() % 5).unwrap())
+            .bind(id)
+            .bind(status)
+            .bind(latency)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
+        time += step;
+    }
+    tx.commit().await.unwrap();
+}
+
+/// The window path must agree with the raw-only reads: availability exactly,
+/// percentiles within the histogram's 1/64 bound.
+async fn assert_window_matches_raw(pool: &SqlitePool, since: i64) {
+    let stats = window_stats_all(pool, since).await.unwrap();
+    let availability = availability_all(pool, since).await.unwrap();
+    let percentiles = latency_percentiles_all(pool, since).await.unwrap();
+    assert_eq!(stats.len(), availability.len());
+    for (id, &(available, total)) in &availability {
+        let window = &stats[id];
+        assert_eq!((window.available, window.total), (available, total), "{id}");
+        let (p50, p95, p99) = window.latency.p50_p95_p99().expect("samples");
+        let (e50, e95, e99) = percentiles[id];
+        for (got, want) in [(p50, e50), (p95, e95), (p99, e99)] {
+            assert!((got - want).abs() * 64 <= want, "{id}: {got} vs {want}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn window_stats_equal_the_raw_reads_across_roll_ups() {
+    let pool = memory_pool().await;
+    let day0 = 100 * SECONDS_PER_DAY;
+    let now = day0 + 30 * 3600 + 1234;
+    seed_checks(&pool, &["a", "b", "c"], day0, now, 60).await;
+    // A mid-hour window start, so the leading partial hour is read raw.
+    let since = now - SECONDS_PER_DAY;
+
+    // Nothing rolled up: everything raw.
+    assert_window_matches_raw(&pool, since).await;
+    // Rolled up to two hours ago: buckets plus raw edges.
+    roll_up_recent(&pool, now - 7200).await.unwrap();
+    assert_window_matches_raw(&pool, since).await;
+    // Everything that can be: only the current hour stays raw.
+    roll_up_recent(&pool, now).await.unwrap();
+    assert_window_matches_raw(&pool, since).await;
+    // Every bucket in the window carries a histogram now.
+    let missing: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM checks_hourly WHERE hour >= ? AND latency_hist IS NULL",
+    )
+    .bind(since - 3600)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(missing, 0);
+
+    // Buckets rolled up before histograms existed: the window reads their
+    // latency raw, and the next roll-up backfills them.
+    sqlx::query("UPDATE checks_hourly SET latency_hist = NULL WHERE hour % 7200 = 0")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_window_matches_raw(&pool, since).await;
+    fill_latency_histograms(&pool, since - 3600).await.unwrap();
+    assert_window_matches_raw(&pool, since).await;
+}
+
+#[tokio::test]
+async fn histograms_cover_every_bucket_even_without_latency() {
+    let pool = memory_pool().await;
+    let hour0 = 10 * 86_400;
+    insert(&pool, "fast", hour0 + 10, 1, Some(40)).await;
+    insert(&pool, "fast", hour0 + 20, 1, Some(40)).await;
+    insert(&pool, "dead", hour0 + 10, 0, None).await;
+    roll_up_recent(&pool, hour0 + 3600 + 300).await.unwrap();
+
+    let rows = sqlx::query_as::<_, (String, Vec<u8>)>(
+        "SELECT monitor_id, latency_hist FROM checks_hourly ORDER BY monitor_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let decoded: Vec<(String, u64)> = rows
+        .into_iter()
+        .map(|(id, bytes)| {
+            let hist = crate::histogram::LatencyHistogram::decode(&bytes).unwrap();
+            (id, hist.len())
+        })
+        .collect();
+    assert_eq!(
+        decoded,
+        vec![("dead".to_owned(), 0), ("fast".to_owned(), 2)]
+    );
+}
+
+#[tokio::test]
+async fn sparkline_cache_equals_the_one_shot_read_as_time_moves() {
+    let pool = memory_pool().await;
+    let day0 = 100 * SECONDS_PER_DAY;
+    let bucket = 720;
+    let mut cache = SparklineCache::default();
+    let mut now = day0 + 26 * 3600;
+    seed_checks(&pool, &["a", "b"], day0, now, 45).await;
+    for step in 0..12 {
+        let since = now - SECONDS_PER_DAY;
+        let cached = cache.refresh(&pool, since, bucket, now).await.unwrap();
+        let direct = latency_sparkline_all(&pool, since, bucket).await.unwrap();
+        assert_eq!(cached.len(), direct.len(), "step {step}");
+        for (id, points) in &direct {
+            let got: Vec<(i64, i64)> = cached[id].iter().map(|p| (p.t, p.latency_ms)).collect();
+            let want: Vec<(i64, i64)> = points.iter().map(|p| (p.t, p.latency_ms)).collect();
+            assert_eq!(got, want, "step {step}, {id}");
+        }
+        // Time moves by uneven strides (inside a bucket, across several),
+        // and new checks keep arriving.
+        let stride = [5, 400, 30, 2000, 719, 721][step % 6];
+        seed_checks(&pool, &["a", "b"], now, now + stride, 45).await;
+        now += stride;
+    }
+    // Another bucket width starts over.
+    let since = now - SECONDS_PER_DAY;
+    let cached = cache.refresh(&pool, since, 600, now).await.unwrap();
+    let direct = latency_sparkline_all(&pool, since, 600).await.unwrap();
+    assert_eq!(cached["a"].len(), direct["a"].len());
+}
+
+#[tokio::test]
+async fn daily_cache_equals_daily_all_as_roll_ups_and_days_advance() {
+    let pool = memory_pool().await;
+    let day0 = 100 * SECONDS_PER_DAY;
+    let mut now = day0 + 5 * SECONDS_PER_DAY + 7 * 3600;
+    seed_checks(&pool, &["a", "b"], day0, now, 300).await;
+    roll_up_recent(&pool, now).await.unwrap();
+    // Older days live in daily buckets only, as after the 90-day roll-up.
+    downsample_daily(&pool, day0 + 2 * SECONDS_PER_DAY)
+        .await
+        .unwrap();
+    prune_hourly(&pool, day0 + SECONDS_PER_DAY).await.unwrap();
+
+    let mut cache = DailyCache::default();
+    for step in 0..10 {
+        let since = now - 4 * SECONDS_PER_DAY - 1800;
+        let cached = cache.refresh(&pool, since, now).await.unwrap();
+        let direct = daily_all(&pool, since, now).await.unwrap();
+        assert_eq!(cached.len(), direct.len(), "step {step}");
+        for (id, rows) in &direct {
+            let got: Vec<_> = cached[id]
+                .iter()
+                .map(|r| (r.day.clone(), r.up, r.down, r.degraded))
+                .collect();
+            let want: Vec<_> = rows
+                .iter()
+                .map(|r| (r.day.clone(), r.up, r.down, r.degraded))
+                .collect();
+            assert_eq!(got, want, "step {step}, {id}");
+        }
+        // Hours of new checks, rolled up on some steps only, and a step
+        // that crosses midnight.
+        let stride = [1800, 3 * 3600, 600, 20 * 3600][step % 4];
+        seed_checks(&pool, &["a", "b"], now, now + stride, 300).await;
+        now += stride;
+        if step % 2 == 0 {
+            roll_up_recent(&pool, now).await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn window_cache_equals_the_one_shot_read_as_time_moves() {
+    let pool = memory_pool().await;
+    let day0 = 100 * SECONDS_PER_DAY;
+    let mut now = day0 + 26 * 3600 + 1234;
+    seed_checks(&pool, &["a", "b"], day0, now, 30).await;
+    roll_up_recent(&pool, now - 3 * 3600).await.unwrap();
+    // Some hours predate histograms.
+    sqlx::query("UPDATE checks_hourly SET latency_hist = NULL WHERE hour % 10800 = 0")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut cache = WindowCache::default();
+    for step in 0..16 {
+        let since = now - SECONDS_PER_DAY;
+        let cached = cache.refresh(&pool, since, now).await.unwrap();
+        let direct = window_stats_all(&pool, since).await.unwrap();
+        assert_eq!(cached, direct, "step {step}");
+        // Strides inside the hour, across it, and past the tail's lag; new
+        // checks keep arriving and roll-ups land on some steps.
+        let stride = [5, 61, 900, 3600, 2, 4000][step % 6];
+        seed_checks(&pool, &["a", "b"], now, now + stride, 30).await;
+        now += stride;
+        if step % 3 == 1 {
+            roll_up_recent(&pool, now).await.unwrap();
+        }
     }
 }

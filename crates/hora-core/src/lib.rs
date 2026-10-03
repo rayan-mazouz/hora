@@ -11,6 +11,7 @@ mod domain_expiry;
 mod exec;
 pub mod fmt;
 mod heartbeat;
+pub mod histogram;
 pub mod http;
 pub mod import;
 pub mod maintenance;

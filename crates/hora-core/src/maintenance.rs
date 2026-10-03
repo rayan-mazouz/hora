@@ -7,18 +7,25 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use crate::config::Config;
-use crate::db::{SqlitePool, prune};
+use crate::db::{SqlitePool, prune, roll_up_recent};
 
 const PRUNE_INTERVAL: Duration = Duration::from_hours(6);
 /// How long after startup the first prune tick runs. Boot is already the
 /// busiest write window (every monitor's first probe, the cert sweep, possibly
 /// a schema migration); maintenance can wait until the burst has settled.
 const PRUNE_STARTUP_DELAY: Duration = Duration::from_mins(5);
+/// How often ended hours are rolled up between prunes. The status page reads
+/// ended hours from the roll-ups and only the raw rows above the newest one,
+/// so the frontier must trail the clock by about an hour, not a prune
+/// interval. A tick with no newly ended hour is one indexed `MAX(hour)`.
+const ROLLUP_INTERVAL: Duration = Duration::from_mins(5);
 
 /// Background task: periodically prune each monitor's history to its retention,
 /// and drop any data left behind by monitors removed from the config (after a
-/// grace period, see `db::retention::delete_orphans`). A shutdown
-/// signal lets it stop between ticks instead of being aborted.
+/// grace period, see `db::retention::delete_orphans`); in between, roll the
+/// ended hours up every few minutes (from startup on: after an upgrade or a
+/// downtime the status page reads raw rows until the roll-ups catch up). A
+/// shutdown signal lets it stop between ticks instead of being aborted.
 #[must_use]
 pub fn spawn_pruner(
     pool: &SqlitePool,
@@ -31,14 +38,23 @@ pub fn spawn_pruner(
             tokio::time::Instant::now() + PRUNE_STARTUP_DELAY,
             PRUNE_INTERVAL,
         );
+        let mut rollup = tokio::time::interval(ROLLUP_INTERVAL);
+        rollup.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                _ = ticker.tick() => {}
+                _ = ticker.tick() => {
+                    let config = config.borrow().clone();
+                    if let Err(err) = prune(&pool, &config).await {
+                        tracing::warn!("pruning failed: {err}");
+                    }
+                }
+                _ = rollup.tick() => {
+                    let now = chrono::Utc::now().timestamp();
+                    if let Err(err) = roll_up_recent(&pool, now).await {
+                        tracing::warn!("hourly roll-up failed: {err}");
+                    }
+                }
                 _ = shutdown.changed() => break,
-            }
-            let config = config.borrow().clone();
-            if let Err(err) = prune(&pool, &config).await {
-                tracing::warn!("pruning failed: {err}");
             }
         }
     })
