@@ -1,71 +1,93 @@
 ---
 title: Hora
-description: A tiny, self-hosted uptime monitor written in Rust. One small binary, a status page, and alerts that never wake you up for flapping.
+description: Hora keeps the hours, so you can sleep. A small self-hosted uptime monitor that wakes you only for real outages.
 template: splash
 hero:
-  tagline: A tiny, self-hosted uptime monitor. One ~15 MB binary probes your services, stores history in SQLite, alerts you when something really breaks, and serves a status page plus a JSON API.
-  # image.html, not image.file: the file variant hardcodes a 400x400 render
-  # (it is meant for a logo), which crops the screenshot. The webp lives in
-  # public/ (pre-optimized, 1400x979); /hora is the deployed base path.
-  image:
-    html: >-
-      <img src="/hora/screenshot.webp" width="1400" height="979"
-      alt="The Hora status page: monitor cards with daily uptime bars,
-      latency charts and p95/p99" />
+  title: Hora keeps the hours, so you can sleep.
+  tagline: One small binary checks your services, keeps their history, and serves a calm status page. It wakes you only when something has really broken, never for a blip.
   actions:
     - text: Get started
       link: ./getting-started/
       icon: right-arrow
-    - text: View on GitHub
-      link: https://github.com/uplg/hora
-      icon: external
-      variant: minimal
+    - text: See the status page
+      link: ./guides/status-page/
+      variant: secondary
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-## Why Hora?
+## Why Hora
 
-<CardGrid stagger>
+<CardGrid>
 	<Card title="Flapping never wakes you up" icon="moon">
-		Alerts fire only after N consecutive failures, failed probes are retried
-		before anything is recorded, and a database taking ten services down with
-		it sends **one** notification - the root cause, with its blast radius.
+		A failed check is retried, an outage needs several failures in a row and,
+		if you run peers, a second place to agree. Ten services down behind one
+		database send one alert: the cause.
 	</Card>
-	<Card title="One small binary" icon="rocket">
-		HTTP, TCP, ICMP, DNS and push probes, TLS expiry and key-pin checks,
-		SQLite storage, a server-rendered status page, Prometheus metrics and ten
-		notification backends - migrations and templates compiled in. The Docker
-		image is a static musl binary on Alpine, about 15 MB.
+	<Card title="One small binary" icon="server">
+		HTTP, TCP, ping, DNS, push and exec checks, SQLite, the status page and ten
+		alert channels in one static binary. The Docker image is about 15 MB. No
+		Node, no Redis, no browser in the background.
 	</Card>
-	<Card title="SRE-grade alerting" icon="seti:graphql">
-		Availability SLOs with visible error budgets and Google-SRE multi-window
-		burn-rate alerts: catch the slow-burning flapping a binary down alert
-		never confirms - and stay quiet once the burn stops.
+	<Card title="Targets you can keep" icon="analytics">
+		Set 99.9 % and Hora shows the downtime you have left, warns when it burns
+		too fast, and writes the monthly report for you.
 	</Card>
-	<Card title="Built for operators" icon="setting">
-		Live config reload without a blind window, ad-hoc silences for deploy
-		hooks, incident annotations, failure snapshots ("what did the service
-		actually answer?"), one-statement backups, and an Uptime Kuma importer.
+	<Card title="A page people trust" icon="laptop">
+		Server-rendered, no JavaScript framework, readable on a phone. Also as plain text
+		for curl, an Atom feed, JSON and badges.
 	</Card>
 </CardGrid>
 
-## At a glance
+## From a blip to an alert, or not
 
-- **Probes**: HTTP (status, keyword and JSONPath assertions, custom headers,
-  proxies), TCP connect, unprivileged ICMP ping, DNS with answer pinning, and
-  cron-aware push heartbeats.
-- **Dual-stack verification**: probe IPv4 *and* IPv6 separately and require
-  both - catch the service whose IPv6 has been silently dead for weeks.
-- **Topology**: declare `depends_on` and alerts are annotated *"caused by X"*
-  or *"impacts: A, B, C"*; dependent alerts fold into their root cause's
-  single notification.
-- **Status page**: server-rendered, no JavaScript framework, with daily uptime
-  bars, latency charts, p95/p99, maintenance banners - and an aligned
-  plain-text rendering when you `curl` it.
-- **History**: every confirmed incident is recorded and served as HTML and an
-  Atom feed, with operator notes and the captured failing response.
-- **Private monitors**: one Hora for a public status page *and* your internal
-  services, gated by a viewer token.
+<ol class="hora-flow">
+	<li><strong>A check fails</strong><span>Retried at once. A single blip stops here and leaves no trace.</span></li>
+	<li><strong>It fails again</strong><span>3 failures in a row (you choose) before anything is called down.</span></li>
+	<li><strong>Others agree</strong><span>Peers in other places check too: a local network hiccup is not an outage.</span></li>
+	<li><strong>Find the cause</strong><span>Services that depend on a down one are grouped under it.</span></li>
+	<li class="end"><strong>One alert</strong><span>The cause and what it affects. Then quiet until it recovers.</span></li>
+</ol>
 
-Named after the **Horai**, the Greek goddesses of the hours.
+The whole path, with the settings behind each step, is in [Concepts](./concepts/).
+
+## The status page
+
+{/* TODO(ui): replace with fresh light and dark screenshots of the new status page
+    once it ships (brand/status-ok.html is the target). Export both at 1400 px wide
+    to public/screenshot-light.webp and public/screenshot-dark.webp, then swap the
+    single <img> below for one per theme (.light-only / .dark-only). */}
+
+<div class="hora-shot">
+	<img
+		src="/hora/screenshot.webp"
+		width="1400"
+		height="979"
+		alt="The Hora status page: monitors grouped in cards, each with its daily uptime bar, latency chart and p95 and p99."
+	/>
+</div>
+
+What visitors see, what you see once signed in, and the plain-text view are
+described in [The status page](./guides/status-page/).
+
+## How it compares
+
+<div class="hora-compare">
+
+| | Hora | Uptime Kuma | Gatus |
+| --- | --- | --- | --- |
+| Runs as | One static binary, ~15 MB image | Node.js app, ~180 MB slim image | Go binary, ~26 MB image |
+| Configured in | A TOML file, reloaded live | The web UI | A YAML file |
+| N failures before an alert | Yes | Yes (retries) | Yes (failure threshold) |
+| One alert for a cascade | Yes, by dependencies | No | No |
+| Confirmed from other places | Yes, by peers | No | No |
+| Error budget, burn-rate alerts | Yes | No | No |
+| Monthly SLA report | Yes, printable | No | No |
+
+</div>
+
+Checked against each project's documentation in October 2026. The details,
+sources and what the others do better are in [Why Hora](./why-hora/).
+
+Named after the **Horai**, the Greek goddesses of the hours. Its owl dozes
+while all is well.

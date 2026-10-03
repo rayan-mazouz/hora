@@ -85,7 +85,7 @@ cargo-audit, tests) - the exact checks CI runs.
 
 ## Environment variables
 
-Only three are read directly (everything else lives in the config file):
+Four are read directly (everything else lives in the config file):
 
 | Variable | Meaning |
 | --- | --- |

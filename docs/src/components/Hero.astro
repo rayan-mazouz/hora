@@ -1,0 +1,211 @@
+---
+// The splash hero, after brand/docs-home.html: an eyebrow, the tagline as the
+// title, the lead, the actions, a one-line install, and the owl asleep inside
+// the twelve hours beside its sentence. Replaces Starlight's Hero (only the
+// landing page sets `hero`); `title`, `tagline` and `actions` still come from
+// the page's frontmatter.
+import { Code, LinkButton } from '@astrojs/starlight/components';
+// Starlight's PAGE_TITLE_ID (dist/constants.js), which it does not export: the
+// skip link and the table of contents point at it.
+const PAGE_TITLE_ID = '_top';
+
+const { data } = Astro.locals.starlightRoute.entry;
+const { title = data.title, tagline, actions = [] } = data.hero || {};
+
+const install = `# one container, about 15 MB
+docker run -d -p 8787:8787 \\
+  -v "$PWD/hora-config:/etc/hora" \\
+  -v hora-data:/data ghcr.io/uplg/hora`;
+---
+
+<div class="hora-hero">
+	<div class="copy">
+		<p class="eyebrow">Self-hosted uptime monitor</p>
+		<h1 id={PAGE_TITLE_ID} data-page-title set:html={title} />
+		{tagline && <p class="lead" set:html={tagline} />}
+		{
+			actions.length > 0 && (
+				<div class="actions sl-flex">
+					{actions.map(({ attrs: { class: className, ...attrs } = {}, icon, link: href, text, variant }) => (
+						<LinkButton {href} {variant} icon={icon?.name} class:list={[className]} {...attrs}>
+							{text}
+							{icon?.html && <Fragment set:html={icon.html} />}
+						</LinkButton>
+					))}
+				</div>
+			)
+		}
+		<div class="install"><Code code={install} lang="sh" frame="none" /></div>
+	</div>
+
+	<div class="stage">
+		<svg class="dial" viewBox="0 0 200 200" aria-hidden="true">
+			<circle cx="100" cy="100" r="88" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="1.5 6" stroke-linecap="round"></circle>
+			<path d="M100 4v10M100 186v10M4 100h10M186 100h10M148 16.9l-5 8.7M57 174.4l-5 8.7M183.1 52l-8.7 5M25.6 143l-8.7 5M183.1 148l-8.7-5M25.6 57 16.9 52M148 183.1l-5-8.7M57 25.6 52 16.9" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+		</svg>
+		<svg class="owl" viewBox="6 6 40 40" width="240" height="240" aria-hidden="true">
+			<path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"></path>
+			<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"></path>
+			<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"></ellipse>
+			<ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"></ellipse>
+			<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"></path>
+			<g class="tx">
+				<circle cx="18.9" cy="24.6" r="4.9"></circle>
+				<circle cx="29.1" cy="24.6" r="4.9"></circle>
+				<path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"></path>
+			</g>
+			<path class="ey" d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0M26.9 24.4a2.2 2.2 0 0 0 4.4 0"></path>
+			<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"></path>
+			<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"></ellipse>
+			<ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"></ellipse>
+		</svg>
+		<p class="say">
+			<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="currentColor"></circle></svg>
+			Everything is running.
+		</p>
+	</div>
+</div>
+
+<style>
+	@layer starlight.core {
+		.hora-hero {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr);
+			gap: 2rem;
+			align-items: center;
+			padding-block: 2rem 1rem;
+		}
+		.copy {
+			display: flex;
+			flex-direction: column;
+			gap: 1rem;
+		}
+		.eyebrow {
+			font-size: var(--sl-text-xs);
+			text-transform: uppercase;
+			letter-spacing: 0.06em;
+			color: var(--sl-color-text-accent);
+		}
+		h1 {
+			font-family: var(--hora-display);
+			font-weight: 500;
+			font-size: clamp(2.25rem, 1.5rem + 3.2vw, 4rem);
+			line-height: 1.05;
+			letter-spacing: -0.015em;
+			color: var(--sl-color-white);
+			text-wrap: balance;
+			margin: 0;
+		}
+		.lead {
+			font-size: clamp(var(--sl-text-base), 0.95rem + 0.4vw, 1.1875rem);
+			line-height: 1.6;
+			color: var(--sl-color-gray-3);
+			max-width: 36rem;
+		}
+		.actions {
+			gap: 0.5rem 1rem;
+			flex-wrap: wrap;
+			margin-top: 0.5rem;
+		}
+		.install {
+			max-width: 36rem;
+		}
+		.stage {
+			position: relative;
+			display: grid;
+			place-items: center;
+			min-height: 300px;
+		}
+		.dial {
+			position: absolute;
+			inset: 0;
+			margin: auto;
+			width: min(100%, 420px);
+			aspect-ratio: 1;
+			color: var(--hora-accent-soft);
+			opacity: 0.55;
+		}
+		.owl {
+			position: relative;
+			width: min(55%, 240px);
+			height: auto;
+			overflow: visible;
+		}
+		.owl .ln {
+			fill: var(--hora-owl-fill);
+			stroke: var(--hora-owl-line);
+			stroke-width: 1.5;
+			stroke-linejoin: round;
+		}
+		/* the tufts at rest: asleep, nothing is wrong, so nothing moves */
+		.owl .tl,
+		.owl .tr {
+			transform-box: fill-box;
+		}
+		.owl .tl {
+			transform-origin: 100% 100%;
+			transform: rotate(-5deg);
+		}
+		.owl .tr {
+			transform-origin: 0% 100%;
+			transform: rotate(5deg);
+		}
+		.owl .tx {
+			fill: none;
+			stroke: var(--hora-owl-line);
+			stroke-width: 1;
+			stroke-linecap: round;
+			opacity: 0.2;
+		}
+		.owl .ft {
+			fill: var(--hora-owl-line);
+		}
+		.owl .ey {
+			fill: none;
+			stroke: var(--hora-owl-line);
+			stroke-width: 1.8;
+			stroke-linecap: round;
+		}
+		.owl .bk {
+			fill: var(--sl-color-accent);
+			stroke: var(--sl-color-accent);
+			stroke-width: 0.9;
+			stroke-linejoin: round;
+		}
+		.owl .ck {
+			fill: var(--hora-blush);
+			opacity: 0.85;
+		}
+		.say {
+			position: absolute;
+			bottom: 4%;
+			left: 50%;
+			translate: -50% 0;
+			display: inline-flex;
+			gap: 0.5rem;
+			align-items: center;
+			margin: 0;
+			padding: 0.5rem 0.875rem;
+			border-radius: 999px;
+			background: var(--hora-surface);
+			box-shadow: var(--sl-shadow-sm);
+			font-size: var(--sl-text-sm);
+			font-weight: 500;
+			color: var(--sl-color-white);
+			white-space: nowrap;
+		}
+		.say svg {
+			color: var(--hora-accent-soft);
+		}
+		@media (min-width: 50rem) {
+			.hora-hero {
+				grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.75fr);
+				gap: 3rem;
+				padding-block: clamp(2.5rem, calc(1rem + 6vmin), 5rem) 2rem;
+			}
+			.stage {
+				min-height: 360px;
+			}
+		}
+	}
+</style>

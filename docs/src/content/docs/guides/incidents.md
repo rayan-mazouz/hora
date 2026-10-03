@@ -13,7 +13,8 @@ crash is re-attached and closed on the next healthy tick.
 - `GET /history` - the incident journal as HTML, newest first.
 - `GET /history.atom` - the same as an Atom feed you can subscribe to; an
   entry's `updated` moves when the incident resolves, so feed readers refresh
-  instead of keeping a stale "Ongoing".
+  instead of keeping a stale "Ongoing". Each entry links to the incident's
+  post-mortem page, and the feed is titled after `[page] title`.
 
 Both respect monitor visibility: incidents of private monitors only reach
 authenticated viewers, and failure reasons shown to anonymous viewers
@@ -40,6 +41,9 @@ in a collapsed *"what the service answered"* block, and as a status line in
 response, so no snapshot. DNS pin mismatches snapshot the full bounded answer
 too - TXT records rarely fit the inline reason.
 
+Credential headers (`Set-Cookie`, `Authorization`, `WWW-Authenticate`,
+API-key headers) are redacted before the snapshot is stored.
+
 Snapshots follow the same privacy rule as failure reasons: anonymous viewers
 never see them unless the monitor opts in with `public_error_detail`.
 
@@ -59,6 +63,52 @@ Notes appear on `/history` and in the Atom feed. Unlike captured failure
 detail, notes are written *for* visitors - they are deliberately shown to
 anonymous viewers too.
 
+## Event markers: what changed?
+
+The first question about an outage is often *"what changed?"*. Record your
+changes as they happen, from a deploy hook or by hand:
+
+```sh
+hora event "deploy api v2.3"
+hora event list                      # the recent markers
+hora event -- "list view redesign"   # a title that starts with 'list'
+```
+
+or over HTTP from CI (requires `server.auth_token`):
+
+```sh
+curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
+  "https://status.example.com/api/event?title=deploy+api+v2.3"
+```
+
+A marker shows as a dashed line on the latency charts and a line on
+`/history` (for you, not for visitors). When a monitor confirms down within
+the hour after a marker, the alert and the incident record say so: *"recent
+change: deploy api v2.3, 3m before"*.
+
+## Post-mortems
+
+Every incident already knows most of its own story: when it started, what
+the service answered, what the peers saw, the cause and what it affected,
+the change just before, your note and the timeline. Hora assembles it into
+markdown ready to paste into a ticket:
+
+```sh
+hora postmortem 42
+hora postmortem last
+```
+
+The same is at `/incident/{id}`, with the raw markdown to copy. Visitors get
+the sanitized version (and a 404 for a private monitor's incident).
+
+## The timeline
+
+`hora timeline` (default 7 days, `--days N`) and the `/timeline` page merge
+everything into one chronology, newest first: downs and recoveries, event
+markers, pushed alerts, announcements and silences. *"What happened this
+week?"* in one command. Visitors see public incidents and announcements
+only.
+
 ## Latency heatmaps
 
 Below the incidents, `/history` offers a smokeping-style **heatmap per
@@ -75,5 +125,7 @@ latency.
 ## Retention
 
 Closed incidents age out after a year, alongside the daily aggregates. Open
-incidents are never pruned - they are still being displayed, and close on the
-next healthy tick.
+incidents are never pruned: they are still being displayed, and close on the
+next healthy tick. The incidents of a monitor removed from the config are
+kept for 7 days, in case it comes back (see
+[Removed monitors](../../configuration/#removed-monitors)).

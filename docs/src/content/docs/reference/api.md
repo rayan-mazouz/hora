@@ -17,19 +17,23 @@ Editor...) at it.
 | `GET /history` | Incident history page (HTML). |
 | `GET /history.atom` | Incident history as an Atom feed. |
 | `GET /status/{group}` | Status page restricted to one display group ([group tokens](../../guides/multi-tenant/) accepted). |
-| `GET /report/{YYYY-MM}` | Printable monthly SLA report; `?group=` scopes it to one group. |
+| `GET /incident/{id}` | One incident as a post-mortem page, with the raw markdown to copy. Visitors get the sanitized view; a private monitor's incident is a 404. |
+| `GET /timeline` | The unified chronology of the last 7 days: downs and recoveries, events, pushed alerts, announcements, silences. Visitors see public incidents and announcements only. |
+| `GET /report/{YYYY-MM}` | Printable monthly SLA report; `?group=` scopes it to one group. Months older than the 12-month aggregate retention answer 400. |
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
-| `POST /api/push/{id}` | Record a heartbeat for a push monitor. |
+| `POST /api/push/{id}` | Record a heartbeat for a push monitor or a watched peer. |
 | `POST /api/monitors/{id}/alert` | Push an ad-hoc alert to a monitor's channels (a producer's own failure); records a timeline line, never changes the monitor's status. |
-| `POST /api/silence` | Mute alerts ad hoc (deploy hook). |
+| `POST /api/silence` | Mute alerts ad hoc (deploy hook). Requires `server.auth_token`. |
+| `POST /api/event` | Record an event marker ("deploy api v2.3"), correlated into incidents. Requires `server.auth_token`. |
 | `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
 | `POST /api/announce` | Pin a public status-page banner (`DELETE` clears); auto-expiry via `until`, a duration (`4h`) or a UTC time of day (`18:00`). Requires `server.auth_token`. |
 | `POST /api/peer/probe` | [Multi-vantage confirmation](../../guides/peers/#multi-vantage-confirmation) between nodes: probe a target *from this node's own config* and answer with the verdict. Requires the requesting peer's `listen_token`. |
+| `GET /api/peer/monitors?from=<peer-id>` | The mesh exchange behind `hora peers diff` and the per-vantage view: this node's probeable monitors with its own view of each. Same peer authentication as `/api/peer/probe`. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge. |
 | `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge. |
 | `GET /api/openapi.json` | The OpenAPI 3.1 spec, generated from the code. |
-| `GET /healthz` | Liveness probe (this node and its view of watched peers). |
+| `GET /healthz` | Health of this node and its view of watched peers, as JSON. Answers **503** when the node is degraded (stalled scheduler, unwritable database), 200 otherwise. |
 
 ## Authentication
 
@@ -67,7 +71,13 @@ curl -fsS -X POST -H "X-Push-Token: ${TOKEN}" \
 
 Optional query: `status=up|down|degraded` (default up), `msg=...` (recorded
 with the heartbeat, bounded), `ping=<ms>`. Answers 401 on a wrong token, 404
-if the id is not a push target.
+if the id is not a push target, and 400 on an unknown `status` or a negative
+`ping`.
+
+The `status` is the job's verdict and drives alerting: `down` counts as a
+failure with `msg` as the reason (confirmed down after `fail_threshold`),
+`degraded` counts as degraded. Two pushes in the same second: the last one
+wins. See [push monitors](../../guides/monitors/#push-heartbeat).
 
 ## `POST /api/monitors/{id}/alert`
 
@@ -124,12 +134,37 @@ curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
 ```
 
 `monitors` is a comma-separated list of monitor ids or watched peers'
-`listen_id`s, or `all`; `duration` looks like
+`listen_id`s, or `all` (silences mute peer-watch alerts too); `duration` looks like
 `10m` / `1h30m` (max 7 days); `reason` is optional. **Strictly requires
 `server.auth_token`** - muting alerts is an operator action, so without a
 configured token the endpoint is closed. Unknown ids answer 404 (a typo'd
 hook fails loudly), an unparseable duration 400. Checks keep recording; only
 alerting is muted.
+
+## `POST /api/announce`
+
+Pin a public banner on the status page; `DELETE /api/announce` clears them
+all. Requires `server.auth_token`.
+
+```sh
+curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
+  "https://status.example.com/api/announce?title=Fibre+incident&body=ETA+6pm&severity=warning&until=18:00"
+```
+
+`severity` is `info` (default), `warning`, `critical` or `resolved`. `until` is a duration
+(`4h`, `90m`) or a time of day in UTC (`18:00`, the next occurrence); without
+it the banner stays until cleared. See
+[Announcements](../../guides/alerting/#announcements).
+
+## `GET /metrics`
+
+Prometheus text format. Per monitor: `hora_monitor_status{id,name,status}`
+(set for every monitor, including one whose status is still unknown),
+`hora_monitor_up` and `hora_monitor_degraded` (omitted while the status is
+unknown, so a restart never reads as an outage),
+`hora_monitor_uptime_ratio`, `hora_monitor_last_latency_ms`,
+`hora_monitor_latency_ms{quantile}` (a gauge) and `hora_cert_expiry_days`.
+Private monitors need the operator token.
 
 ## Rate limiting & security headers
 

@@ -1,0 +1,36 @@
+---
+// The changelog, rendered from the repository's CHANGELOG.md (see the
+// `changelog` collection in src/content.config.ts). Edit that file, not this page.
+//
+// The file links to its neighbours relatively (`UPGRADES.md`, `LICENSE`), which
+// would 404 here, so those links are pointed at GitHub; its `# Changelog` heading
+// is dropped because this page supplies the title.
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { getEntry } from 'astro:content';
+
+const entry = await getEntry('changelog', 'changelog');
+if (!entry?.rendered) throw new Error('CHANGELOG.md was not loaded by the changelog collection');
+
+const REPO = 'https://github.com/uplg/hora/blob/main/';
+const html = entry.rendered.html
+	.replace(/<h1[^>]*>[\s\S]*?<\/h1>/, '')
+	.replace(/href="(?:\.\/)?([A-Z][A-Z_-]*(?:\.md)?)(#[^"]*)?"/g, (_, file, hash = '') => `href="${REPO}${file}${hash}"`);
+const headings = (entry.rendered.metadata?.headings ?? []).filter((h) => h.depth === 2);
+const upgrading = `${import.meta.env.BASE_URL.replace(/\/$/, '')}/upgrading/`;
+---
+
+<StarlightPage
+	frontmatter={{
+		title: 'Changelog',
+		description: 'Every notable change to Hora, release by release. Rendered from CHANGELOG.md.',
+		editUrl: 'https://github.com/uplg/hora/edit/main/CHANGELOG.md',
+		tableOfContents: { minHeadingLevel: 2, maxHeadingLevel: 2 },
+	}}
+	headings={headings}
+>
+	<p>
+		Rendered from <a href={`${REPO}CHANGELOG.md`}><code>CHANGELOG.md</code></a> in the
+		repository. What to check before each upgrade is in <a href={upgrading}>Upgrading</a>.
+	</p>
+	<Fragment set:html={html} />
+</StarlightPage>

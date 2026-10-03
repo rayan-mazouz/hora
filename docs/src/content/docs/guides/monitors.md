@@ -50,9 +50,12 @@ online" counter. When the page is HTML, anchor the pattern on the surrounding
 markup: `number_regex = 'class="shipCount">(\d+)<'` with `number_min = 1` goes
 down the moment the counter reads zero (or disappears entirely).
 
-Redirects are followed (up to 10), but configured headers - which may carry
-credentials - are only re-attached while the redirect stays on the original
+Redirects are followed (up to 10), but configured headers, which may carry
+credentials, are only re-attached while the redirect stays on the original
 origin, so a compromised target can't bounce your API key to another host.
+A monitor that expects a 3xx (`expected_status = 301`) does **not** follow
+redirects: it checks the redirect itself, such as HTTP to HTTPS or apex to
+`www`.
 
 ### `tcp`
 
@@ -94,6 +97,9 @@ dns_record = "A"             # A (default), AAAA, CNAME, MX, NS, TXT, SRV, SOA, 
 dns_expected = "1.2.3.4"     # comma-separated, order-insensitive
 dns_resolver = "8.8.8.8:53"  # optional; default: system resolver
 ```
+
+`dns_resolver` is an IP and a port; an IPv6 resolver is bracketed
+(`"[2620:fe::fe]:53"`). A hostname is refused when the config loads.
 
 ### `exec`
 
@@ -177,7 +183,7 @@ opts in - plugin output names devices and container ids.
 
 ### `push` (heartbeat)
 
-No target - the job calls Hora. Down when no ping arrives within
+No target: the job calls Hora. Down when no ping arrives within
 `interval_secs`:
 
 ```sh
@@ -201,7 +207,27 @@ grace_secs = 1800            # how late a ping may be (default 30m)
 ```
 
 Optional query parameters: `?status=up|down|degraded`, `msg=...` (recorded
-with the heartbeat), `ping=<ms>` (round-trip latency).
+with the heartbeat), `ping=<ms>` (round-trip latency). An unknown `status`
+or a negative `ping` is refused with a 400, so a typo never reads as up.
+
+**The job's own verdict drives alerting.** A heartbeat that says
+`status=down` counts as a failure on the next tick, with the job's `msg` as
+the reason, and the monitor is confirmed down after `fail_threshold` of
+them, like any other check. `status=degraded` counts as degraded, so
+`alert_on_degraded` works for push monitors, and the alert carries the
+`msg`:
+
+```sh
+# the backup ran but failed: say so, rather than staying silent
+curl -fsS -X POST -H "X-Push-Token: ${BACKUP_TOKEN}" \
+  "https://status.example.com/api/push/nightly-backup?status=down&msg=disk+full"
+```
+
+**A push monitor that never pinged alerts too.** Once its interval (or its
+first scheduled run plus `grace_secs`) has passed since Hora started
+watching it, it is down with *"no heartbeat received yet"*. That start time
+is stored, so a restart does not push the deadline back. If you declare a
+monitor for a job that does not run yet, comment it out until it does.
 
 ## Dual-stack verification
 

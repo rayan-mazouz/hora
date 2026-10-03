@@ -5,7 +5,8 @@ description: Every hora subcommand - check, test-alert, silence, tune, incidents
 
 Plain `hora` (no arguments) runs the monitor. Everything else is a
 subcommand that does its job and exits. Subcommands that touch the database
-(`silence`, `incidents`, `annotate`) open the daemon's SQLite file directly -
+(`silence`, `incidents`, `annotate`, `event`, `postmortem`, `timeline`,
+`tune`, `digest`, `report`) open the daemon's SQLite file directly -
 run them on the same host, from the daemon's working directory (or with
 `HORA_CONFIG` pointing at its config). They refuse to *create* a database, so
 a wrong path fails loudly instead of operating on an empty file.
@@ -19,7 +20,7 @@ hora silence list
 hora silence clear
 hora announce <title> [body] [--severity s] [--until 4h|18:00]
 hora announce list / clear             # pinned status-page banners
-hora top [--url U] [--token T]         # live terminal dashboard
+hora top [--url U] [--token T] [--interval S]   # live terminal dashboard
 hora digest                            # print the weekly digest (dry run)
 hora report [YYYY-MM]                  # print the monthly SLA report (default: last month)
 hora tune [monitor-id] [--days N]      # recommend fail_threshold / degraded_over_ms per monitor
@@ -27,6 +28,11 @@ hora probe <id|target> [--confirm]     # one-shot ad-hoc probe; --confirm asks t
 hora doctor                            # diagnose the runtime environment
 hora incidents [limit]                 # list recent incidents with their ids
 hora annotate <id|last> "<note>"       # attach a note to an incident
+hora event <title...>                  # record an event marker ("what changed?")
+hora event list [limit]                # the recent event markers
+hora postmortem <id|last>              # an incident's markdown post-mortem
+hora timeline [--days N]               # downs, events, alerts, banners, silences
+hora peers diff                        # compare this node's monitors with each peer's
 hora backup <dest.db>                  # consistent snapshot (VACUUM INTO)
 hora import kuma backup.json           # convert an Uptime Kuma backup (stdout)
 hora --version
@@ -61,7 +67,9 @@ hora silence clear                     # remove every silence
 
 Durations look like `90s`, `10m`, `1h30m` (max 7 days). Checks keep being
 recorded; only alert transitions are muted, picked up by the daemon on its
-next tick. Unknown ids are rejected with the configured list. The same action
+next tick. Ids are monitor ids or a watched peer's `listen_id`; unknown ids
+are rejected with the configured list. The reason is capped at 500
+characters. The same action
 exists over HTTP as
 [`POST /api/silence`](../api/#post-apisilence) for CI pipelines.
 
@@ -70,7 +78,8 @@ exists over HTTP as
 Pins a public banner on the status page - see
 [Announcements](../../guides/alerting/#announcements). `--until` takes a
 duration (`4h`) or a UTC clock time (`18:00`, the next occurrence); without
-it the banner stays until `hora announce clear`.
+it the banner stays until `hora announce clear`. A title that starts with
+`list` or `clear` goes after `--`: `hora announce -- "clear skies tonight"`.
 
 ## `hora top`
 
@@ -239,6 +248,50 @@ hora annotate 42 "fiber cut, ETA 6pm"
 hora annotate last "fiber cut"     # the most recent incident
 hora annotate 42 ""                # an empty note clears it
 ```
+
+## `hora event`
+
+Records an event marker, the answer to *"what changed?"*: shown on the
+latency charts and `/history`, and named in the alert of any monitor that
+confirms down within the hour after it.
+
+```sh
+hora event "deploy api v2.3"
+hora event list               # the 20 most recent (or: hora event list 50)
+hora event -- "list redesign" # a title that starts with 'list'
+```
+
+The HTTP twin is `POST /api/event`. See
+[Event markers](../../guides/incidents/#event-markers-what-changed).
+
+## `hora postmortem`
+
+Prints an incident's auto-generated post-mortem as markdown: first failure,
+what the service answered, the multi-vantage verdict, cause and impact, the
+correlated change, your note, and the timeline. `last` targets the most
+recent incident. The web twin is `/incident/{id}`.
+
+```sh
+hora postmortem 42 > incident-42.md
+```
+
+## `hora timeline`
+
+One chronology, newest first: downs and recoveries, event markers, pushed
+alerts, announcements and silences. Seven days by default:
+
+```sh
+hora timeline --days 30
+```
+
+## `hora peers diff`
+
+Compares this node's probeable monitors (kind and target; push and exec
+monitors have none) with each peer's, over the authenticated mesh exchange.
+[Multi-vantage confirmation](../../guides/peers/#multi-vantage-confirmation)
+only works for monitors both nodes know, and this is what checks it. Exits
+non-zero on any difference or an unreachable peer, so it can gate a config
+deploy. Needs `[health].id` and peers with a `ping_url`.
 
 ## `hora backup`
 

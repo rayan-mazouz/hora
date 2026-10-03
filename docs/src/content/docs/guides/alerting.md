@@ -43,6 +43,19 @@ An empty secret (an unset `${VAR}`) simply disables that channel. Delivery
 retries transient failures, and down alerts include a snippet of the failing
 response body.
 
+Every channel renders the same neutral message (`API is DOWN`,
+`API is slow (812ms)`, `API recovered`) and only adds its own markup and
+priority, so the wording never drifts between channels. Email subjects read
+`[DOWN] API is DOWN`. A message longer than a service accepts (Discord,
+Telegram, Pushover, ntfy...) is cut to its limit with an ellipsis rather
+than refused. A degraded alert says why when it knows: the `msg` of a push
+with `status=degraded`, or the WARNING line of an exec plugin.
+
+Requests to notification services, webhooks and peers follow a redirect
+only within the same origin (or from http to https on the same host), so a
+token is never carried to another host. A webhook URL that redirects
+elsewhere fails delivery.
+
 **Routing**: a monitor (or a peer) selects channels with
 `notify = ["ops-telegram"]`; without it, every configured channel is used.
 
@@ -138,6 +151,9 @@ end   = "2026-06-08T02:00:00Z"
 monitors = ["database"]          # empty = all monitors
 ```
 
+`monitors` takes monitor ids and the `listen_id` of watched
+[peers](../peers/), so a planned reboot of another node stays quiet too.
+
 ## Ad-hoc silences (deploy hooks)
 
 The scriptable counterpart of a maintenance window - made for "mute while
@@ -156,12 +172,15 @@ curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
   "https://status.example.com/api/silence?monitors=api,web&duration=10m&reason=deploy"
 ```
 
-Durations look like `10m`, `90s`, `1h30m` (max 7 days - anything longer
+Durations look like `10m`, `90s`, `1h30m` (max 7 days: anything longer
 belongs in a visible maintenance window). Checks keep recording; only alert
-transitions are muted, picked up on the next tick. The HTTP endpoint
-**strictly requires** `server.auth_token`; unknown monitor ids are rejected
-so a typo'd hook fails loudly instead of silencing nothing. Expired silences
-are swept automatically.
+transitions are muted, picked up on the next tick. The ids are monitor ids
+or the `listen_id` of a watched [peer](../peers/) (by default its `id`), so
+`hora silence hora-b 30m "rebooting hora-b"` mutes that peer's dead-man
+alert. The HTTP endpoint **strictly requires** `server.auth_token`, sent as
+`Authorization: Bearer`; unknown ids are rejected so a typo'd hook fails
+loudly instead of silencing nothing. Expired silences are swept
+automatically.
 
 ## Pushed alerts (from your own jobs)
 
@@ -245,10 +264,16 @@ curl -X POST -H "Authorization: Bearer $TOK" \
 curl -X DELETE -H "Authorization: Bearer $TOK" "https://status.example.com/api/announce"
 ```
 
-`--until` (a duration like `4h`, or `18:00` UTC) auto-expires the banner, so
-the classic stale "incident ongoing" banner three days later cannot happen
-by default. The API requires `server.auth_token` and the banner shows
-immediately (the summary cache is busted on write).
+`--until` (a duration like `4h`, or a time of day like `18:00`, UTC, the
+next occurrence) auto-expires the banner, so the classic stale "incident
+ongoing" banner three days later cannot happen by default. The API's
+`until` takes the same two forms (`until=4h` or `until=18:00`). The API
+requires `server.auth_token` and the banner shows immediately (the summary
+cache is busted on write).
+
+A title that starts with `list` or `clear` needs `--` before it:
+`hora announce -- "clear skies tonight"`. Without it, `hora announce clear`
+removes every banner.
 
 **Declared in the config** - for planned, longer-lived notices, or a GitOps
 workflow where announcements go through git:

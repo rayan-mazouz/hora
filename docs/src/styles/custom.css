@@ -1,29 +1,440 @@
-/* Starlight sizes the hero image slot for a logo or illustration
-   (min(70%, 20rem) on mobile, a 7fr/4fr column capped at 25rem on desktop,
-   and the image.file variant even renders a literal 400x400 asset). Ours is
-   a full status-page screenshot delivered via image.html: give it half the
-   hero and let it keep its natural proportions. These rules are unlayered,
-   so they win over the component's @layer starlight.core styles without
-   specificity games. */
+/* Hora theme for Starlight: the synthe.se tokens, mapped (brand/brand.md, section 12).
+   Checked against @astrojs/starlight 0.42 (dist/style/props.css): `:root` is the dark
+   side, `[data-theme='light']` the light one, and in light the grey ramp runs the
+   other way (`white` is the darkest). Starlight declares its props inside
+   `@layer starlight.base` and its components in `starlight.*` layers; these rules are
+   unlayered, so they win without specificity games. Fonts are self-hosted under
+   /hora/fonts/ (OFL, licences alongside). */
 
-.hero > .hero-html {
-	width: min(100%, 34rem);
+@font-face {
+	font-family: 'Fraunces Variable';
+	src: url('/hora/fonts/Fraunces-VF.woff2') format('woff2');
+	font-weight: 100 900;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Cal Sans';
+	src: url('/hora/fonts/CalSansVF.woff2') format('woff2');
+	font-weight: 400 700;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Borel Display';
+	src: url('/hora/fonts/BorelDisplay-Regular.woff2') format('woff2');
+	font-display: swap;
+}
+@font-face {
+	font-family: 'JetBrains Mono';
+	src: url('/hora/fonts/JetBrainsMono.woff2') format('woff2');
+	font-weight: 400 800;
+	font-display: swap;
 }
 
-.hero > .hero-html img {
+:root {
+	/* dark: night ground, paper ink, bright petrol */
+	--sl-color-white: #f2f0ea;
+	--sl-color-gray-1: #eae7e0; /* ink */
+	--sl-color-gray-2: #d9d6cf; /* body text, 12.04:1 */
+	--sl-color-gray-3: #a8aeb8; /* ink-muted, 7.83:1 */
+	--sl-color-gray-4: #6b7380; /* icons, borders */
+	--sl-color-gray-5: #2e3744; /* line */
+	--sl-color-gray-6: #1a2029; /* surface */
+	--sl-color-black: #151a21; /* ground */
+
+	--sl-color-accent-low: #1d2a31; /* petrol wash */
+	--sl-color-accent: #63c0cb; /* petrol bright */
+	--sl-color-accent-high: #a9dde3; /* links, 11.77:1 */
+
+	/* asides on the state system: note and tip = petrol (info, up), caution = amber,
+	   danger = brick. Card icons and badges use these too. */
+	--sl-color-blue-low: #1d2a31;
+	--sl-color-blue: #63c0cb;
+	--sl-color-blue-high: #a9dde3;
+	--sl-color-purple-low: #1d2a31;
+	--sl-color-purple: #63c0cb;
+	--sl-color-purple-high: #a9dde3;
+	--sl-color-green-low: #1d2a31;
+	--sl-color-green: #63c0cb;
+	--sl-color-green-high: #a9dde3;
+	--sl-color-orange-low: #30261e;
+	--sl-color-orange: #d89372;
+	--sl-color-orange-high: #ebc2ae;
+	--sl-color-red-low: #33211f;
+	--sl-color-red: #e07a63;
+	--sl-color-red-high: #f0b3a6;
+
+	--sl-color-bg-nav: #151a21;
+	--sl-color-bg-sidebar: #151a21;
+	--sl-color-bg-inline-code: #1e2530;
+	--sl-color-hairline-light: #2e3744;
+	--sl-color-hairline: #2e3744;
+	--sl-color-hairline-shade: #151a21;
+	--sl-color-backdrop-overlay: rgb(21 26 33 / 66%);
+
+	--sl-font: 'Cal Sans', system-ui, sans-serif;
+	--sl-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+	--sl-line-height: 1.75;
+	--sl-line-height-headings: 1.15;
+	--sl-content-width: 46rem;
+
+	/* Hora's own, for the rules below and the splash */
+	--hora-display: 'Fraunces Variable', Georgia, serif;
+	--hora-brand: 'Borel Display', var(--hora-display);
+	--hora-radius: 10px;
+	--hora-surface: #1a2029;
+	--hora-raised: #1e2530;
+	--hora-accent-soft: #3e7a84;
+	--hora-on-accent: #151a21;
+	--hora-owl-fill: #1a2029;
+	--hora-owl-line: #eae7e0;
+	--hora-blush: #b8776e;
+}
+
+/* Headings: Starlight raises them at 50em; keep the brand's calmer scale. */
+@media (min-width: 50em) {
+	:root {
+		--sl-text-h1: 2.75rem;
+		--sl-text-h2: 1.75rem;
+		--sl-text-h3: 1.3125rem;
+		--sl-text-h4: 1.125rem;
+	}
+}
+
+:root[data-theme='light'] {
+	/* light: cloud ground, ink, petrol (the ramp is inverted: white = darkest) */
+	--sl-color-white: #1b222c;
+	--sl-color-gray-1: #1b222c; /* ink, 14.05:1 */
+	--sl-color-gray-2: #2e3540; /* body text, 10.84:1 */
+	--sl-color-gray-3: #525a66; /* ink-muted, 6.12:1 */
+	--sl-color-gray-4: #87837a; /* icons, borders */
+	--sl-color-gray-5: #d6d2c6; /* line */
+	--sl-color-gray-6: #e7e4db; /* raised */
+	--sl-color-gray-7: #faf9f5; /* surface */
+	--sl-color-black: #f2f0ea; /* ground */
+
+	--sl-color-accent-low: #d8e4e2;
+	--sl-color-accent: #0e5e68;
+	--sl-color-accent-high: #0a4a52;
+
+	--sl-color-blue-low: #d8e4e2;
+	--sl-color-blue: #4e8a92;
+	--sl-color-blue-high: #0e5e68;
+	--sl-color-purple-low: #d8e4e2;
+	--sl-color-purple: #4e8a92;
+	--sl-color-purple-high: #0e5e68;
+	--sl-color-green-low: #d8e4e2;
+	--sl-color-green: #4e8a92;
+	--sl-color-green-high: #0e5e68;
+	--sl-color-orange-low: #f5e7da;
+	--sl-color-orange: #b4633f;
+	--sl-color-orange-high: #8f4b22;
+	--sl-color-red-low: #f3e2dc;
+	--sl-color-red: #a5372a;
+	--sl-color-red-high: #a5372a;
+
+	--sl-color-bg-nav: #f2f0ea;
+	--sl-color-bg-sidebar: #f2f0ea;
+	--sl-color-bg-inline-code: #e7e4db;
+	--sl-color-hairline-light: #d6d2c6;
+	--sl-color-hairline: #d6d2c6;
+	--sl-color-hairline-shade: #c9c4b6;
+	--sl-color-backdrop-overlay: rgb(27 34 44 / 45%);
+
+	--hora-surface: #faf9f5;
+	--hora-raised: #e7e4db;
+	--hora-accent-soft: #4e8a92;
+	--hora-on-accent: #f2f0ea;
+	--hora-owl-fill: #faf9f5;
+	--hora-owl-line: #1b222c;
+	--hora-blush: #e6a49a;
+}
+
+/* type: Fraunces for what you read first */
+h1#_top,
+.sl-markdown-content :is(h1, h2, h3, h4),
+.card .title {
+	font-family: var(--hora-display);
+	font-weight: 500;
+	letter-spacing: -0.01em;
+}
+body {
+	font-variant-numeric: tabular-nums;
+	-webkit-font-smoothing: antialiased;
+}
+.sidebar-content .group-label .large {
+	font-size: var(--sl-text-xs);
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--sl-color-gray-3);
+	font-weight: 500;
+}
+
+/* the current page in the sidebar: wash, petrol text, a 3 px rule (not a solid accent block) */
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover,
+.sidebar-content a[aria-current='page']:focus {
+	background: var(--sl-color-accent-low);
+	color: var(--sl-color-text-accent);
+	font-weight: 500;
+	box-shadow: inset 3px 0 0 var(--sl-color-accent);
+}
+
+/* asides: the state washes and their icon and title, never a coloured side border alone */
+.starlight-aside {
+	border: 0;
+	border-radius: var(--hora-radius);
+}
+
+/* code: inline code on the raised tone with a hairline */
+.sl-markdown-content :not(pre) > code {
+	border: 1px solid var(--sl-color-hairline-light);
+	border-radius: 4px;
+	padding: 0.12em 0.36em;
+}
+
+/* tables: hairlines only, the header in meta type */
+.sl-markdown-content table {
+	font-size: var(--sl-text-sm);
+}
+.sl-markdown-content :is(th, td) {
+	border-color: var(--sl-color-hairline);
+}
+
+/* cards: the family surface, every icon on the petrol wash (Starlight cycles its
+   card colours, which would paint state colours on plain content) */
+.card {
+	--sl-card-border: transparent;
+	--sl-card-bg: var(--sl-color-accent-low);
+	background-color: var(--hora-surface);
+	border-color: var(--sl-color-hairline);
+	border-radius: 16px;
+}
+/* the mockup's 40 px icon tile: Starlight sizes the svg to 1em under a
+   border-box reset, so its padding ate the glyph */
+.card .icon {
+	box-sizing: content-box;
+	width: 1.375rem;
+	height: 1.375rem;
+	padding: 0.5625rem;
+	color: var(--sl-color-text-accent);
+	border-radius: var(--hora-radius);
+}
+
+/* buttons: the primary is petrol with the ground as text */
+.sl-link-button {
+	border-radius: var(--hora-radius);
+}
+.sl-link-button.primary {
+	background: var(--sl-color-accent);
+	border-color: var(--sl-color-accent);
+	color: var(--hora-on-accent);
+}
+
+/* one focus ring everywhere (WCAG 2.4.7) */
+:focus-visible {
+	outline: 3px solid var(--sl-color-accent);
+	outline-offset: 2px;
+}
+
+/* ---- splash sections (index.mdx) ---- */
+
+.hora-flow {
+	display: grid;
+	gap: 0.5rem;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+	counter-reset: hora-step;
+	padding: 0;
+	margin: 0;
+}
+.sl-markdown-content .hora-flow li {
+	list-style: none;
+	margin: 0;
+	background: var(--hora-surface);
+	border: 1px solid var(--sl-color-hairline);
+	border-radius: 12px;
+	padding: 1rem;
+	line-height: 1.5;
+}
+.hora-flow li strong {
+	display: flex;
+	gap: 0.5rem;
+	align-items: center;
+	color: var(--sl-color-white);
+	font-weight: 500;
+	margin-bottom: 0.25rem;
+}
+.hora-flow li strong::before {
+	counter-increment: hora-step;
+	content: counter(hora-step);
+	flex: none;
+	width: 22px;
+	height: 22px;
+	border-radius: 50%;
+	display: grid;
+	place-items: center;
+	background: var(--sl-color-accent-low);
+	color: var(--sl-color-text-accent);
+	font-size: var(--sl-text-2xs);
+}
+.hora-flow li span {
+	display: block;
+	font-size: var(--sl-text-sm);
+	color: var(--sl-color-gray-3);
+}
+.sl-markdown-content .hora-flow li.end {
+	background: var(--sl-color-accent);
+	border-color: var(--sl-color-accent);
+}
+.hora-flow li.end strong,
+.hora-flow li.end span {
+	color: var(--hora-on-accent);
+}
+.hora-flow li.end strong::before {
+	background: var(--hora-on-accent);
+	color: var(--sl-color-accent);
+}
+
+/* comparison tables: Hora's column on the wash */
+.hora-compare {
+	overflow-x: auto;
+}
+.hora-compare table {
+	display: table;
+	width: 100%;
+	min-width: 34rem;
+}
+.hora-compare th:nth-child(2),
+.hora-compare td:nth-child(2) {
+	background: color-mix(in srgb, var(--sl-color-accent-low) 60%, transparent);
+	font-weight: 500;
+}
+.hora-compare thead th:nth-child(2) {
+	color: var(--sl-color-text-accent);
+}
+
+/* screenshots: one per theme, framed like a card */
+.hora-shot img {
 	width: 100%;
 	height: auto;
 	border-radius: 12px;
-	border: 1px solid var(--sl-color-gray-5);
+	border: 1px solid var(--sl-color-hairline);
 	box-shadow: var(--sl-shadow-md);
 }
+:root[data-theme='light'] .hora-shot .dark-only,
+:root:not([data-theme='light']) .hora-shot .light-only {
+	display: none;
+}
 
-@media (min-width: 50rem) {
-	.hero {
-		grid-template-columns: 1fr 1fr;
-	}
+/* diagrams (Concepts): inline SVG drawn with the theme's own colours */
+.hora-diagram {
+	margin-block: 1.5rem;
+}
+.hora-diagram svg {
+	width: 100%;
+	height: auto;
+	font-family: var(--__sl-font);
+}
+.hora-diagram .box {
+	fill: var(--hora-surface);
+	stroke: var(--sl-color-hairline);
+}
+.hora-diagram .box.end {
+	fill: var(--sl-color-accent);
+	stroke: var(--sl-color-accent);
+}
+.hora-diagram .box.quiet {
+	fill: none;
+	stroke: var(--sl-color-gray-4);
+	stroke-dasharray: 4 4;
+}
+.hora-diagram .t {
+	fill: var(--sl-color-white);
+	font-size: 14px;
+	font-weight: 500;
+}
+.hora-diagram .s {
+	fill: var(--sl-color-gray-3);
+	font-size: 12px;
+}
+.hora-diagram .end-t {
+	fill: var(--hora-on-accent);
+	font-size: 14px;
+	font-weight: 500;
+}
+.hora-diagram .end-s {
+	fill: var(--hora-on-accent);
+	font-size: 12px;
+}
+.hora-diagram .ar {
+	stroke: var(--sl-color-gray-4);
+	stroke-width: 1.5;
+	fill: none;
+}
+.hora-diagram .ar-head {
+	fill: var(--sl-color-gray-4);
+}
+.hora-diagram .exit {
+	stroke: var(--sl-color-gray-4);
+	stroke-width: 1.2;
+	stroke-dasharray: 3 4;
+	fill: none;
+}
 
-	.hero > .hero-html {
-		width: 100%;
+/* brand page swatches */
+.hora-swatches {
+	display: grid;
+	gap: 0.75rem;
+	grid-template-columns: repeat(auto-fill, minmax(min(100%, 12rem), 1fr));
+	padding: 0;
+}
+.sl-markdown-content .hora-swatches li {
+	list-style: none;
+	margin: 0;
+	display: flex;
+	gap: 0.75rem;
+	align-items: center;
+	font-size: var(--sl-text-sm);
+	line-height: 1.4;
+}
+.hora-swatches .chip {
+	flex: none;
+	width: 2.5rem;
+	height: 2.5rem;
+	border-radius: 8px;
+	border: 1px solid var(--sl-color-hairline);
+}
+.hora-marks {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 1.5rem;
+	align-items: center;
+}
+.hora-marks img {
+	height: 64px;
+	width: auto;
+}
+.hora-marks .tile {
+	display: inline-block;
+	padding: 1rem;
+	border-radius: 12px;
+	border: 1px solid var(--sl-color-hairline);
+}
+.hora-marks .paper {
+	background: #f2f0ea;
+}
+.hora-marks .night {
+	background: #151a21;
+}
+.hora-marks .petrol {
+	background: #0e5e68;
+}
+.sl-markdown-content tr:has(img) td {
+	vertical-align: middle;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	* {
+		transition: none !important;
+		animation: none !important;
 	}
 }
