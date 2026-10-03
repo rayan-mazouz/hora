@@ -44,12 +44,22 @@ impl Cadence {
                 Some((
                     FailureKind::MissedSchedule,
                     format!(
-                        "missed scheduled heartbeat (was due {due_label} + {}m grace)",
-                        grace_secs / 60
+                        "missed scheduled heartbeat (was due {due_label} + {} grace)",
+                        grace_phrase(*grace_secs)
                     ),
                 ))
             }
         }
+    }
+}
+
+/// A cron grace as configured: `30m`, `2h`, `20s`, `1m 30s` - whole minutes
+/// alone would read "0m grace" for a 20-second one.
+fn grace_phrase(secs: u64) -> String {
+    match secs {
+        3_600.. if secs.is_multiple_of(3_600) => format!("{}h", secs / 3_600),
+        60.. if secs.is_multiple_of(60) => format!("{}m", secs / 60),
+        _ => crate::fmt::duration(i64::try_from(secs).unwrap_or(i64::MAX)),
     }
 }
 
@@ -247,6 +257,15 @@ pub(crate) async fn heartbeat_outcome_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_grace_reads_as_configured() {
+        assert_eq!(grace_phrase(20), "20s");
+        assert_eq!(grace_phrase(90), "1m 30s");
+        assert_eq!(grace_phrase(1_800), "30m");
+        assert_eq!(grace_phrase(5_400), "90m");
+        assert_eq!(grace_phrase(7_200), "2h");
+    }
 
     fn beat(time: i64, status: CheckStatus, error: Option<&str>) -> db::Heartbeat {
         db::Heartbeat {
