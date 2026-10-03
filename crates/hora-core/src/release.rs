@@ -8,13 +8,13 @@
 //! rather than asking on each tick.
 
 use crate::config::ReleaseWatch;
+use crate::rdap::{MAX_JSON_BYTES, get_json, read_capped};
 
 /// GitHub's REST API, repositories.
 const API: &str = "https://api.github.com/repos";
 
-/// How many redirects to follow by hand. The shared HTTP client never
-/// auto-follows (probe headers must not cross origins), and GitHub answers a
-/// renamed or transferred repository with a 301.
+/// How many redirects to follow: GitHub answers a renamed or transferred
+/// repository with a 301 (followed by hand, whatever the client's policy).
 const MAX_REDIRECTS: usize = 3;
 
 /// The longest text taken for a version: an answer that is not a version (an
@@ -36,35 +36,22 @@ pub(crate) struct Release {
 /// repository) or the project has published no release: tags alone are not
 /// releases.
 pub(crate) async fn latest(client: &reqwest::Client, project: &str) -> anyhow::Result<Release> {
-    let mut url = format!("{API}/{project}/releases/latest");
-    for _ in 0..=MAX_REDIRECTS {
-        let response = client
-            .get(&url)
-            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await?;
-        let status = response.status();
-        if status.is_redirection() {
-            let Some(next) = response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|value| value.to_str().ok())
-            else {
-                anyhow::bail!("redirect without a Location header");
-            };
-            url = next.to_owned();
-            continue;
-        }
-        anyhow::ensure!(
-            status != reqwest::StatusCode::NOT_FOUND,
+    let url = format!("{API}/{project}/releases/latest");
+    let headers = [
+        (
+            reqwest::header::ACCEPT.as_str(),
+            "application/vnd.github+json",
+        ),
+        ("X-GitHub-Api-Version", "2022-11-28"),
+    ];
+    let body = match get_json(client, &url, &headers, MAX_REDIRECTS).await? {
+        Ok(body) => body,
+        Err(reqwest::StatusCode::NOT_FOUND) => anyhow::bail!(
             "no such repository, or no published release (tags alone are not releases)"
-        );
-        anyhow::ensure!(status.is_success(), "GitHub answered HTTP {status}");
-        let body: serde_json::Value = response.json().await?;
-        return release_of(&body).ok_or_else(|| anyhow::anyhow!("no tag_name in GitHub's answer"));
-    }
-    anyhow::bail!("too many redirects")
+        ),
+        Err(status) => anyhow::bail!("GitHub answered HTTP {status}"),
+    };
+    release_of(&body).ok_or_else(|| anyhow::anyhow!("no tag_name in GitHub's answer"))
 }
 
 /// The tag and page of a release object of GitHub's API.
@@ -97,9 +84,12 @@ pub(crate) async fn running(
     let response = client.get(url).send().await?;
     let status = response.status();
     anyhow::ensure!(status.is_success(), "{url} answered HTTP {status}");
-    let body = response.text().await?;
-    version_in(&body, watch.current_query.as_deref())
-        .ok_or_else(|| anyhow::anyhow!("no version in the answer of {url}"))
+    let body = read_capped(response, MAX_JSON_BYTES).await?;
+    version_in(
+        &String::from_utf8_lossy(&body),
+        watch.current_query.as_deref(),
+    )
+    .ok_or_else(|| anyhow::anyhow!("no version in the answer of {url}"))
 }
 
 /// The version inside a service's answer: the first node `query` matches in a

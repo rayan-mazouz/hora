@@ -6,10 +6,12 @@
 //! skipped: we only read the validity dates, independent of chain trust.
 //!
 //! Additionally, if a monitor has a `cert_pin` configured, the SHA-256
-//! fingerprint of the leaf public key is compared against it. A fingerprint
-//! that matches neither the pin nor the last seen value triggers a
-//! [`hora_notify::Event::CertChanged`] alert - once per new fingerprint, since
-//! the observed value is then remembered.
+//! fingerprint of the leaf public key is compared against it. A key that does
+//! not match the pin triggers a [`hora_notify::Event::CertChanged`] alert, and
+//! keeps doing so on every check until the alert is actually delivered (not
+//! muted by maintenance, no channel failing); only then is the key remembered,
+//! so it alerts once per new key rather than every 12 hours. Presenting the
+//! pinned key again re-arms the alert.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,6 +39,14 @@ use crate::db;
 use crate::notifications::Notifiers;
 
 const CHECK_INTERVAL: Duration = Duration::from_hours(12);
+
+/// Certificate handshakes run concurrently, at most this many at once: a
+/// sequential sweep took up to three timeouts per monitor.
+const CERT_CONCURRENCY: usize = 8;
+
+/// The whole certificate sweep must finish within this; monitors still
+/// unchecked by then are retried on the next tick.
+const CERT_SWEEP_DEADLINE: Duration = Duration::from_mins(5);
 
 /// RDAP lookups happen at most this often per monitor (just under a day, so
 /// the 12h ticks land on a daily cadence): registries rate-limit, the answer
@@ -278,26 +288,11 @@ pub struct CertInfo {
     pub fingerprint: String,
 }
 
-/// Connect to an `https://…` URL, read its leaf certificate and return its
-/// expiry and public-key fingerprint. Like the watcher, trust is intentionally
-/// not verified: this reads the dates, not the chain. Reuses the watcher's
-/// exact handshake path.
-///
-/// # Errors
-///
-/// Returns an error if no host/port can be derived from `target`, or the
-/// TCP/TLS handshake fails within `timeout`.
-pub async fn inspect(target: &str, timeout: Duration) -> anyhow::Result<CertInfo> {
-    let (host, port) = host_port(target).ok_or_else(|| {
-        anyhow::anyhow!("cannot determine host:port for a cert check from {target:?}")
-    })?;
-    inspect_endpoint(&host, port, None, None, timeout).await
-}
-
-/// Like [`inspect`], but for a bare endpoint - optionally negotiating
-/// STARTTLS first (announcing `ehlo_name`, or the local address literal), so
-/// `hora probe` can read a mail server's certificate the same way the watcher
-/// does.
+/// Connect to an endpoint, read its leaf certificate and return its expiry and
+/// public-key fingerprint - optionally negotiating STARTTLS first (announcing
+/// `ehlo_name`, or the local address literal), so `hora probe` reads a
+/// certificate exactly the way the watcher does. Like the watcher, trust is
+/// intentionally not verified: this reads the dates, not the chain.
 ///
 /// # Errors
 ///
@@ -393,94 +388,151 @@ pub fn spawn_watcher(
                 _ = shutdown.changed() => break,
             }
             let snapshot = config.borrow().clone();
-            let threshold_days = i64::from(snapshot.alerts.cert_expiry_days);
             let now = chrono::Utc::now().timestamp();
 
             // Forget monitors that no longer exist so the alert-dedup maps stay bounded.
             warned.retain(|id, _| snapshot.monitors.iter().any(|m| &m.id == id));
             domain_warned.retain(|id, _| snapshot.monitors.iter().any(|m| &m.id == id));
 
-            check_domains(
-                &pool,
-                &snapshot,
-                &notifier,
-                &client,
-                &mut domain_warned,
-                now,
-            )
-            .await;
-            check_releases(&pool, &snapshot, &notifier, &client, now).await;
-
-            for monitor in snapshot.monitors.iter().filter(|m| m.checks_cert()) {
-                let Some((host, port)) = monitor_endpoint(monitor) else {
-                    warn!(monitor = %monitor.id, "cannot parse host for cert check");
-                    continue;
-                };
-
-                let starttls = Starttls::for_monitor(monitor);
-                match fetch(
-                    &tls,
-                    &host,
-                    port,
-                    starttls,
-                    monitor.ehlo_name.as_deref(),
-                    monitor.timeout(),
+            // A shutdown mid-sweep stops it rather than waiting out every
+            // remaining lookup and handshake.
+            let sweep = async {
+                check_domains(
+                    &pool,
+                    &snapshot,
+                    &notifier,
+                    &client,
+                    &mut domain_warned,
+                    now,
                 )
-                .await
-                {
-                    Ok((not_after, fingerprint)) => {
-                        if let Err(err) = db::upsert_cert(&pool, &monitor.id, not_after, now).await
-                        {
-                            warn!(monitor = %monitor.id, "failed to store cert info: {err:#}");
-                        }
-                        let days_left = (not_after - now) / SECONDS_PER_DAY;
-                        info!(monitor = %monitor.id, days_left, "checked TLS certificate");
-
-                        let expiring = days_left <= threshold_days;
-                        let already_warned = warned.get(&monitor.id).copied().unwrap_or(false);
-                        // Mute (and don't record the warned state) during maintenance,
-                        // so the alert can still fire once the window ends.
-                        let muted = snapshot.in_maintenance(&monitor.id, chrono::Utc::now());
-                        if !muted {
-                            if expiring && !already_warned {
-                                notifier
-                                    .load_full()
-                                    .dispatch(
-                                        Event::CertExpiring {
-                                            monitor: &monitor.name,
-                                            days_left,
-                                        },
-                                        monitor.notify.as_deref(),
-                                    )
-                                    .await;
-                            }
-                            warned.insert(monitor.id.clone(), expiring);
-                        }
-
-                        if let Some(expected_pin) = &monitor.cert_pin {
-                            check_pin(
-                                &pool,
-                                &notifier,
-                                monitor,
-                                expected_pin,
-                                &fingerprint,
-                                muted,
-                                now,
-                            )
-                            .await;
-                        }
-                    }
-                    Err(err) => warn!(monitor = %monitor.id, "cert check failed: {err:#}"),
-                }
+                .await;
+                check_releases(&pool, &snapshot, &notifier, &client, now).await;
+                check_certs(&pool, &snapshot, &notifier, &tls, &mut warned, now).await;
+            };
+            tokio::select! {
+                () = sweep => {}
+                _ = shutdown.changed() => break,
             }
         }
     })
 }
 
-/// Certificate pinning: compare BEFORE storing, alert, then remember the
-/// observed fingerprint so the same mismatch alerts once, not every check. A
-/// change during maintenance is muted like any other alert (a renewal
-/// mid-window is the deploy, not an attack) but still recorded.
+/// One certificate sweep: fetch every checked monitor's leaf certificate
+/// concurrently (bounded by [`CERT_CONCURRENCY`], and [`CERT_SWEEP_DEADLINE`]
+/// overall), then store and alert on the results one by one.
+async fn check_certs(
+    pool: &SqlitePool,
+    snapshot: &Config,
+    notifier: &Notifiers,
+    tls: &Arc<ClientConfig>,
+    warned: &mut HashMap<String, bool>,
+    now: i64,
+) {
+    use futures_util::StreamExt as _;
+
+    // Each fetch owns its inputs: futures borrowing the snapshot inside a
+    // buffered stream trip rustc's higher-ranked `Send` check in the spawned
+    // watcher task.
+    let targets: Vec<_> = snapshot
+        .monitors
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.checks_cert())
+        .filter_map(|(index, monitor)| {
+            let endpoint = monitor_endpoint(monitor);
+            if endpoint.is_none() {
+                warn!(monitor = %monitor.id, "cannot parse host for cert check");
+            }
+            endpoint.map(|(host, port)| {
+                let tls = Arc::clone(tls);
+                let starttls = Starttls::for_monitor(monitor);
+                let ehlo_name = monitor.ehlo_name.clone();
+                let timeout = monitor.timeout();
+                async move {
+                    let result =
+                        fetch(&tls, &host, port, starttls, ehlo_name.as_deref(), timeout).await;
+                    (index, result)
+                }
+            })
+        })
+        .collect();
+    let expected = targets.len();
+    let mut fetches = futures_util::stream::iter(targets).buffer_unordered(CERT_CONCURRENCY);
+
+    let mut results = Vec::with_capacity(expected);
+    let deadline = tokio::time::sleep(CERT_SWEEP_DEADLINE);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            next = fetches.next() => match next {
+                Some(result) => results.push(result),
+                None => break,
+            },
+            () = &mut deadline => {
+                warn!(
+                    unchecked = expected - results.len(),
+                    "certificate sweep hit its deadline; the rest is retried next tick"
+                );
+                break;
+            }
+        }
+    }
+    drop(fetches);
+
+    let threshold_days = i64::from(snapshot.alerts.cert_expiry_days);
+    for (index, result) in results {
+        let monitor = &snapshot.monitors[index];
+        let (not_after, fingerprint) = match result {
+            Ok(found) => found,
+            Err(err) => {
+                warn!(monitor = %monitor.id, "cert check failed: {err:#}");
+                continue;
+            }
+        };
+        if let Err(err) = db::upsert_cert(pool, &monitor.id, not_after, now).await {
+            warn!(monitor = %monitor.id, "failed to store cert info: {err:#}");
+        }
+        let days_left = (not_after - now) / SECONDS_PER_DAY;
+        info!(monitor = %monitor.id, days_left, "checked TLS certificate");
+
+        let expiring = days_left <= threshold_days;
+        let already_warned = warned.get(&monitor.id).copied().unwrap_or(false);
+        // Mute (and don't record the warned state) during maintenance,
+        // so the alert can still fire once the window ends.
+        let muted = snapshot.in_maintenance(&monitor.id, chrono::Utc::now());
+        if !muted {
+            if expiring && !already_warned {
+                notifier
+                    .load_full()
+                    .dispatch(
+                        Event::CertExpiring {
+                            monitor: &monitor.name,
+                            days_left,
+                        },
+                        monitor.notify.as_deref(),
+                    )
+                    .await;
+            }
+            warned.insert(monitor.id.clone(), expiring);
+        }
+
+        if let Some(expected_pin) = &monitor.cert_pin {
+            check_pin(
+                pool,
+                notifier,
+                monitor,
+                expected_pin,
+                &fingerprint,
+                muted,
+                now,
+            )
+            .await;
+        }
+    }
+}
+
+/// Certificate pinning for one check: alert on an unreported mismatch (see
+/// [`pin_to_report`]), and remember the key only once the alert went out.
 async fn check_pin(
     pool: &SqlitePool,
     notifier: &Notifiers,
@@ -490,30 +542,71 @@ async fn check_pin(
     muted: bool,
     now: i64,
 ) {
-    let stored = match db::cert_pin_fingerprint(pool, &monitor.id).await {
+    let Some(previous) = pin_to_report(pool, &monitor.id, expected_pin, fingerprint, now).await
+    else {
+        return;
+    };
+    if muted {
+        info!(monitor = %monitor.id, "certificate key change muted by maintenance; alerting after it");
+        return;
+    }
+    let dispatcher = notifier.load_full();
+    let failed = dispatcher
+        .dispatch(
+            Event::CertChanged {
+                monitor: &monitor.name,
+                old_fingerprint: &previous,
+                new_fingerprint: fingerprint,
+            },
+            monitor.notify.as_deref(),
+        )
+        .await;
+    if failed.is_empty() {
+        remember_pin(pool, &monitor.id, fingerprint, now).await;
+    } else {
+        warn!(
+            monitor = %monitor.id,
+            "certificate key change alert failed on {}; retrying next check",
+            failed.join(", ")
+        );
+    }
+}
+
+/// Certificate pinning, first half of one check. The stored fingerprint is the
+/// last key either seen matching the pin or *reported* as a mismatch, so:
+/// - a key matching the pin is remembered here, which re-arms the alert;
+/// - a mismatching key not yet reported returns `Some(previous)`: the caller
+///   alerts, and calls [`remember_pin`] only once that alert was delivered.
+///   While muted by maintenance or with a failing channel nothing is stored
+///   and the next check alerts again, so a key first seen in a maintenance
+///   window, or whose alert was lost, is never silently accepted.
+async fn pin_to_report(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    expected_pin: &str,
+    fingerprint: &str,
+    now: i64,
+) -> Option<String> {
+    let stored = match db::cert_pin_fingerprint(pool, monitor_id).await {
         Ok(stored) => stored,
         Err(err) => {
-            warn!(monitor = %monitor.id, "failed to read cert pin: {err:#}");
-            return;
+            warn!(monitor = %monitor_id, "failed to read cert pin: {err:#}");
+            return None;
         }
     };
-    if !muted && let Some(old) = pin_alert(expected_pin, stored.as_deref(), fingerprint) {
-        notifier
-            .load_full()
-            .dispatch(
-                Event::CertChanged {
-                    monitor: &monitor.name,
-                    old_fingerprint: old,
-                    new_fingerprint: fingerprint,
-                },
-                monitor.notify.as_deref(),
-            )
-            .await;
+    if let Some(previous) = pin_alert(expected_pin, stored.as_deref(), fingerprint) {
+        return Some(previous.to_owned());
     }
-    if stored.as_deref() != Some(fingerprint)
-        && let Err(err) = db::upsert_cert_pin(pool, &monitor.id, fingerprint, now).await
-    {
-        warn!(monitor = %monitor.id, "failed to store cert pin: {err:#}");
+    if stored.as_deref() != Some(fingerprint) {
+        remember_pin(pool, monitor_id, fingerprint, now).await;
+    }
+    None
+}
+
+/// Record `fingerprint` as the monitor's last matching or reported key.
+async fn remember_pin(pool: &SqlitePool, monitor_id: &str, fingerprint: &str, now: i64) {
+    if let Err(err) = db::upsert_cert_pin(pool, monitor_id, fingerprint, now).await {
+        warn!(monitor = %monitor_id, "failed to store cert pin: {err:#}");
     }
 }
 
@@ -679,9 +772,10 @@ async fn check_releases(
 /// The pinning verdict for one check: `Some(old)` when an alert should fire,
 /// where `old` is the fingerprint to report as previous (the last seen one,
 /// falling back to the configured pin on the very first check). No alert when
-/// the observed key matches the pin, or when it was already seen - the caller
-/// stores each observed fingerprint, so a mismatch alerts once per change
-/// (and survives restarts) instead of on every check.
+/// the observed key matches the pin, or when it was already reported - the
+/// caller stores a mismatching fingerprint once its alert is delivered, so a
+/// mismatch alerts once per change (and survives restarts) instead of on every
+/// check.
 fn pin_alert<'a>(expected: &'a str, stored: Option<&'a str>, observed: &str) -> Option<&'a str> {
     // Case-insensitive on the configured pin: `parse()` canonicalizes it to
     // lowercase, but a mixed-case pin from any other path must not silently
@@ -707,6 +801,49 @@ mod tests {
         assert_eq!(pin_alert("aaa", Some("bbb"), "bbb"), None);
         // The key changed again: alert with the last seen value as previous.
         assert_eq!(pin_alert("aaa", Some("bbb"), "ccc"), Some("bbb"));
+    }
+
+    #[tokio::test]
+    async fn an_unreported_pin_mismatch_keeps_alerting() {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(":memory:")
+            .create_if_missing(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        db::migrator().run(&pool).await.unwrap();
+        let (pin, rogue) = ("aaa", "bbb");
+
+        // Seen during maintenance (or the alert failed): nothing remembered,
+        // so the next check reports it again instead of accepting the key.
+        assert_eq!(
+            pin_to_report(&pool, "m", pin, rogue, 1).await.as_deref(),
+            Some(pin)
+        );
+        assert_eq!(
+            pin_to_report(&pool, "m", pin, rogue, 2).await.as_deref(),
+            Some(pin)
+        );
+
+        // Delivered: remembered, no repeat every 12 hours.
+        remember_pin(&pool, "m", rogue, 3).await;
+        assert_eq!(pin_to_report(&pool, "m", pin, rogue, 4).await, None);
+
+        // The pinned key is back: remembered, which re-arms the alert.
+        assert_eq!(pin_to_report(&pool, "m", pin, pin, 5).await, None);
+        assert_eq!(
+            db::cert_pin_fingerprint(&pool, "m")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(pin)
+        );
+        assert_eq!(
+            pin_to_report(&pool, "m", pin, rogue, 6).await.as_deref(),
+            Some(pin)
+        );
     }
 
     #[test]
