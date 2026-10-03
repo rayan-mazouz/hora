@@ -595,14 +595,7 @@ pub(crate) async fn incident_page(
     }
     visibility.sanitize_incident(&mut incident);
 
-    let monitor_name = config
-        .monitors
-        .iter()
-        .find(|monitor| monitor.id == incident.monitor_id)
-        .map_or(incident.monitor_id.as_str(), |monitor| {
-            monitor.name.as_str()
-        })
-        .to_owned();
+    let monitor_name = config.monitor_name(&incident.monitor_id).to_owned();
     let markdown = hora_core::postmortem::render(&incident, &monitor_name);
     let html = crate::history::IncidentTemplate {
         title: config.page.title.clone(),
@@ -1118,7 +1111,7 @@ pub(crate) async fn post_alert(
     Json(request): Json<AlertRequest>,
 ) -> Result<(StatusCode, Json<AlertResponse>), AppError> {
     let config = &viewer.config;
-    let monitor = config.monitors.iter().find(|monitor| monitor.id == id);
+    let monitor = config.find_monitor(&id);
 
     // Authenticate with the monitor's own push_token (preferred, via the
     // X-Push-Token header kept out of access logs) or the global viewer token.

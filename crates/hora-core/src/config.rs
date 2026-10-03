@@ -47,6 +47,20 @@ pub struct Config {
 }
 
 impl Config {
+    /// The configured monitor with this id.
+    #[must_use]
+    pub fn find_monitor(&self, id: &str) -> Option<&Monitor> {
+        self.monitors.iter().find(|monitor| monitor.id == id)
+    }
+
+    /// A monitor's display name, falling back to its id (a monitor removed
+    /// from the config after its incidents or alerts were recorded).
+    #[must_use]
+    pub fn monitor_name<'a>(&'a self, id: &'a str) -> &'a str {
+        self.find_monitor(id)
+            .map_or(id, |monitor| monitor.name.as_str())
+    }
+
     /// The maintenance window covering `monitor_id` at `now`, if any. A window
     /// with no `monitors` list covers all of them.
     #[must_use]

@@ -161,27 +161,13 @@ fn find_monitor<'c>(
     config: &'c hora_core::config::Config,
     id: &str,
 ) -> Result<&'c hora_core::config::Monitor, CliError> {
-    config
-        .monitors
-        .iter()
-        .find(|monitor| monitor.id == id)
-        .ok_or_else(|| {
-            let mut message = format!("Unknown monitor {id:?}. Configured ids:");
-            for monitor in &config.monitors {
-                let _ = write!(message, "\n  {}", monitor.id);
-            }
-            usage(message)
-        })
-}
-
-/// A monitor's display name, falling back to its id (a monitor removed from
-/// the config after its incidents were recorded).
-fn monitor_name<'a>(config: &'a hora_core::config::Config, id: &'a str) -> &'a str {
-    config
-        .monitors
-        .iter()
-        .find(|monitor| monitor.id == id)
-        .map_or(id, |monitor| monitor.name.as_str())
+    config.find_monitor(id).ok_or_else(|| {
+        let mut message = format!("Unknown monitor {id:?}. Configured ids:");
+        for monitor in &config.monitors {
+            let _ = write!(message, "\n  {}", monitor.id);
+        }
+        usage(message)
+    })
 }
 
 /// Resolve an incident argument: a numeric id, or `last` for the most recent
@@ -900,7 +886,7 @@ async fn probe(args: &[String]) -> Result<(), CliError> {
     let configured = parsed
         .kind_override
         .is_none()
-        .then(|| config.monitors.iter().find(|m| m.id == parsed.target))
+        .then(|| config.find_monitor(parsed.target))
         .flatten();
     let mut monitor = if let Some(found) = configured {
         found.clone()
@@ -1354,7 +1340,7 @@ async fn postmortem(id_arg: &str) -> Result<(), CliError> {
     let Some(incident) = hora_core::db::incident_by_id(&pool, id).await? else {
         return Err(no_such_incident(id));
     };
-    let name = monitor_name(&config, &incident.monitor_id);
+    let name = config.monitor_name(&incident.monitor_id);
     print!("{}", hora_core::postmortem::render(&incident, name));
     Ok(())
 }
@@ -1368,7 +1354,7 @@ async fn list_incidents(limit: i64) -> Result<(), CliError> {
         return Ok(());
     }
     for incident in incidents {
-        let name = monitor_name(&config, &incident.monitor_id);
+        let name = config.monitor_name(&incident.monitor_id);
         let span = match incident.ended_at {
             Some(ended) => format!(
                 "{} -> {} ({})",
@@ -1802,9 +1788,9 @@ mod tests {
             usage_message(find_monitor(&config, "dbb")),
             "Unknown monitor \"dbb\". Configured ids:\n  api\n  db"
         );
-        assert_eq!(monitor_name(&config, "api"), "Public API");
+        assert_eq!(config.monitor_name("api"), "Public API");
         // A monitor removed since its incident was recorded keeps its id.
-        assert_eq!(monitor_name(&config, "gone"), "gone");
+        assert_eq!(config.monitor_name("gone"), "gone");
     }
 
     #[test]
