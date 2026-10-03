@@ -95,8 +95,10 @@ check before upgrading.
   contradiction quiets a down: no peer, no answer, or any peer seeing it
   down alert as before. The peers are asked again every 5 minutes while it
   lasts; once they no longer all see it up, the real down goes out, once.
-  A recovery goes to whoever received a down. The operator panel *Why
-  nobody was woken* says what the config does with such a down.
+  A recovery goes to whoever received a down, across a daemon restart too
+  (the routing is kept on the incident, migration `0022`, instant). The
+  operator panel *Why nobody was woken* says what the config does with such
+  a down.
 - **Probe failures name their cause.** *connection failed: connection
   refused*, *connection failed: TLS invalid peer certificate: Expired*
   instead of a bare *connection failed*; *proxy failed: tunnel error: proxy

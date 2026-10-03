@@ -41,7 +41,7 @@ older binary refuses keys it does not know.
 
 ## 0.10 to 0.11
 
-The next release brings the new status page and a hardening pass. Three
+The next release brings the new status page and a hardening pass. Four
 schema migrations apply by themselves, in seconds even on very large
 databases, and one optional config key is new
 (`alerts.notify_unconfirmed`); the first page request after the upgrade

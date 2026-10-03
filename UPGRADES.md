@@ -6,13 +6,15 @@ procedure (pull the new image, recreate the container, history lives on the
 
 ## 0.10.0 → 0.11.0
 
-Three schema migrations apply automatically, in seconds even on hundreds of
+Four schema migrations apply automatically, in seconds even on hundreds of
 millions of checks: `0019` (a `source` column on `checks` telling probes,
 pushes and recorded misses apart; older rows are read exactly as before),
 `0020` (a latency histogram per hourly roll-up, plus two indexes; hours
-rolled up before it are read from raw checks until they age out) and `0021`
+rolled up before it are read from raw checks until they age out), `0021`
 (a failure reason code on checks and incidents; older rows keep the
-previous wording-based reading). One new optional key,
+previous wording-based reading) and `0022` (how an incident's down was
+routed, so a restart mid-incident sends a local-only recovery to the quiet
+channels only; schema-only, instant). One new optional key,
 `alerts.notify_unconfirmed`: deploy the binary before a config that sets it
 (`deny_unknown_fields`). The first page request after the upgrade waits for
 the first summary build (a few seconds on a large database). Check these
