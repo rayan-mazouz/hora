@@ -8,6 +8,7 @@ pub mod db;
 pub mod digest;
 pub mod doctor;
 mod exec;
+pub mod fmt;
 pub mod http;
 pub mod import;
 pub mod notifications;

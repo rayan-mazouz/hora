@@ -5,9 +5,8 @@
 //! ready to paste into a ticket. The chore nobody writes, written by the
 //! tool that saw everything.
 
-use chrono::DateTime;
-
 use crate::db::Incident;
+use crate::fmt;
 
 /// Render one incident as a markdown post-mortem. `monitor_name` is the
 /// display name resolved by the caller (falling back to the stored id for
@@ -17,7 +16,7 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::with_capacity(1024);
-    let day = format_date(incident.started_at);
+    let day = fmt::date(incident.started_at);
     let _ = writeln!(out, "# Post-mortem: {monitor_name} - {day}");
     let _ = writeln!(out);
 
@@ -28,12 +27,12 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
     };
     let _ = writeln!(out, "- **Incident:** #{} ({status})", incident.id);
     let _ = writeln!(out, "- **Monitor:** {monitor_name}");
-    let _ = writeln!(out, "- **Started:** {}", format_utc(incident.started_at));
+    let _ = writeln!(out, "- **Started:** {}", fmt::utc(incident.started_at));
     if let Some(ended) = incident.ended_at {
-        let _ = writeln!(out, "- **Ended:** {}", format_utc(ended));
+        let _ = writeln!(out, "- **Ended:** {}", fmt::utc(ended));
     }
     if let Some(duration) = incident.duration_s {
-        let _ = writeln!(out, "- **Duration:** {}", format_duration(duration));
+        let _ = writeln!(out, "- **Duration:** {}", fmt::duration(duration));
     }
     if let Some(error) = &incident.error {
         let _ = writeln!(out, "- **First failure:** {error}");
@@ -76,7 +75,7 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
     let _ = writeln!(
         out,
         "- {} - down confirmed{}",
-        format_utc(incident.started_at),
+        fmt::utc(incident.started_at),
         incident
             .error
             .as_deref()
@@ -84,7 +83,7 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
             .unwrap_or_default()
     );
     if let Some(ended) = incident.ended_at {
-        let _ = writeln!(out, "- {} - recovered", format_utc(ended));
+        let _ = writeln!(out, "- {} - recovered", fmt::utc(ended));
     } else {
         let _ = writeln!(out, "- ongoing at generation time");
     }
@@ -111,30 +110,6 @@ fn longest_backtick_run(text: &str) -> usize {
         }
     }
     longest
-}
-
-fn format_utc(timestamp: i64) -> String {
-    DateTime::from_timestamp(timestamp, 0).map_or_else(
-        || timestamp.to_string(),
-        |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-    )
-}
-
-fn format_date(timestamp: i64) -> String {
-    DateTime::from_timestamp(timestamp, 0).map_or_else(
-        || timestamp.to_string(),
-        |dt| dt.format("%Y-%m-%d").to_string(),
-    )
-}
-
-fn format_duration(seconds: i64) -> String {
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3600 {
-        format!("{}m {}s", seconds / 60, seconds % 60)
-    } else {
-        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
-    }
 }
 
 #[cfg(test)]

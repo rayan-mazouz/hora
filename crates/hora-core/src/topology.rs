@@ -69,36 +69,14 @@ pub fn validate_dag(monitors: &[Monitor]) -> anyhow::Result<()> {
 /// discovery order. Returns an empty slice when the monitor has no dependencies.
 #[must_use]
 pub fn transitive_upstreams<'a>(monitors: &'a [Monitor], id: &str) -> Vec<&'a str> {
-    let upstreams: HashMap<&str, &[String]> = monitors
+    let upstreams: HashMap<&str, Vec<&str>> = monitors
         .iter()
         .filter_map(|m| {
-            m.depends_on
-                .as_ref()
-                .map(|deps| (m.id.as_str(), deps.as_slice()))
+            let deps = m.depends_on.as_ref()?;
+            Some((m.id.as_str(), deps.iter().map(String::as_str).collect()))
         })
         .collect();
-
-    let mut visited = HashSet::new();
-    let mut result = Vec::new();
-    let mut queue = VecDeque::new();
-
-    if let Some(deps) = upstreams.get(id) {
-        for dep in *deps {
-            queue.push_back(dep.as_str());
-        }
-    }
-
-    while let Some(dep) = queue.pop_front() {
-        if visited.insert(dep) {
-            result.push(dep);
-            if let Some(further) = upstreams.get(dep) {
-                for next in *further {
-                    queue.push_back(next.as_str());
-                }
-            }
-        }
-    }
-    result
+    bfs(&upstreams, id)
 }
 
 /// Collect every transitive dependent of `id` (reverse BFS: who depends on `id`,
@@ -107,34 +85,26 @@ pub fn transitive_upstreams<'a>(monitors: &'a [Monitor], id: &str) -> Vec<&'a st
 pub fn transitive_dependents<'a>(monitors: &'a [Monitor], id: &str) -> Vec<&'a str> {
     let mut downstreams: HashMap<&str, Vec<&str>> = HashMap::new();
     for monitor in monitors {
-        if let Some(deps) = &monitor.depends_on {
-            for dep in deps {
-                downstreams
-                    .entry(dep.as_str())
-                    .or_default()
-                    .push(monitor.id.as_str());
-            }
+        for dep in monitor.depends_on.iter().flatten() {
+            downstreams
+                .entry(dep.as_str())
+                .or_default()
+                .push(monitor.id.as_str());
         }
     }
+    bfs(&downstreams, id)
+}
 
+/// Every node reachable from `start` along `edges` (excluding `start` itself
+/// unless a cycle leads back to it), breadth-first, each once.
+fn bfs<'a>(edges: &HashMap<&str, Vec<&'a str>>, start: &str) -> Vec<&'a str> {
     let mut visited = HashSet::new();
     let mut result = Vec::new();
-    let mut queue = VecDeque::new();
-
-    if let Some(deps) = downstreams.get(id) {
-        for &dep in deps {
-            queue.push_back(dep);
-        }
-    }
-
-    while let Some(dep) = queue.pop_front() {
-        if visited.insert(dep) {
-            result.push(dep);
-            if let Some(further) = downstreams.get(dep) {
-                for &next in further {
-                    queue.push_back(next);
-                }
-            }
+    let mut queue: VecDeque<&'a str> = edges.get(start).into_iter().flatten().copied().collect();
+    while let Some(node) = queue.pop_front() {
+        if visited.insert(node) {
+            result.push(node);
+            queue.extend(edges.get(node).into_iter().flatten().copied());
         }
     }
     result

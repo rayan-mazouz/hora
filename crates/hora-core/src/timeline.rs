@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use sqlx::SqlitePool;
 
 use crate::db::{self, Announcement, EventMarker, Incident, PushedAlert, Silence};
+use crate::fmt;
 
 /// What kind of moment an entry records - one stable lowercase tag, used as a
 /// CLI label and a CSS class.
@@ -124,7 +125,7 @@ pub fn merge<S: std::hash::BuildHasher>(
                 title: format!("{} recovered", name(&incident.monitor_id)),
                 detail: incident
                     .duration_s
-                    .map(|secs| format!("after {}", human_secs(secs))),
+                    .map(|secs| format!("after {}", fmt::duration(secs))),
                 incident_id: Some(incident.id),
             });
         }
@@ -172,7 +173,7 @@ pub fn merge<S: std::hash::BuildHasher>(
             kind: Kind::Silence,
             title: format!(
                 "silenced {target} for {}",
-                human_secs(silence.until - silence.created_at)
+                fmt::duration(silence.until - silence.created_at)
             ),
             detail: silence.reason.clone(),
             incident_id: None,
@@ -195,18 +196,6 @@ fn push_part(text: &mut String, part: &str) {
         text.push_str(" · ");
     }
     text.push_str(part);
-}
-
-/// `"42s"`, `"3m 10s"`, `"2h 5m"` - the timeline's duration phrasing.
-fn human_secs(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3600 {
-        format!("{}m {}s", seconds / 60, seconds % 60)
-    } else {
-        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
-    }
 }
 
 #[cfg(test)]
