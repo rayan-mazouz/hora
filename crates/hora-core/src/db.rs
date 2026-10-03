@@ -216,6 +216,71 @@ fn create_private(path: &str) -> std::io::Result<()> {
     options.open(path).map(drop)
 }
 
+/// Where a check row came from (the `checks.source` column).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckSource {
+    /// The scheduler probed (or ran) the monitor.
+    Probe,
+    /// An explicit heartbeat on `/api/push/{id}`.
+    Push,
+    /// The scheduler recorded an overdue heartbeat as down.
+    Miss,
+}
+
+impl CheckSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Probe => "probe",
+            Self::Push => "push",
+            Self::Miss => "miss",
+        }
+    }
+}
+
+/// One row of `checks`, as written by the scheduler or the push endpoint.
+struct CheckRow<'a> {
+    time: i64,
+    monitor_id: &'a str,
+    status: i64,
+    latency_ms: Option<i64>,
+    status_code: Option<i64>,
+    error: Option<&'a str>,
+    source: CheckSource,
+}
+
+/// The single `checks` insert. `UNIQUE(monitor_id, time)` makes same-second
+/// writes collide, and who wins depends on the source: an explicit push
+/// overwrites whatever holds its second (a `status=up` then `status=down`
+/// within one second keeps the failure; a push landing in the second of a
+/// recorded miss replaces the miss, so the heartbeat that ends the streak is
+/// not lost). Probes and misses never overwrite: a same-second duplicate probe
+/// is a no-op, and a miss must not erase the push it raced with.
+async fn insert_check_row(pool: &SqlitePool, row: CheckRow<'_>) -> sqlx::Result<()> {
+    let sql = if row.source == CheckSource::Push {
+        "INSERT INTO checks (time, monitor_id, status, latency_ms, status_code, error, source) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(monitor_id, time) DO UPDATE SET \
+            status = excluded.status, latency_ms = excluded.latency_ms, \
+            status_code = excluded.status_code, error = excluded.error, \
+            source = excluded.source"
+    } else {
+        "INSERT OR IGNORE INTO checks \
+            (time, monitor_id, status, latency_ms, status_code, error, source) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)"
+    };
+    sqlx::query(sql)
+        .bind(row.time)
+        .bind(row.monitor_id)
+        .bind(row.status)
+        .bind(row.latency_ms)
+        .bind(row.status_code)
+        .bind(row.error)
+        .bind(row.source.as_str())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Insert one probe result.
 ///
 /// # Errors
@@ -227,24 +292,59 @@ pub async fn insert_check(
     status: i64,
     outcome: &Outcome,
 ) -> sqlx::Result<()> {
-    let now = chrono::Utc::now().timestamp();
-    // OR IGNORE: a same-second duplicate (UNIQUE monitor_id, time) is a no-op.
-    sqlx::query(
-        "INSERT OR IGNORE INTO checks (time, monitor_id, status, latency_ms, status_code, error) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+    insert_check_row(
+        pool,
+        CheckRow {
+            time: chrono::Utc::now().timestamp(),
+            monitor_id,
+            status,
+            latency_ms: outcome.latency_ms,
+            status_code: outcome.status_code,
+            error: outcome.error.as_deref(),
+            source: CheckSource::Probe,
+        },
     )
-    .bind(now)
-    .bind(monitor_id)
-    .bind(status)
-    .bind(outcome.latency_ms)
-    .bind(outcome.status_code)
-    .bind(outcome.error.as_deref())
-    .execute(pool)
-    .await?;
-    Ok(())
+    .await
+}
+
+/// Record an overdue heartbeat (push monitor or watched peer) as a down check,
+/// marked as a miss so it is never mistaken for an explicit `status=down` push
+/// (see [`last_heartbeat`]). A push already holding this second wins.
+///
+/// # Errors
+///
+/// Returns an error if the insert fails.
+pub async fn insert_heartbeat_miss(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    reason: &str,
+) -> sqlx::Result<()> {
+    insert_heartbeat_miss_at(pool, monitor_id, reason, chrono::Utc::now().timestamp()).await
+}
+
+async fn insert_heartbeat_miss_at(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    reason: &str,
+    time: i64,
+) -> sqlx::Result<()> {
+    insert_check_row(
+        pool,
+        CheckRow {
+            time,
+            monitor_id,
+            status: 0,
+            latency_ms: None,
+            status_code: None,
+            error: Some(reason),
+            source: CheckSource::Miss,
+        },
+    )
+    .await
 }
 
 /// Record a heartbeat pushed via the API (status: 0 down, 1 up, 2 degraded).
+/// The last push within a second wins (see [`insert_check_row`]).
 ///
 /// # Errors
 ///
@@ -256,19 +356,38 @@ pub async fn insert_push(
     latency_ms: Option<i64>,
     message: Option<&str>,
 ) -> sqlx::Result<()> {
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query(
-        "INSERT OR IGNORE INTO checks (time, monitor_id, status, latency_ms, status_code, error) \
-         VALUES (?, ?, ?, ?, NULL, ?)",
+    insert_push_at(
+        pool,
+        monitor_id,
+        status,
+        latency_ms,
+        message,
+        chrono::Utc::now().timestamp(),
     )
-    .bind(now)
-    .bind(monitor_id)
-    .bind(status)
-    .bind(latency_ms)
-    .bind(message)
-    .execute(pool)
-    .await?;
-    Ok(())
+    .await
+}
+
+async fn insert_push_at(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    status: i64,
+    latency_ms: Option<i64>,
+    message: Option<&str>,
+    time: i64,
+) -> sqlx::Result<()> {
+    insert_check_row(
+        pool,
+        CheckRow {
+            time,
+            monitor_id,
+            status,
+            latency_ms,
+            status_code: None,
+            error: message,
+            source: CheckSource::Push,
+        },
+    )
+    .await
 }
 
 /// The last `limit` checks for a monitor, newest first. One query serves both the
@@ -337,22 +456,56 @@ pub async fn last_check_time(pool: &SqlitePool, monitor_id: &str) -> sqlx::Resul
         .await
 }
 
-/// The timestamp of a monitor's most recent *positive* heartbeat (status != 0),
-/// ignoring recorded misses. Heartbeat staleness must be measured from this, not
-/// from [`last_check_time`]: a recorded "down" miss has a fresh timestamp, so
-/// using the latter would reset the staleness clock every tick and mask a
-/// continuing outage (the monitor would flap down/up and never confirm down).
+/// The most recent heartbeat of a push monitor or watched peer: an explicit
+/// push of any status (an `up`, a `degraded`, or a `down` carrying the job's
+/// own message), never a recorded miss.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct Heartbeat {
+    pub time: i64,
+    /// 0 down, 1 up, 2 degraded, as pushed.
+    pub status: i64,
+    pub latency_ms: Option<i64>,
+    /// The pushed `msg`, if any.
+    pub error: Option<String>,
+}
+
+/// A monitor's most recent heartbeat, ignoring recorded misses. Heartbeat
+/// staleness must be measured from this, not from [`last_check_time`]: a
+/// recorded miss has a fresh timestamp, so using the latter would reset the
+/// staleness clock every tick and mask a continuing outage (the monitor would
+/// flap down/up and never confirm down).
+///
+/// An explicit `status=down` push *is* a heartbeat - the job ran and said it
+/// failed - so it keeps the clock fresh and its status and message drive the
+/// alert. Rows written before the `source` column existed are read as they
+/// always were: positive statuses are heartbeats, downs are misses.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn last_heartbeat(
+    pool: &SqlitePool,
+    monitor_id: &str,
+) -> sqlx::Result<Option<Heartbeat>> {
+    sqlx::query_as::<_, Heartbeat>(
+        "SELECT time, status, latency_ms, error FROM checks \
+         WHERE monitor_id = ? AND (source = 'push' OR (source = 'probe' AND status != 0)) \
+         ORDER BY time DESC LIMIT 1",
+    )
+    .bind(monitor_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// The timestamp of a monitor's most recent heartbeat (see [`last_heartbeat`]).
 ///
 /// # Errors
 ///
 /// Returns an error if the query fails.
 pub async fn last_heartbeat_time(pool: &SqlitePool, monitor_id: &str) -> sqlx::Result<Option<i64>> {
-    sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT MAX(time) FROM checks WHERE monitor_id = ? AND status != 0",
-    )
-    .bind(monitor_id)
-    .fetch_one(pool)
-    .await
+    Ok(last_heartbeat(pool, monitor_id)
+        .await?
+        .map(|beat| beat.time))
 }
 
 /// `(available, total)` check counts since `since`. Available = up or degraded.
@@ -1997,6 +2150,72 @@ mod tests {
         // A monitor with only misses has no positive heartbeat at all.
         insert(&pool, "only-miss", 50, 0, None).await;
         assert_eq!(last_heartbeat_time(&pool, "only-miss").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn explicit_down_push_is_a_heartbeat_but_a_miss_is_not() {
+        let pool = memory_pool().await;
+        insert_push_at(&pool, "job", 1, None, None, 100)
+            .await
+            .unwrap();
+        insert_push_at(&pool, "job", 0, None, Some("backup failed"), 200)
+            .await
+            .unwrap();
+        insert_heartbeat_miss_at(&pool, "job", "missing heartbeat", 300)
+            .await
+            .unwrap();
+
+        // The newest heartbeat is the explicit down push, message included;
+        // the fresher recorded miss is skipped.
+        let beat = last_heartbeat(&pool, "job").await.unwrap().unwrap();
+        assert_eq!(beat.time, 200);
+        assert_eq!(beat.status, 0);
+        assert_eq!(beat.error.as_deref(), Some("backup failed"));
+    }
+
+    #[tokio::test]
+    async fn same_second_pushes_keep_the_last_write() {
+        let pool = memory_pool().await;
+        // `status=up` at the start of a job, `status=down` when it fails, both
+        // within the same second: the failure must survive.
+        insert_push_at(&pool, "job", 1, Some(5), None, 100)
+            .await
+            .unwrap();
+        insert_push_at(&pool, "job", 0, None, Some("disk full"), 100)
+            .await
+            .unwrap();
+        let beat = last_heartbeat(&pool, "job").await.unwrap().unwrap();
+        assert_eq!((beat.time, beat.status), (100, 0));
+        assert_eq!(beat.error.as_deref(), Some("disk full"));
+        assert_eq!(beat.latency_ms, None);
+        let rows = recent_checks(&pool, "job", 10).await.unwrap();
+        assert_eq!(rows.len(), 1, "one row per second");
+    }
+
+    #[tokio::test]
+    async fn push_replaces_a_same_second_miss_and_never_the_reverse() {
+        let pool = memory_pool().await;
+        // The scheduler records a miss, then the late heartbeat lands in the
+        // same second: the heartbeat wins, ending the miss streak.
+        insert_heartbeat_miss_at(&pool, "job", "missing heartbeat", 100)
+            .await
+            .unwrap();
+        insert_push_at(&pool, "job", 1, None, None, 100)
+            .await
+            .unwrap();
+        let beat = last_heartbeat(&pool, "job").await.unwrap().unwrap();
+        assert_eq!((beat.time, beat.status), (100, 1));
+
+        // The other order: a miss racing a push it did not see must not erase it.
+        insert_push_at(&pool, "job", 1, None, None, 200)
+            .await
+            .unwrap();
+        insert_heartbeat_miss_at(&pool, "job", "missing heartbeat", 200)
+            .await
+            .unwrap();
+        let beat = last_heartbeat(&pool, "job").await.unwrap().unwrap();
+        assert_eq!((beat.time, beat.status), (200, 1));
+        assert_eq!(recent_checks(&pool, "job", 10).await.unwrap()[0].status, 1);
     }
 
     #[tokio::test]
