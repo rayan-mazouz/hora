@@ -4,6 +4,10 @@
 //! is the status page for them. Read-only: it consumes `/api/summary` and
 //! `/api/monitors/{id}/latency` exactly like any other API client, local or
 //! remote (`--url https://status.example --token ...`).
+//!
+//! The UI never waits on the network: every request runs as a background
+//! task that reports through a channel, so a slow or unreachable server
+//! leaves the screen live and `q`/Ctrl-C always answer.
 
 use std::io::IsTerminal as _;
 use std::time::Duration;
@@ -16,12 +20,24 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Sparkline, Table, TableState};
 use serde::Deserialize;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+/// Per-request deadline: a hung server costs one stale round, never the UI.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long to back off after the server rate-limited us (HTTP 429).
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(15);
 
 /// What `hora top` reads from `/api/summary` (unknown fields ignored, so the
 /// dashboard tolerates both older and newer servers).
 #[derive(Deserialize)]
 struct Summary {
     title: String,
+    /// The worst monitor status (`up`/`degraded`/`down`/`unknown`): drives
+    /// the header colour, while `overall_label` is only the wording.
+    #[serde(default)]
+    overall: String,
     overall_label: String,
     monitors: Vec<Monitor>,
     /// The pinned status-page banners (config + `hora announce`).
@@ -83,10 +99,17 @@ enum Input {
     Silence { monitor_id: String, buffer: String },
 }
 
-/// Everything the draw pass needs, refreshed by the fetch loop.
+impl Input {
+    fn buffer_mut(&mut self) -> &mut String {
+        match self {
+            Self::Announce { buffer } | Self::Silence { buffer, .. } => buffer,
+        }
+    }
+}
+
+/// Everything the draw pass needs, updated as fetch results arrive.
 struct App {
     url: String,
-    token: Option<String>,
     summary: Option<Summary>,
     /// 24h latency series of the selected monitor, oldest first.
     spark: Vec<u64>,
@@ -96,16 +119,36 @@ struct App {
     updated: String,
     /// The input bar, replacing the footer while open.
     input: Option<Input>,
-    /// Outcome of the last action ("pinned", or the API's refusal).
-    notice: Option<String>,
+    /// Outcome of the last action: `Ok("pinned ...")` or the reason it failed.
+    notice: Option<Result<String, String>>,
     /// Back-off deadline after the server rate-limited us (HTTP 429).
     cooldown_until: Option<tokio::time::Instant>,
 }
 
 impl App {
+    fn new(url: String) -> Self {
+        let mut table = TableState::default();
+        table.select(Some(0));
+        Self {
+            url,
+            summary: None,
+            spark: Vec::new(),
+            table,
+            error: None,
+            updated: "-".to_owned(),
+            input: None,
+            notice: None,
+            cooldown_until: None,
+        }
+    }
+
     fn selected(&self) -> Option<&Monitor> {
         let summary = self.summary.as_ref()?;
         summary.monitors.get(self.table.selected()?)
+    }
+
+    fn selected_id(&self) -> Option<String> {
+        self.selected().map(|monitor| monitor.id.clone())
     }
 
     fn select_delta(&mut self, delta: i64) {
@@ -117,6 +160,237 @@ impl App {
         let next = (current + delta).rem_euclid(i64::try_from(count).unwrap_or(1));
         self.table.select(Some(usize::try_from(next).unwrap_or(0)));
     }
+
+    /// Whether a 429 back-off is still running (clearing it once expired).
+    fn cooling_down(&mut self) -> bool {
+        match self.cooldown_until {
+            Some(until) if tokio::time::Instant::now() < until => true,
+            _ => {
+                self.cooldown_until = None;
+                false
+            }
+        }
+    }
+}
+
+/// Why a request to the API failed - typed, so the loop reacts to the status
+/// (a 429 backs off) rather than to the wording of a message.
+#[derive(Debug)]
+enum FetchError {
+    /// The server answered with a non-success status; `detail` is the start
+    /// of its body (the API's reason for a refused write).
+    Status {
+        status: reqwest::StatusCode,
+        detail: String,
+    },
+    /// No answer: connection refused, DNS, timeout.
+    Transport(String),
+    /// An answer that is not the JSON we expect.
+    Shape,
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Status { status, .. } => write!(f, "server answered HTTP {status}"),
+            Self::Transport(reason) => write!(f, "request failed: {reason}"),
+            Self::Shape => f.write_str("unexpected response shape"),
+        }
+    }
+}
+
+impl FetchError {
+    fn is_rate_limited(&self) -> bool {
+        matches!(self, Self::Status { status, .. } if *status == reqwest::StatusCode::TOO_MANY_REQUESTS)
+    }
+
+    /// The wording for a refused action: the API's own reason when it gave
+    /// one ("server refused (400 Bad Request): invalid duration").
+    fn refusal(&self) -> String {
+        match self {
+            Self::Status { status, detail } => format!("server refused ({status}): {detail}"),
+            other => other.to_string(),
+        }
+    }
+}
+
+/// The API endpoint plus credentials; cheap to clone into each fetch task
+/// (`reqwest::Client` is reference-counted).
+#[derive(Clone)]
+struct Api {
+    client: reqwest::Client,
+    url: String,
+    token: Option<String>,
+}
+
+impl Api {
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let request = self
+            .client
+            .request(method, format!("{}{path}", self.url.trim_end_matches('/')))
+            .timeout(REQUEST_TIMEOUT);
+        match &self.token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
+    }
+
+    /// Send `request`, turning a non-success status into [`FetchError::Status`].
+    async fn send(request: reqwest::RequestBuilder) -> Result<reqwest::Response, FetchError> {
+        // The reqwest error embeds the URL (which may carry nothing secret
+        // here, but stay consistent with the daemon's logging policy).
+        let response = request
+            .send()
+            .await
+            .map_err(|err| FetchError::Transport(err.without_url().to_string()))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let detail = response.text().await.unwrap_or_default();
+        Err(FetchError::Status {
+            status,
+            detail: detail.chars().take(120).collect(),
+        })
+    }
+
+    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, FetchError> {
+        Self::send(self.request(reqwest::Method::GET, path))
+            .await?
+            .json::<T>()
+            .await
+            .map_err(|_| FetchError::Shape)
+    }
+}
+
+/// One authenticated write, built from the keyboard and sent in the
+/// background.
+#[derive(Debug, PartialEq, Eq)]
+struct Action {
+    method: reqwest::Method,
+    path: &'static str,
+    params: Vec<(&'static str, String)>,
+    /// The notice shown once the server accepted it.
+    done: String,
+}
+
+/// A finished background fetch, delivered to the event loop.
+enum Fetched {
+    Summary(Result<Summary, FetchError>),
+    /// The sparkline of `monitor_id` - dropped if the selection moved on.
+    Spark {
+        monitor_id: String,
+        result: Result<Vec<u64>, FetchError>,
+    },
+    /// An action's outcome, as the notice to show.
+    Action(Result<String, String>),
+}
+
+/// What the event loop should start after applying a [`Fetched`].
+#[derive(Debug, PartialEq, Eq)]
+enum FollowUp {
+    Nothing,
+    /// Fetch this monitor's sparkline.
+    Spark(String),
+    /// Refetch the summary (an action changed server state).
+    Refresh,
+}
+
+/// Starts the background fetches, at most one in flight per kind: a slow
+/// server never accumulates a queue of summary requests behind it, and a new
+/// selection replaces (aborts) the previous sparkline fetch.
+struct Fetcher {
+    api: Api,
+    tx: mpsc::Sender<Fetched>,
+    summary: Option<JoinHandle<()>>,
+    spark: Option<JoinHandle<()>>,
+    action: Option<JoinHandle<()>>,
+}
+
+fn in_flight(task: Option<&JoinHandle<()>>) -> bool {
+    task.is_some_and(|task| !task.is_finished())
+}
+
+impl Fetcher {
+    fn new(api: Api, tx: mpsc::Sender<Fetched>) -> Self {
+        Self {
+            api,
+            tx,
+            summary: None,
+            spark: None,
+            action: None,
+        }
+    }
+
+    /// Fetch `/api/summary` unless a fetch is already running; `false` when
+    /// skipped.
+    fn summary(&mut self) -> bool {
+        if in_flight(self.summary.as_ref()) {
+            return false;
+        }
+        let (api, tx) = (self.api.clone(), self.tx.clone());
+        self.summary = Some(tokio::spawn(async move {
+            let result = api.get::<Summary>("/api/summary").await;
+            let _ = tx.send(Fetched::Summary(result)).await;
+        }));
+        true
+    }
+
+    /// Fetch the 24h latency series of `monitor_id`, abandoning any older
+    /// sparkline fetch (its monitor is no longer the selected one).
+    fn spark(&mut self, monitor_id: String) {
+        if let Some(previous) = self.spark.take() {
+            previous.abort();
+        }
+        let (api, tx) = (self.api.clone(), self.tx.clone());
+        self.spark = Some(tokio::spawn(async move {
+            let path = format!("/api/monitors/{monitor_id}/latency?hours=24");
+            let result = api.get::<Vec<Point>>(&path).await.map(|points| {
+                points
+                    .iter()
+                    .map(|point| u64::try_from(point.latency_ms.max(0)).unwrap_or(0))
+                    .collect()
+            });
+            let _ = tx.send(Fetched::Spark { monitor_id, result }).await;
+        }));
+    }
+
+    /// Send an action in the background. Refused up front (with the notice
+    /// to show) without a token, or while the previous action is in flight.
+    fn action(&mut self, action: Action) -> Result<(), String> {
+        if self.api.token.is_none() {
+            return Err(
+                "this action needs a token: run hora top --token ... (or HORA_TOKEN)".to_owned(),
+            );
+        }
+        if in_flight(self.action.as_ref()) {
+            return Err("still sending the previous action - try again in a moment".to_owned());
+        }
+        let (api, tx) = (self.api.clone(), self.tx.clone());
+        self.action = Some(tokio::spawn(async move {
+            let request = api
+                .request(action.method, action.path)
+                .query(&action.params);
+            let outcome = Api::send(request)
+                .await
+                .map(|_| action.done)
+                .map_err(|err| err.refusal());
+            let _ = tx.send(Fetched::Action(outcome)).await;
+        }));
+        Ok(())
+    }
+}
+
+impl Drop for Fetcher {
+    /// Leaving the dashboard abandons whatever is still in flight.
+    fn drop(&mut self) {
+        for task in [&self.summary, &self.spark, &self.action]
+            .into_iter()
+            .flatten()
+        {
+            task.abort();
+        }
+    }
 }
 
 /// Parse `hora top` arguments and run the dashboard until `q`/`Esc`.
@@ -127,39 +401,31 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
     );
     let (url, token, interval) = parse_args(args)?;
     let client = hora_core::http::client(None).context("building HTTP client")?;
+    let api = Api { client, url, token };
 
     // `ratatui::init` enters the alternate screen, enables raw mode, and
     // installs a panic hook that restores the terminal - a crash never
     // leaves the shell in raw mode.
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &client, url, token, interval).await;
+    let result = event_loop(&mut terminal, api, interval).await;
     ratatui::restore();
     result
 }
 
 async fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
-    client: &reqwest::Client,
-    url: String,
-    token: Option<String>,
+    api: Api,
     interval: Duration,
 ) -> anyhow::Result<()> {
-    let mut app = App {
-        url,
-        token,
-        summary: None,
-        spark: Vec::new(),
-        table: TableState::default(),
-        error: None,
-        updated: "-".to_owned(),
-        input: None,
-        notice: None,
-        cooldown_until: None,
-    };
-    app.table.select(Some(0));
-    refresh(client, &mut app).await;
+    let mut app = App::new(api.url.clone());
+    // At most one fetch of each kind is in flight, so a handful of slots is
+    // all the channel ever holds.
+    let (tx, mut results) = mpsc::channel(8);
+    let mut fetcher = Fetcher::new(api, tx);
 
     let mut events = crossterm::event::EventStream::new();
+    // The first tick fires at once: the initial fetch, without delaying the
+    // first frame.
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Selection changes only schedule a sparkline fetch: held-down arrow keys
@@ -177,163 +443,190 @@ async fn event_loop(
             }
         };
         tokio::select! {
-            _ = ticker.tick() => refresh(client, &mut app).await,
+            _ = ticker.tick() => {
+                if !app.cooling_down() {
+                    fetcher.summary();
+                }
+            }
             () = spark_timer => {
                 spark_due = None;
-                refresh_spark(client, &mut app).await;
+                if let Some(id) = app.selected_id() {
+                    fetcher.spark(id);
+                }
             }
+            // The fetcher holds a sender, so the channel never closes.
+            Some(done) = results.recv() => match apply(&mut app, done) {
+                FollowUp::Nothing => {}
+                FollowUp::Spark(id) => fetcher.spark(id),
+                FollowUp::Refresh => {
+                    fetcher.summary();
+                }
+            },
             event = events.next() => {
                 let Some(Ok(crossterm::event::Event::Key(key))) = event else { continue };
-                if key.kind != crossterm::event::KeyEventKind::Press {
-                    continue;
-                }
-                if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('c')
-                {
-                    return Ok(());
-                }
-                // While the input bar is open it owns the keyboard.
-                if app.input.is_some() {
-                    handle_input_key(client, &mut app, key.code).await;
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        app.select_delta(1);
+                match on_key(&mut app, &mut fetcher, key) {
+                    KeyOutcome::Quit => return Ok(()),
+                    KeyOutcome::Moved => {
                         app.spark.clear();
                         spark_due =
                             Some(tokio::time::Instant::now() + Duration::from_millis(300));
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        app.select_delta(-1);
-                        app.spark.clear();
-                        spark_due =
-                            Some(tokio::time::Instant::now() + Duration::from_millis(300));
-                    }
-                    KeyCode::Char('r') => refresh(client, &mut app).await,
-                    KeyCode::Char('a') => {
-                        app.notice = None;
-                        app.input = Some(Input::Announce {
-                            buffer: String::new(),
-                        });
-                    }
-                    KeyCode::Char('s') => {
-                        if let Some(id) = app.selected().map(|monitor| monitor.id.clone()) {
-                            app.notice = None;
-                            app.input = Some(Input::Silence {
-                                monitor_id: id,
-                                buffer: "10m".to_owned(),
-                            });
-                        }
-                    }
-                    KeyCode::Char('C') => {
-                        let outcome = act(client, &app, reqwest::Method::DELETE, "/api/announce", &[])
-                            .await;
-                        app.notice = Some(match outcome {
-                            Ok(()) => "announcements cleared".to_owned(),
-                            Err(err) => err,
-                        });
-                        refresh(client, &mut app).await;
-                    }
-                    _ => {}
+                    KeyOutcome::Handled => {}
                 }
             }
         }
     }
 }
 
-/// Fetch the summary (and the selected monitor's sparkline). A failure keeps
-/// the previous data on screen and surfaces the reason in the header; a 429
-/// backs off instead of hammering the server's rate limit further.
-async fn refresh(client: &reqwest::Client, app: &mut App) {
-    if let Some(until) = app.cooldown_until {
-        if tokio::time::Instant::now() < until {
-            return; // Rate-limited: skip this round, keep what we have.
-        }
-        app.cooldown_until = None;
+/// What a key press asks of the event loop.
+enum KeyOutcome {
+    Quit,
+    /// The selection moved: schedule the new monitor's sparkline.
+    Moved,
+    Handled,
+}
+
+/// Handle one key event. Never awaits: anything that talks to the server is
+/// handed to the fetcher.
+fn on_key(app: &mut App, fetcher: &mut Fetcher, key: crossterm::event::KeyEvent) -> KeyOutcome {
+    if key.kind != crossterm::event::KeyEventKind::Press {
+        return KeyOutcome::Handled;
     }
-    match fetch_json::<Summary>(client, app, "/api/summary").await {
-        Ok(summary) => {
+    if key
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char('c')
+    {
+        return KeyOutcome::Quit;
+    }
+    // While the input bar is open it owns the keyboard.
+    if app.input.is_some() {
+        if let Some(action) = input_key(app, key.code) {
+            start_action(app, fetcher, action);
+        }
+        return KeyOutcome::Handled;
+    }
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => return KeyOutcome::Quit,
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.select_delta(1);
+            return KeyOutcome::Moved;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.select_delta(-1);
+            return KeyOutcome::Moved;
+        }
+        KeyCode::Char('r') => {
+            if !app.cooling_down() {
+                fetcher.summary();
+            }
+        }
+        KeyCode::Char('a') => {
+            app.notice = None;
+            app.input = Some(Input::Announce {
+                buffer: String::new(),
+            });
+        }
+        KeyCode::Char('s') => {
+            if let Some(id) = app.selected_id() {
+                app.notice = None;
+                app.input = Some(Input::Silence {
+                    monitor_id: id,
+                    buffer: "10m".to_owned(),
+                });
+            }
+        }
+        KeyCode::Char('C') => start_action(
+            app,
+            fetcher,
+            Ok(Action {
+                method: reqwest::Method::DELETE,
+                path: "/api/announce",
+                params: Vec::new(),
+                done: "announcements cleared".to_owned(),
+            }),
+        ),
+        _ => {}
+    }
+    KeyOutcome::Handled
+}
+
+/// Fold a finished fetch into the app. A failure keeps the previous data on
+/// screen and surfaces the reason in the header; a 429 backs off instead of
+/// hammering the server's rate limit further.
+fn apply(app: &mut App, fetched: Fetched) -> FollowUp {
+    match fetched {
+        Fetched::Summary(Ok(summary)) => {
             // Keep the selection on the same monitor across refreshes.
-            let selected_id = app.selected().map(|monitor| monitor.id.clone());
-            if let Some(id) = selected_id {
+            if let Some(id) = app.selected_id() {
                 let index = summary.monitors.iter().position(|m| m.id == id);
                 app.table.select(index.or(Some(0)));
             }
             app.summary = Some(summary);
             app.error = None;
             app.updated = chrono::Utc::now().format("%H:%M:%S UTC").to_string();
+            app.selected_id().map_or(FollowUp::Nothing, FollowUp::Spark)
         }
-        Err(err) => {
-            if err.contains("429") {
-                app.cooldown_until = Some(tokio::time::Instant::now() + Duration::from_secs(15));
+        Fetched::Summary(Err(err)) => {
+            if err.is_rate_limited() {
+                app.cooldown_until = Some(tokio::time::Instant::now() + RATE_LIMIT_COOLDOWN);
                 app.error =
                     Some("rate limited by the server (HTTP 429) - backing off 15s".to_owned());
-                return;
+            } else {
+                app.error = Some(err.to_string());
             }
-            app.error = Some(err);
+            FollowUp::Nothing
         }
-    }
-    refresh_spark(client, app).await;
-}
-
-async fn refresh_spark(client: &reqwest::Client, app: &mut App) {
-    let Some(id) = app.selected().map(|monitor| monitor.id.clone()) else {
-        app.spark.clear();
-        return;
-    };
-    let path = format!("/api/monitors/{id}/latency?hours=24");
-    match fetch_json::<Vec<Point>>(client, app, &path).await {
-        Ok(points) => {
-            app.spark = points
-                .iter()
-                .map(|point| u64::try_from(point.latency_ms.max(0)).unwrap_or(0))
-                .collect();
+        Fetched::Spark { monitor_id, result } => {
+            // A late answer for a monitor no longer selected is stale.
+            if app.selected_id().as_deref() == Some(monitor_id.as_str()) {
+                app.spark = result.unwrap_or_default();
+            }
+            FollowUp::Nothing
         }
-        Err(_) => app.spark.clear(),
+        Fetched::Action(outcome) => {
+            app.notice = Some(outcome);
+            FollowUp::Refresh
+        }
     }
 }
 
-/// Keys while the input bar is open: type, Backspace, Enter submits,
-/// Esc cancels.
-async fn handle_input_key(client: &reqwest::Client, app: &mut App, code: KeyCode) {
-    let Some(input) = &mut app.input else { return };
-    let buffer = match input {
-        Input::Announce { buffer } | Input::Silence { buffer, .. } => buffer,
+/// Start `action` (or show why it could not be built or sent).
+fn start_action(app: &mut App, fetcher: &mut Fetcher, action: Result<Action, String>) {
+    app.notice = match action.and_then(|action| fetcher.action(action)) {
+        Ok(()) => None,
+        Err(reason) => Some(Err(reason)),
     };
+}
+
+/// Keys while the input bar is open: type, Backspace, Enter submits (closing
+/// the bar and yielding the action, or why it is invalid), Esc cancels.
+fn input_key(app: &mut App, code: KeyCode) -> Option<Result<Action, String>> {
     match code {
-        KeyCode::Esc => app.input = None,
+        KeyCode::Enter => match app.input.take()? {
+            Input::Announce { buffer } => Some(announce_action(&buffer)),
+            Input::Silence { monitor_id, buffer } => Some(silence_action(&monitor_id, &buffer)),
+        },
+        KeyCode::Esc => {
+            app.input = None;
+            None
+        }
         KeyCode::Backspace => {
-            buffer.pop();
+            app.input.as_mut()?.buffer_mut().pop();
+            None
         }
-        KeyCode::Char(c) => buffer.push(c),
-        KeyCode::Enter => {
-            let input = app.input.take().expect("input open");
-            let outcome = match &input {
-                Input::Announce { buffer } => submit_announce(client, app, buffer).await,
-                Input::Silence { monitor_id, buffer } => {
-                    submit_silence(client, app, monitor_id, buffer).await
-                }
-            };
-            app.notice = Some(match outcome {
-                Ok(done) => done,
-                Err(err) => err,
-            });
-            refresh(client, app).await;
+        KeyCode::Char(c) => {
+            app.input.as_mut()?.buffer_mut().push(c);
+            None
         }
-        _ => {}
+        _ => None,
     }
 }
 
 /// Pin an announcement from the input line: `title :: body`, with optional
 /// `--severity <s>` and `--until <4h|18:00-style duration>` flags anywhere -
 /// the same grammar as `hora announce`.
-async fn submit_announce(
-    client: &reqwest::Client,
-    app: &App,
-    line: &str,
-) -> Result<String, String> {
+fn announce_action(line: &str) -> Result<Action, String> {
     let mut severity = "warning"; // announcing from `top` usually means trouble
     let mut until = None;
     let mut words: Vec<&str> = Vec::new();
@@ -359,98 +652,38 @@ async fn submit_announce(
     if title.is_empty() {
         return Err("announce needs a title".to_owned());
     }
-    let mut params = vec![("title", title.clone()), ("severity", severity.to_owned())];
+    let done = format!("announced [{severity}] {title:?}");
+    let mut params = vec![("title", title), ("severity", severity.to_owned())];
     if !body.is_empty() {
         params.push(("body", body));
     }
     if let Some(until) = until {
         params.push(("until", until.to_owned()));
     }
-    act(client, app, reqwest::Method::POST, "/api/announce", &params).await?;
-    Ok(format!("announced [{severity}] {title:?}"))
+    Ok(Action {
+        method: reqwest::Method::POST,
+        path: "/api/announce",
+        params,
+        done,
+    })
 }
 
 /// Silence the selected monitor for the typed duration.
-async fn submit_silence(
-    client: &reqwest::Client,
-    app: &App,
-    monitor_id: &str,
-    duration: &str,
-) -> Result<String, String> {
+fn silence_action(monitor_id: &str, duration: &str) -> Result<Action, String> {
     let duration = duration.trim();
     if duration.is_empty() {
         return Err("silence needs a duration (e.g. 10m)".to_owned());
     }
-    act(
-        client,
-        app,
-        reqwest::Method::POST,
-        "/api/silence",
-        &[
+    Ok(Action {
+        method: reqwest::Method::POST,
+        path: "/api/silence",
+        params: vec![
             ("monitors", monitor_id.to_owned()),
             ("duration", duration.to_owned()),
             ("reason", "silenced from hora top".to_owned()),
         ],
-    )
-    .await?;
-    Ok(format!("silenced {monitor_id} for {duration}"))
-}
-
-/// One authenticated write to the API. Maps the typical refusals to messages
-/// that say what to do ("pass `--token`", "configure `server.auth_token`").
-async fn act(
-    client: &reqwest::Client,
-    app: &App,
-    method: reqwest::Method,
-    path: &str,
-    params: &[(&str, String)],
-) -> Result<(), String> {
-    let Some(token) = &app.token else {
-        return Err(
-            "this action needs a token: run hora top --token ... (or HORA_TOKEN)".to_owned(),
-        );
-    };
-    let response = client
-        .request(method, format!("{}{path}", app.url.trim_end_matches('/')))
-        .query(params)
-        .bearer_auth(token)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|err| format!("request failed: {}", err.without_url()))?;
-    let status = response.status();
-    if status.is_success() {
-        return Ok(());
-    }
-    let detail = response.text().await.unwrap_or_default();
-    let detail: String = detail.chars().take(120).collect();
-    Err(format!("server refused ({status}): {detail}"))
-}
-
-async fn fetch_json<T: serde::de::DeserializeOwned>(
-    client: &reqwest::Client,
-    app: &App,
-    path: &str,
-) -> Result<T, String> {
-    let mut request = client
-        .get(format!("{}{path}", app.url.trim_end_matches('/')))
-        .timeout(Duration::from_secs(10));
-    if let Some(token) = &app.token {
-        request = request.bearer_auth(token);
-    }
-    let response = request.send().await.map_err(|err| {
-        // The reqwest error embeds the URL (which may carry nothing secret
-        // here, but stay consistent with the daemon's logging policy).
-        format!("request failed: {}", err.without_url())
-    })?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("server answered HTTP {status}"));
-    }
-    response
-        .json::<T>()
-        .await
-        .map_err(|_| "unexpected response shape".to_owned())
+        done: format!("silenced {monitor_id} for {duration}"),
+    })
 }
 
 fn draw(frame: &mut ratatui::Frame, app: &mut App) {
@@ -464,13 +697,19 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     .areas(frame.area());
 
     // Header: title - overall - updated - source.
-    let (title, overall) = app.summary.as_ref().map_or_else(
-        || ("hora".to_owned(), "connecting...".to_owned()),
-        |summary| (summary.title.clone(), summary.overall_label.clone()),
+    let (title, overall, label) = app.summary.as_ref().map_or_else(
+        || ("hora".to_owned(), "", "connecting...".to_owned()),
+        |summary| {
+            (
+                summary.title.clone(),
+                summary.overall.as_str(),
+                summary.overall_label.clone(),
+            )
+        },
     );
     let mut spans = vec![
         Span::styled(format!(" {title} "), Style::new().bold()),
-        Span::styled(format!(" {overall} "), overall_style(&overall)),
+        Span::styled(format!(" {label} "), overall_style(overall)),
         Span::raw(format!("  updated {}  {}", app.updated, app.url)),
     ];
     if let Some(error) = &app.error {
@@ -547,15 +786,11 @@ fn footer_line(app: &App) -> Line<'static> {
         Style::new().fg(Color::DarkGray),
     )];
     if let Some(notice) = &app.notice {
-        let style = if notice.starts_with("server refused")
-            || notice.contains("needs a")
-            || notice.contains("failed")
-        {
-            Style::new().fg(Color::Red).bold()
-        } else {
-            Style::new().fg(Color::Green)
+        let (text, style) = match notice {
+            Ok(done) => (done, Style::new().fg(Color::Green)),
+            Err(reason) => (reason, Style::new().fg(Color::Red).bold()),
         };
-        spans.push(Span::styled(format!("   {notice}"), style));
+        spans.push(Span::styled(format!("   {text}"), style));
     }
     Line::from(spans)
 }
@@ -726,15 +961,13 @@ fn status_style(status: &str) -> Style {
     }
 }
 
-fn overall_style(label: &str) -> Style {
-    if label.contains("operational") {
-        Style::new().fg(Color::Black).bg(Color::Green)
-    } else if label.contains("Degraded") {
-        Style::new().fg(Color::Black).bg(Color::Yellow)
-    } else if label.contains("outage") {
-        Style::new().fg(Color::White).bg(Color::Red)
-    } else {
-        Style::new().fg(Color::Black).bg(Color::DarkGray)
+/// The header badge colour, from the summary's machine-readable `overall`.
+fn overall_style(overall: &str) -> Style {
+    match overall {
+        "up" => Style::new().fg(Color::Black).bg(Color::Green),
+        "degraded" => Style::new().fg(Color::Black).bg(Color::Yellow),
+        "down" => Style::new().fg(Color::White).bg(Color::Red),
+        _ => Style::new().fg(Color::Black).bg(Color::DarkGray),
     }
 }
 
@@ -844,5 +1077,226 @@ mod tests {
         assert_eq!(summary.monitors[0].uptime_permille, Some(998));
         assert_eq!(summary.monitors[0].p95, Some(800));
         assert_eq!(summary.overall_label, "Degraded performance");
+        // The header colour comes from the status, not from the wording.
+        assert_eq!(summary.overall, "degraded");
+        assert_eq!(overall_style(&summary.overall).bg, Some(Color::Yellow));
+        assert_eq!(overall_style("down").bg, Some(Color::Red));
+        assert_eq!(overall_style("").bg, Some(Color::DarkGray));
+    }
+
+    fn summary_of(ids: &[&str]) -> Summary {
+        let monitors: Vec<String> = ids
+            .iter()
+            .map(|id| format!(r#"{{"id": "{id}", "name": "{id}", "status": "up"}}"#))
+            .collect();
+        serde_json::from_str(&format!(
+            r#"{{"title": "t", "overall": "up", "overall_label": "All systems operational",
+                "monitors": [{}]}}"#,
+            monitors.join(",")
+        ))
+        .expect("summary")
+    }
+
+    fn api_at(url: String) -> Api {
+        Api {
+            client: hora_core::http::client(None).expect("client"),
+            url,
+            token: Some("tok".to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_keeps_the_selection_and_asks_for_its_sparkline() {
+        let mut app = App::new("http://x".to_owned());
+        assert_eq!(
+            apply(&mut app, Fetched::Summary(Ok(summary_of(&["a", "b"])))),
+            FollowUp::Spark("a".to_owned())
+        );
+        app.select_delta(1);
+        // "b" moved to the front: the selection follows the monitor.
+        assert_eq!(
+            apply(&mut app, Fetched::Summary(Ok(summary_of(&["b", "a"])))),
+            FollowUp::Spark("b".to_owned())
+        );
+        assert_eq!(app.table.selected(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_late_sparkline_for_another_monitor_is_dropped() {
+        let mut app = App::new("http://x".to_owned());
+        apply(&mut app, Fetched::Summary(Ok(summary_of(&["a", "b"]))));
+        apply(
+            &mut app,
+            Fetched::Spark {
+                monitor_id: "b".to_owned(),
+                result: Ok(vec![1, 2, 3]),
+            },
+        );
+        assert_eq!(app.spark, Vec::<u64>::new());
+        apply(
+            &mut app,
+            Fetched::Spark {
+                monitor_id: "a".to_owned(),
+                result: Ok(vec![4, 5]),
+            },
+        );
+        assert_eq!(app.spark, vec![4, 5]);
+    }
+
+    #[tokio::test]
+    async fn rate_limiting_is_detected_from_the_status_not_the_text() {
+        let mut app = App::new("http://x".to_owned());
+        let refused = FetchError::Status {
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            detail: String::new(),
+        };
+        assert_eq!(
+            apply(&mut app, Fetched::Summary(Err(refused))),
+            FollowUp::Nothing
+        );
+        assert!(app.cooling_down());
+        assert!(app.error.as_deref().is_some_and(|e| e.contains("429")));
+
+        // A body that merely mentions 429 is an ordinary error.
+        let mut app = App::new("http://x".to_owned());
+        let other = FetchError::Status {
+            status: reqwest::StatusCode::BAD_GATEWAY,
+            detail: "upstream 429".to_owned(),
+        };
+        apply(&mut app, Fetched::Summary(Err(other)));
+        assert!(!app.cooling_down());
+        assert_eq!(
+            app.error.as_deref(),
+            Some("server answered HTTP 502 Bad Gateway")
+        );
+    }
+
+    #[tokio::test]
+    async fn action_outcomes_become_typed_notices_and_refresh() {
+        let mut app = App::new("http://x".to_owned());
+        assert_eq!(
+            apply(&mut app, Fetched::Action(Err("failed somehow".to_owned()))),
+            FollowUp::Refresh
+        );
+        assert_eq!(app.notice, Some(Err("failed somehow".to_owned())));
+        // A success whose wording contains "failed" still reads as success.
+        apply(
+            &mut app,
+            Fetched::Action(Ok("announced [info] \"failed disk swapped\"".to_owned())),
+        );
+        assert!(matches!(app.notice, Some(Ok(_))));
+    }
+
+    #[test]
+    fn input_bar_builds_actions_without_touching_the_network() {
+        let mut app = App::new("http://x".to_owned());
+        app.input = Some(Input::Silence {
+            monitor_id: "web".to_owned(),
+            buffer: "10m".to_owned(),
+        });
+        assert!(input_key(&mut app, KeyCode::Backspace).is_none());
+        assert!(input_key(&mut app, KeyCode::Char('h')).is_none());
+        let action = input_key(&mut app, KeyCode::Enter)
+            .expect("submitted")
+            .expect("valid");
+        assert!(app.input.is_none(), "Enter closes the bar");
+        assert_eq!(action.path, "/api/silence");
+        assert!(action.params.contains(&("duration", "10h".to_owned())));
+        // Enter with the bar already closed is a no-op.
+        assert!(input_key(&mut app, KeyCode::Enter).is_none());
+
+        let action = announce_action("Fiber cut :: ETA 6pm --severity critical --until 4h")
+            .expect("announce");
+        assert_eq!(action.done, "announced [critical] \"Fiber cut\"");
+        assert!(action.params.contains(&("body", "ETA 6pm".to_owned())));
+        assert!(action.params.contains(&("until", "4h".to_owned())));
+        assert!(announce_action(":: body only").is_err());
+        assert!(announce_action("t --severity panic").is_err());
+        assert!(silence_action("web", "  ").is_err());
+    }
+
+    /// The UI must never wait on the network: against a server that accepts
+    /// connections but never answers, starting a fetch returns at once, and a
+    /// second summary fetch is skipped while the first is in flight.
+    #[tokio::test]
+    async fn fetches_run_in_the_background_one_per_kind() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        let (tx, mut results) = mpsc::channel(8);
+        let mut fetcher = Fetcher::new(api_at(url), tx);
+
+        assert!(fetcher.summary(), "first fetch starts");
+        assert!(!fetcher.summary(), "second is skipped while in flight");
+        fetcher
+            .action(silence_action("web", "10m").expect("action"))
+            .expect("action starts");
+        assert!(
+            fetcher
+                .action(silence_action("web", "10m").expect("action"))
+                .is_err(),
+            "one action at a time"
+        );
+        // Nothing has answered, and nothing blocked getting here.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), results.recv())
+                .await
+                .is_err()
+        );
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn fetch_errors_carry_the_http_status() {
+        let app = axum::Router::new()
+            .route(
+                "/api/summary",
+                axum::routing::get(|| async {
+                    (axum::http::StatusCode::TOO_MANY_REQUESTS, "slow down")
+                }),
+            )
+            .route(
+                "/api/silence",
+                axum::routing::post(|| async {
+                    (axum::http::StatusCode::BAD_REQUEST, "invalid duration")
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let (tx, mut results) = mpsc::channel(8);
+        let mut fetcher = Fetcher::new(api_at(url.clone()), tx);
+        fetcher.summary();
+        match results.recv().await {
+            Some(Fetched::Summary(Err(err))) => assert!(err.is_rate_limited(), "{err}"),
+            _ => panic!("expected a failed summary"),
+        }
+        fetcher
+            .action(silence_action("web", "nope").expect("action"))
+            .expect("starts");
+        match results.recv().await {
+            Some(Fetched::Action(Err(reason))) => {
+                assert_eq!(reason, "server refused (400 Bad Request): invalid duration");
+            }
+            _ => panic!("expected a refused action"),
+        }
+
+        // Without a token, an action is refused before any request.
+        let (tx, _results) = mpsc::channel(8);
+        let mut anonymous = Fetcher::new(
+            Api {
+                token: None,
+                ..api_at(url)
+            },
+            tx,
+        );
+        let refused = anonymous
+            .action(silence_action("web", "10m").expect("action"))
+            .expect_err("needs a token");
+        assert!(refused.contains("needs a token"));
     }
 }
