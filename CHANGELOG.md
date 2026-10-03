@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-03
+
 A new face and a hardening release. Hora gets its brand (the night watch,
 a little owl that dozes while all is well) and a status page redesigned
 around it; the findings of a full audit are fixed; and the page stays
@@ -1296,7 +1298,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/uplg/hora/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/uplg/hora/compare/v0.9.6...v0.10.0
 [0.9.6]: https://github.com/uplg/hora/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/uplg/hora/compare/v0.9.4...v0.9.5
