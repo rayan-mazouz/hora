@@ -3,6 +3,7 @@
 
 pub(crate) mod admin;
 pub(crate) mod annotations;
+pub(crate) mod compact;
 pub(crate) mod history;
 pub(crate) mod peers;
 pub(crate) mod probe;
@@ -164,6 +165,10 @@ pub(crate) fn print_help() {
     println!("  peers diff          Compare this node's monitors with each peer's (the");
     println!("                      alignment multi-vantage confirmation relies on)");
     println!("  backup <dest.db>    Snapshot the database with VACUUM INTO");
+    println!("  compact [--dry-run] [--purge-removed] [--keep]");
+    println!("                      Report table sizes, apply the retention now and");
+    println!("                      shrink the file (stop the daemon first; --dry-run");
+    println!("                      only reports, --keep leaves the original as .bak)");
     println!("  --version, -V       Show the version");
     println!("  --help, -h          Show this help message");
 }

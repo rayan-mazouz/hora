@@ -52,6 +52,7 @@ async fn run_subcommand(args: &[String]) -> Result<(), CliError> {
                 .ok_or_else(|| usage("Usage: hora backup <destination.db>"))?;
             cli::admin::backup(dest).await
         }
+        "compact" => cli::compact::compact(rest).await,
         "incidents" => {
             let limit = cli::parse_limit(rest.first(), "Usage: hora incidents [limit]")?;
             cli::history::list_incidents(limit).await

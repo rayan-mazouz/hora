@@ -318,6 +318,17 @@ async fn roll_up_history(store: &Store, now: i64) {
 }
 
 pub(crate) async fn prune(store: &Store, config: &Config) -> anyhow::Result<()> {
+    prune_with(store, config, false).await
+}
+
+/// [`prune`], deleting the rows of removed monitors at once when
+/// `purge_removed` (the explicit `hora compact --purge-removed`) instead of
+/// after their grace period.
+pub(super) async fn prune_with(
+    store: &Store,
+    config: &Config,
+    purge_removed: bool,
+) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
 
     roll_up_history(store, now).await;
@@ -355,7 +366,7 @@ pub(crate) async fn prune(store: &Store, config: &Config) -> anyhow::Result<()> 
         .await?;
     }
 
-    delete_orphans(store, config, now).await?;
+    delete_orphans(store, config, now, purge_removed).await?;
 
     // Keep the planner statistics current as the tables grow and the prunes
     // reshape them - same rationale as the call in [`connect`]; cheap unless
@@ -397,7 +408,12 @@ const ORPHAN_TABLES: [&str; 9] = [
 /// seconds every prune tick, timing out the scheduler's inserts, all to
 /// usually delete nothing. Reads don't block writers under WAL, and the
 /// targeted deletes only run once a removed monitor's grace has run out.
-pub(super) async fn delete_orphans(store: &Store, config: &Config, now: i64) -> anyhow::Result<()> {
+pub(super) async fn delete_orphans(
+    store: &Store,
+    config: &Config,
+    now: i64,
+    purge: bool,
+) -> anyhow::Result<()> {
     let keep: std::collections::HashSet<&str> = config
         .monitors
         .iter()
@@ -455,31 +471,29 @@ pub(super) async fn delete_orphans(store: &Store, config: &Config, now: i64) -> 
     let mut scheduled = Vec::new();
     for (id, tables) in &orphans {
         let key = format!("{ORPHAN_META_PREFIX}{id}");
-        match missing_since.get(id) {
-            None => {
-                meta_set(store, &key, &now.to_string()).await?;
-                scheduled.push(id.as_str());
+        let since = missing_since.get(id).copied();
+        let expired = since.is_some_and(|since| now - since >= ORPHAN_GRACE_SECS);
+        if purge || expired {
+            for table in tables {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DELETE FROM {table} WHERE monitor_id = ?"
+                )))
+                .bind(id)
+                .execute(store.sqlx())
+                .await?;
             }
-            Some(&since) if now - since >= ORPHAN_GRACE_SECS => {
-                for table in tables {
-                    sqlx::query(sqlx::AssertSqlSafe(format!(
-                        "DELETE FROM {table} WHERE monitor_id = ?"
-                    )))
-                    .bind(id)
-                    .execute(store.sqlx())
-                    .await?;
-                }
-                meta_delete(store, &key).await?;
-                for prefix in PER_ID_META_PREFIXES {
-                    meta_delete(store, &format!("{prefix}{id}")).await?;
-                }
-                tracing::warn!(
-                    monitor = %id,
-                    "deleted the history of a monitor missing from the config since {}",
-                    crate::fmt::utc(since)
-                );
+            meta_delete(store, &key).await?;
+            for prefix in PER_ID_META_PREFIXES {
+                meta_delete(store, &format!("{prefix}{id}")).await?;
             }
-            Some(_) => {}
+            tracing::warn!(
+                monitor = %id,
+                "deleted the history of a monitor missing from the config since {}",
+                crate::fmt::utc(since.unwrap_or(now))
+            );
+        } else if since.is_none() {
+            meta_set(store, &key, &now.to_string()).await?;
+            scheduled.push(id.as_str());
         }
     }
     // Per-id state of an id that is gone and has no rows to wait for (a push

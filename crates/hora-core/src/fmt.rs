@@ -96,6 +96,27 @@ pub fn pct(part: i64, total: i64) -> String {
     basis_points(part, total).map_or_else(|| "no checks".to_owned(), pct_bp)
 }
 
+/// `"62.1 GiB"`: a size in binary units, one decimal from KiB up, for
+/// `hora compact` and `hora top`.
+#[must_use]
+pub fn bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut unit = 0;
+    let mut scaled = bytes;
+    // Tenths of the unit, computed in integers (no float cast).
+    let mut tenths = 0;
+    while scaled >= 1024 && unit + 1 < UNITS.len() {
+        tenths = (scaled % 1024) * 10 / 1024;
+        scaled /= 1024;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{scaled}.{tenths} {}", UNITS[unit])
+    }
+}
+
 /// Escape the five XML metacharacters, for text embedded in SVG, Atom or HTML.
 #[must_use]
 pub fn xml_escape(text: &str) -> String {
@@ -134,6 +155,14 @@ pub fn percent_encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_read_in_binary_units() {
+        assert_eq!(bytes(512), "512 B");
+        assert_eq!(bytes(1536), "1.5 KiB");
+        assert_eq!(bytes(66_643 * 1024 * 1024), "65.0 GiB");
+        assert_eq!(bytes(u64::MAX), "16777215.9 TiB");
+    }
 
     #[test]
     fn durations_keep_the_two_largest_units() {

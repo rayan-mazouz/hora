@@ -15,7 +15,10 @@
 //! `status` 0 down / 1 up / 2 degraded, newest-first orderings):
 //!
 //! - lifecycle: [`connect`] (schema creation and migrations), [`backup_into`],
-//!   [`check_writable`], [`Store::ping`];
+//!   [`check_writable`], [`Store::ping`], and the maintenance surface of
+//!   `hora compact` ([`Store::size`], [`size_report`], [`apply_retention`],
+//!   [`vacuum_swap`] - the lock, [`lock_exclusive`], is a file beside the
+//!   database and backend-neutral);
 //! - the time series: [`insert_check`], [`insert_push`],
 //!   [`insert_heartbeat_miss`], [`recent_checks`], [`check_samples`],
 //!   [`last_heartbeat`];
@@ -41,6 +44,7 @@ mod aggregates;
 mod annotations;
 mod certs;
 mod checks;
+mod compact;
 mod incidents;
 mod release;
 mod retention;
@@ -66,6 +70,10 @@ pub use checks::{
     CheckSample, Heartbeat, Latest, check_samples, derive_status, insert_check,
     insert_heartbeat_miss, insert_push, last_check_time, last_heartbeat, last_heartbeat_time,
     recent_checks,
+};
+pub use compact::{
+    Compacted, DbLock, LockError, ObjectSize, SizeReport, StoreSize, apply_retention,
+    free_disk_bytes, lock_exclusive, size_report, vacuum_swap,
 };
 pub use incidents::{
     Incident, IncidentMarks, find_open_incident, incident_by_id, incident_marks, incidents_between,

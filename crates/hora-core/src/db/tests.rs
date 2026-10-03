@@ -450,7 +450,7 @@ async fn prune_removes_orphans_and_expired_rows() {
     assert_eq!(expected("never").await, None, "nothing to wait for");
 
     // A week later the sweep deletes it entirely, mark included.
-    delete_orphans(&store, &config, now + ORPHAN_GRACE_SECS + 60)
+    delete_orphans(&store, &config, now + ORPHAN_GRACE_SECS + 60, false)
         .await
         .unwrap();
     assert!(recent_checks(&store, "gone", 10).await.unwrap().is_empty());
@@ -480,7 +480,7 @@ async fn an_orphan_that_comes_back_keeps_its_history() {
     };
 
     // Renamed away: marked, not deleted.
-    delete_orphans(&store, &config_with(&["other"]), now)
+    delete_orphans(&store, &config_with(&["other"]), now, false)
         .await
         .unwrap();
     assert!(
@@ -491,7 +491,7 @@ async fn an_orphan_that_comes_back_keeps_its_history() {
     );
 
     // Back before the grace ran out: the mark is cleared, the data kept.
-    delete_orphans(&store, &config_with(&["api"]), now + 3600)
+    delete_orphans(&store, &config_with(&["api"]), now + 3600, false)
         .await
         .unwrap();
     assert_eq!(meta_get(&store, "orphan_since:api").await.unwrap(), None);
@@ -499,10 +499,10 @@ async fn an_orphan_that_comes_back_keeps_its_history() {
     // Removed again much later: a fresh grace period starts then, so the
     // old (cleared) sighting can never shortcut it.
     let later = now + 30 * SECONDS_PER_DAY;
-    delete_orphans(&store, &config_with(&["other"]), later)
+    delete_orphans(&store, &config_with(&["other"]), later, false)
         .await
         .unwrap();
-    delete_orphans(&store, &config_with(&["other"]), later + 3600)
+    delete_orphans(&store, &config_with(&["other"]), later + 3600, false)
         .await
         .unwrap();
     assert_eq!(recent_checks(&store, "api", 10).await.unwrap().len(), 1);
@@ -1284,4 +1284,32 @@ async fn window_cache_equals_the_one_shot_read_as_time_moves() {
             roll_up_recent(&store, now).await.unwrap();
         }
     }
+}
+
+#[tokio::test]
+async fn purge_removed_deletes_a_removed_monitor_at_once() {
+    let store = Store::in_memory().await;
+    // Recent rows: the retention window must not be what deletes them.
+    let now = chrono::Utc::now().timestamp();
+    insert(&store, "gone", now - 60, 1, Some(10)).await;
+    insert(&store, "kept", now - 60, 1, Some(10)).await;
+    let config = crate::config::parse(
+        r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "kept"
+            name = "Kept"
+            target = "https://example.com"
+            interval_secs = 60
+        "#,
+    )
+    .unwrap();
+    // The regular pass only marks it, for the grace period...
+    apply_retention(&store, &config, false).await.unwrap();
+    assert_eq!(recent_checks(&store, "gone", 5).await.unwrap().len(), 1);
+    // ...the explicit purge deletes it now, and leaves the others alone.
+    apply_retention(&store, &config, true).await.unwrap();
+    assert!(recent_checks(&store, "gone", 5).await.unwrap().is_empty());
+    assert_eq!(recent_checks(&store, "kept", 5).await.unwrap().len(), 1);
 }

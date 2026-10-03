@@ -292,3 +292,19 @@ async fn fetch_errors_carry_the_http_status() {
         .expect_err("needs a token");
     assert!(refused.contains("needs a token"));
 }
+
+#[test]
+fn the_compact_hint_shows_past_a_fifth_of_free_pages() {
+    use super::fetch::Storage;
+    let storage = |db_bytes, reclaimable_bytes| Storage {
+        db_bytes,
+        reclaimable_bytes,
+    };
+    assert_eq!(super::ui::compact_hint(&storage(100 << 20, 20 << 20)), None);
+    let hint = super::ui::compact_hint(&storage(100 << 20, 21 << 20)).expect("a hint");
+    assert!(hint.contains("21.0 MiB of 100.0 MiB"), "{hint}");
+    // The summary of a server without the field still reads.
+    let summary: Summary =
+        serde_json::from_str(r#"{"title":"t","overall_label":"ok","monitors":[]}"#).unwrap();
+    assert!(summary.storage.is_none());
+}

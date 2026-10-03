@@ -425,3 +425,24 @@ async fn unknown_badge_is_404() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn only_the_operator_summary_carries_the_database_size() {
+    let app = test_app().await;
+    let operator = app
+        .clone()
+        .oneshot(get("/api/summary?token=0123456789abcdef"))
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body_text(operator).await).unwrap();
+    let storage = &json["storage"];
+    assert!(
+        storage["db_bytes"].as_u64().is_some_and(|bytes| bytes > 0),
+        "{json}"
+    );
+    assert!(storage["reclaimable_bytes"].as_u64().is_some(), "{json}");
+
+    let public = app.oneshot(get("/api/summary")).await.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body_text(public).await).unwrap();
+    assert!(json.get("storage").is_none(), "{json}");
+}

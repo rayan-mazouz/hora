@@ -31,6 +31,15 @@ pub(super) struct Summary {
     /// older or unauthenticated servers).
     #[serde(default)]
     pub(super) channels: Vec<Channel>,
+    /// The database size (authenticated API only; absent on older servers).
+    #[serde(default)]
+    pub(super) storage: Option<Storage>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct Storage {
+    pub(super) db_bytes: u64,
+    pub(super) reclaimable_bytes: u64,
 }
 
 #[derive(Deserialize)]

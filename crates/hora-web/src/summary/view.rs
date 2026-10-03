@@ -33,6 +33,9 @@ pub(crate) struct Summary {
     /// Notification-channel health (operator only; empty in the public view).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) channels: Vec<ChannelView>,
+    /// The database's size (operator only; absent for every other audience).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) storage: Option<StorageView>,
     /// The last 24 h's event markers ("deploy api v2.3"), drawn on the
     /// monitor charts: an operator stream, empty for every other audience.
     #[serde(skip)]
@@ -121,6 +124,17 @@ pub(crate) struct ChannelView {
     /// channel is healthy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) failing_for_secs: Option<u64>,
+}
+
+/// The database's size, for `hora top`'s hint to run `hora compact`. Read
+/// from the file's header counters (O(1)), not measured page by page.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct StorageView {
+    /// The database file, in bytes (without its WAL).
+    pub(crate) db_bytes: u64,
+    /// Its free pages, in bytes: what `hora compact` gives back at the least
+    /// (fragmentation inside used pages comes on top).
+    pub(crate) reclaimable_bytes: u64,
 }
 
 /// A card. Cloned only to adjust a few fields for another audience (see

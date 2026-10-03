@@ -34,6 +34,12 @@ pub(super) fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         Span::styled(format!(" {label} "), overall_style(overall)),
         Span::raw(format!("  updated {}  {}", app.updated, app.url)),
     ];
+    if let Some(storage) = app.summary.as_ref().and_then(|s| s.storage.as_ref()) {
+        spans.push(Span::raw(format!(
+            "  db {}",
+            hora_core::fmt::bytes(storage.db_bytes)
+        )));
+    }
     if let Some(error) = &app.error {
         spans.push(Span::styled(
             format!("  {error}"),
@@ -228,15 +234,42 @@ fn trouble_lines(app: &App) -> Vec<Line<'static>> {
             })
             .collect()
     });
+    let compact = app
+        .summary
+        .as_ref()
+        .and_then(|summary| summary.storage.as_ref())
+        .and_then(compact_hint)
+        .map(|hint| Line::from(Span::styled(hint, Style::new().fg(Color::DarkGray))));
     if troubled.is_empty() && banners.is_empty() && broken_channels.is_empty() {
-        return vec![Line::from(Span::styled(
+        let mut lines = vec![Line::from(Span::styled(
             " all monitors up",
             Style::new().fg(Color::Green),
         ))];
+        lines.extend(compact);
+        return lines;
     }
     banners.extend(troubled);
     banners.extend(broken_channels);
+    banners.extend(compact);
     banners
+}
+
+/// Over this share of the file in free pages, `hora top` suggests a
+/// compaction: below it the file reuses its free pages soon enough.
+const COMPACT_HINT_PERCENT: u64 = 20;
+
+/// The one-line suggestion to run `hora compact`, when it would give back
+/// more than [`COMPACT_HINT_PERCENT`] of the file.
+pub(super) fn compact_hint(storage: &super::fetch::Storage) -> Option<String> {
+    (storage.reclaimable_bytes.saturating_mul(100)
+        > storage.db_bytes.saturating_mul(COMPACT_HINT_PERCENT))
+    .then(|| {
+        format!(
+            " hora compact would give back at least {} of {} (stop the daemon first)",
+            hora_core::fmt::bytes(storage.reclaimable_bytes),
+            hora_core::fmt::bytes(storage.db_bytes)
+        )
+    })
 }
 
 fn severity_style(severity: &str) -> Style {

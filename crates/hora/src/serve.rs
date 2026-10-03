@@ -15,6 +15,10 @@ use tracing_subscriber::EnvFilter;
 pub(crate) async fn serve() -> anyhow::Result<()> {
     let config_path = config::path();
     let initial = config::load_from(&config_path).context("loading configuration")?;
+    // Held until the process ends: `hora compact` rewrites the file and must
+    // never do so under a running daemon (nor two daemons share one file).
+    let _lock = hora_core::db::lock_exclusive(&initial.server.database_path)
+        .context("locking the database")?;
     let store = hora_core::db::connect(&initial.server.database_path)
         .await
         .context("opening database")?;

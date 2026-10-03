@@ -14,7 +14,7 @@ mod view;
 
 pub(crate) use view::{
     ChannelView, DayCell, GroupView, IncidentView, MaintenanceView, MonitorView, PeerView,
-    RecentIncident, StatusTemplate, Summary, VantageView,
+    RecentIncident, StatusTemplate, StorageView, Summary, VantageView,
 };
 
 use monitor::{MonitorData, build_groups, build_monitor_view};
@@ -189,6 +189,10 @@ pub(crate) async fn build_summary(
         groups,
         peers,
         channels: channel_views(channel_health),
+        storage: store.size().await.ok().map(|size| StorageView {
+            db_bytes: size.db_bytes,
+            reclaimable_bytes: size.free_bytes,
+        }),
         events: events.into(),
         recent: Vec::new(),
         quiet_days: None,
@@ -366,6 +370,7 @@ pub(crate) fn derive(built: &Built, config: &Config, visibility: &Visibility<'_>
         groups,
         peers: operator.peers.clone(),
         channels: Vec::new(),
+        storage: None,
         events: Arc::from([]),
         recent: Vec::new(),
         quiet_days: None,
@@ -510,6 +515,7 @@ pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Opti
         }],
         peers: Vec::new(),
         channels: Vec::new(),
+        storage: None,
         events: Arc::clone(&summary.events),
         recent: summary
             .recent
