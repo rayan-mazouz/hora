@@ -41,9 +41,14 @@ const ORPHAN_META_PREFIX: &str = "orphan_since:";
 /// `meta` key prefix recording since when a push monitor or watched peer has
 /// been expecting its first heartbeat (`heartbeat_expected_since:<id>`).
 pub(crate) const HEARTBEAT_EXPECTED_META_PREFIX: &str = "heartbeat_expected_since:";
+/// `meta` key prefix recording the `cert_pin` the stored `cert_pins` key was
+/// last checked against (`cert_pin_against:<id>` = the configured pin), so a
+/// reported mismatch is not taken as reported against a *different* pin.
+pub(crate) const CERT_PIN_AGAINST_META_PREFIX: &str = "cert_pin_against:";
 /// Every `meta` key prefix that holds per-id state, swept with the id's rows
 /// (see [`delete_orphans`]).
-const PER_ID_META_PREFIXES: &[&str] = &[HEARTBEAT_EXPECTED_META_PREFIX];
+const PER_ID_META_PREFIXES: &[&str] =
+    &[HEARTBEAT_EXPECTED_META_PREFIX, CERT_PIN_AGAINST_META_PREFIX];
 
 // --- Shared SQL fragments ----------------------------------------------------
 // Macros rather than consts so each query stays one `&'static str` literal

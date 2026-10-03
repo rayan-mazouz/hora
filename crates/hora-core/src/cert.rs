@@ -564,7 +564,7 @@ async fn check_pin(
         )
         .await;
     if failed.is_empty() {
-        remember_pin(pool, &monitor.id, fingerprint, now).await;
+        remember_pin(pool, &monitor.id, expected_pin, fingerprint, now).await;
     } else {
         warn!(
             monitor = %monitor.id,
@@ -575,13 +575,16 @@ async fn check_pin(
 }
 
 /// Certificate pinning, first half of one check. The stored fingerprint is the
-/// last key either seen matching the pin or *reported* as a mismatch, so:
+/// last key either seen matching the pin or *reported* as a mismatch, along
+/// with the pin it was judged against, so:
 /// - a key matching the pin is remembered here, which re-arms the alert;
-/// - a mismatching key not yet reported returns `Some(previous)`: the caller
-///   alerts, and calls [`remember_pin`] only once that alert was delivered.
-///   While muted by maintenance or with a failing channel nothing is stored
-///   and the next check alerts again, so a key first seen in a maintenance
-///   window, or whose alert was lost, is never silently accepted.
+/// - a mismatching key not yet reported against *this* pin returns
+///   `Some(previous)`: the caller alerts, and calls [`remember_pin`] only once
+///   that alert was delivered. While muted by maintenance or with a failing
+///   channel nothing is stored and the next check alerts again, so a key first
+///   seen in a maintenance window, or whose alert was lost, is never silently
+///   accepted. Changing `cert_pin` to another value the key still does not
+///   match alerts again: the old report was about the old pin.
 async fn pin_to_report(
     pool: &SqlitePool,
     monitor_id: &str,
@@ -589,6 +592,7 @@ async fn pin_to_report(
     fingerprint: &str,
     now: i64,
 ) -> Option<String> {
+    let against_key = format!("{}{monitor_id}", db::CERT_PIN_AGAINST_META_PREFIX);
     let stored = match db::cert_pin_fingerprint(pool, monitor_id).await {
         Ok(stored) => stored,
         Err(err) => {
@@ -596,18 +600,42 @@ async fn pin_to_report(
             return None;
         }
     };
-    if let Some(previous) = pin_alert(expected_pin, stored.as_deref(), fingerprint) {
+    let against = match db::meta_get(pool, &against_key).await {
+        Ok(against) => against,
+        Err(err) => {
+            warn!(monitor = %monitor_id, "failed to read cert pin: {err:#}");
+            return None;
+        }
+    };
+    // A key stored before the pin was recorded alongside it (older versions)
+    // counts as judged against the current pin: an upgrade must not re-alert.
+    let same_pin = against
+        .as_deref()
+        .is_none_or(|against| against.eq_ignore_ascii_case(expected_pin));
+    if let Some(previous) = pin_alert(expected_pin, stored.as_deref(), same_pin, fingerprint) {
         return Some(previous.to_owned());
     }
-    if stored.as_deref() != Some(fingerprint) {
-        remember_pin(pool, monitor_id, fingerprint, now).await;
+    if stored.as_deref() != Some(fingerprint) || against.is_none() {
+        remember_pin(pool, monitor_id, expected_pin, fingerprint, now).await;
     }
     None
 }
 
-/// Record `fingerprint` as the monitor's last matching or reported key.
-async fn remember_pin(pool: &SqlitePool, monitor_id: &str, fingerprint: &str, now: i64) {
+/// Record `fingerprint` as the monitor's last matching or reported key, judged
+/// against `expected_pin`.
+async fn remember_pin(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    expected_pin: &str,
+    fingerprint: &str,
+    now: i64,
+) {
     if let Err(err) = db::upsert_cert_pin(pool, monitor_id, fingerprint, now).await {
+        warn!(monitor = %monitor_id, "failed to store cert pin: {err:#}");
+        return;
+    }
+    let against_key = format!("{}{monitor_id}", db::CERT_PIN_AGAINST_META_PREFIX);
+    if let Err(err) = db::meta_set(pool, &against_key, &expected_pin.to_ascii_lowercase()).await {
         warn!(monitor = %monitor_id, "failed to store cert pin: {err:#}");
     }
 }
@@ -777,15 +805,24 @@ async fn check_releases(
 /// the observed key matches the pin, or when it was already reported - the
 /// caller stores a mismatching fingerprint once its alert is delivered, so a
 /// mismatch alerts once per change (and survives restarts) instead of on every
-/// check.
-fn pin_alert<'a>(expected: &'a str, stored: Option<&'a str>, observed: &str) -> Option<&'a str> {
+/// check. `same_pin` says whether `stored` was judged against `expected`: a
+/// mismatch reported against another (since changed) pin is not reported yet.
+fn pin_alert<'a>(
+    expected: &'a str,
+    stored: Option<&'a str>,
+    same_pin: bool,
+    observed: &str,
+) -> Option<&'a str> {
     // Case-insensitive on the configured pin: `parse()` canonicalizes it to
     // lowercase, but a mixed-case pin from any other path must not silently
     // disable pinning. `stored` is always our own lowercase sha256_hex.
-    if observed.eq_ignore_ascii_case(expected) || stored == Some(observed) {
+    if observed.eq_ignore_ascii_case(expected) || (same_pin && stored == Some(observed)) {
         return None;
     }
-    Some(stored.unwrap_or(expected))
+    Some(match stored {
+        Some(stored) if stored != observed => stored,
+        _ => expected,
+    })
 }
 
 #[cfg(test)]
@@ -795,14 +832,17 @@ mod tests {
     #[test]
     fn pin_alert_fires_once_per_new_fingerprint() {
         // Matches the pin: never alerts, whatever was seen before.
-        assert_eq!(pin_alert("aaa", None, "aaa"), None);
-        assert_eq!(pin_alert("aaa", Some("bbb"), "aaa"), None);
+        assert_eq!(pin_alert("aaa", None, true, "aaa"), None);
+        assert_eq!(pin_alert("aaa", Some("bbb"), true, "aaa"), None);
         // First mismatch: alert, reporting the pin as the previous value.
-        assert_eq!(pin_alert("aaa", None, "bbb"), Some("aaa"));
+        assert_eq!(pin_alert("aaa", None, true, "bbb"), Some("aaa"));
         // Same mismatch already recorded: no re-alert.
-        assert_eq!(pin_alert("aaa", Some("bbb"), "bbb"), None);
+        assert_eq!(pin_alert("aaa", Some("bbb"), true, "bbb"), None);
         // The key changed again: alert with the last seen value as previous.
-        assert_eq!(pin_alert("aaa", Some("bbb"), "ccc"), Some("bbb"));
+        assert_eq!(pin_alert("aaa", Some("bbb"), true, "ccc"), Some("bbb"));
+        // Recorded against another pin: not reported against this one yet.
+        assert_eq!(pin_alert("ddd", Some("bbb"), false, "bbb"), Some("ddd"));
+        assert_eq!(pin_alert("ddd", Some("bbb"), false, "ddd"), None);
     }
 
     #[tokio::test]
@@ -830,8 +870,37 @@ mod tests {
         );
 
         // Delivered: remembered, no repeat every 12 hours.
-        remember_pin(&pool, "m", rogue, 3).await;
+        remember_pin(&pool, "m", pin, rogue, 3).await;
         assert_eq!(pin_to_report(&pool, "m", pin, rogue, 4).await, None);
+
+        // The operator changes cert_pin to another value the key still does
+        // not match: that is a new mismatch, reported again (once).
+        let other = "ccc";
+        assert_eq!(
+            pin_to_report(&pool, "m", other, rogue, 4).await.as_deref(),
+            Some(other)
+        );
+        remember_pin(&pool, "m", other, rogue, 4).await;
+        assert_eq!(pin_to_report(&pool, "m", other, rogue, 4).await, None);
+        // And back to the original pin: the report was against `other`.
+        assert_eq!(
+            pin_to_report(&pool, "m", pin, rogue, 4).await.as_deref(),
+            Some(pin)
+        );
+        remember_pin(&pool, "m", pin, rogue, 4).await;
+
+        // A mismatch reported by an older version (no pin recorded with it)
+        // counts as reported against the current pin: no alert on upgrade.
+        db::upsert_cert_pin(&pool, "legacy", rogue, 1)
+            .await
+            .unwrap();
+        assert_eq!(pin_to_report(&pool, "legacy", pin, rogue, 2).await, None);
+        assert_eq!(
+            db::meta_get(&pool, "cert_pin_against:legacy")
+                .await
+                .unwrap(),
+            Some(pin.to_owned())
+        );
 
         // The pinned key is back: remembered, which re-arms the alert.
         assert_eq!(pin_to_report(&pool, "m", pin, pin, 5).await, None);
