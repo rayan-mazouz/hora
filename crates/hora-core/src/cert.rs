@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::db::Store;
 use hora_notify::Event;
-use sqlx::SqlitePool;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio_rustls::TlsConnector;
@@ -355,7 +355,7 @@ pub fn monitor_endpoint(monitor: &crate::config::Monitor) -> Option<(String, u16
 /// shutdown signal lets it stop between ticks instead of being aborted.
 #[must_use]
 pub fn spawn_watcher(
-    pool: SqlitePool,
+    store: Store,
     config: watch::Receiver<Arc<Config>>,
     notifier: Notifiers,
     client: reqwest::Client,
@@ -390,7 +390,7 @@ pub fn spawn_watcher(
             // remaining lookup and handshake.
             let sweep = async {
                 domain_expiry::check_domains(
-                    &pool,
+                    &store,
                     &snapshot,
                     &notifier,
                     &client,
@@ -398,8 +398,8 @@ pub fn spawn_watcher(
                     now,
                 )
                 .await;
-                release::check_releases(&pool, &snapshot, &notifier, &client, now).await;
-                check_certs(&pool, &snapshot, &notifier, &tls, &mut warned, now).await;
+                release::check_releases(&store, &snapshot, &notifier, &client, now).await;
+                check_certs(&store, &snapshot, &notifier, &tls, &mut warned, now).await;
             };
             tokio::select! {
                 () = sweep => {}
@@ -413,7 +413,7 @@ pub fn spawn_watcher(
 /// concurrently (bounded by [`CERT_CONCURRENCY`], and [`CERT_SWEEP_DEADLINE`]
 /// overall), then store and alert on the results one by one.
 async fn check_certs(
-    pool: &SqlitePool,
+    store: &Store,
     snapshot: &Config,
     notifier: &Notifiers,
     tls: &Arc<ClientConfig>,
@@ -481,7 +481,7 @@ async fn check_certs(
                 continue;
             }
         };
-        if let Err(err) = db::upsert_cert(pool, &monitor.id, not_after, now).await {
+        if let Err(err) = db::upsert_cert(store, &monitor.id, not_after, now).await {
             warn!(monitor = %monitor.id, "failed to store cert info: {err:#}");
         }
         let days_left = (not_after - now) / SECONDS_PER_DAY;
@@ -510,7 +510,7 @@ async fn check_certs(
 
         if let Some(expected_pin) = &monitor.cert_pin {
             check_pin(
-                pool,
+                store,
                 notifier,
                 monitor,
                 expected_pin,
@@ -526,7 +526,7 @@ async fn check_certs(
 /// Certificate pinning for one check: alert on an unreported mismatch (see
 /// [`pin_to_report`]), and remember the key only once the alert went out.
 async fn check_pin(
-    pool: &SqlitePool,
+    store: &Store,
     notifier: &Notifiers,
     monitor: &crate::config::Monitor,
     expected_pin: &str,
@@ -534,7 +534,7 @@ async fn check_pin(
     muted: bool,
     now: i64,
 ) {
-    let Some(previous) = pin_to_report(pool, &monitor.id, expected_pin, fingerprint, now).await
+    let Some(previous) = pin_to_report(store, &monitor.id, expected_pin, fingerprint, now).await
     else {
         return;
     };
@@ -554,7 +554,7 @@ async fn check_pin(
         )
         .await;
     if failed.is_empty() {
-        remember_pin(pool, &monitor.id, expected_pin, fingerprint, now).await;
+        remember_pin(store, &monitor.id, expected_pin, fingerprint, now).await;
     } else {
         warn!(
             monitor = %monitor.id,
@@ -576,21 +576,21 @@ async fn check_pin(
 ///   accepted. Changing `cert_pin` to another value the key still does not
 ///   match alerts again: the old report was about the old pin.
 async fn pin_to_report(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     expected_pin: &str,
     fingerprint: &str,
     now: i64,
 ) -> Option<String> {
     let against_key = format!("{}{monitor_id}", db::CERT_PIN_AGAINST_META_PREFIX);
-    let stored = match db::cert_pin_fingerprint(pool, monitor_id).await {
+    let stored = match db::cert_pin_fingerprint(store, monitor_id).await {
         Ok(stored) => stored,
         Err(err) => {
             warn!(monitor = %monitor_id, "failed to read cert pin: {err:#}");
             return None;
         }
     };
-    let against = match db::meta_get(pool, &against_key).await {
+    let against = match db::meta_get(store, &against_key).await {
         Ok(against) => against,
         Err(err) => {
             warn!(monitor = %monitor_id, "failed to read cert pin: {err:#}");
@@ -606,7 +606,7 @@ async fn pin_to_report(
         return Some(previous.to_owned());
     }
     if stored.as_deref() != Some(fingerprint) || against.is_none() {
-        remember_pin(pool, monitor_id, expected_pin, fingerprint, now).await;
+        remember_pin(store, monitor_id, expected_pin, fingerprint, now).await;
     }
     None
 }
@@ -614,18 +614,18 @@ async fn pin_to_report(
 /// Record `fingerprint` as the monitor's last matching or reported key, judged
 /// against `expected_pin`.
 async fn remember_pin(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     expected_pin: &str,
     fingerprint: &str,
     now: i64,
 ) {
-    if let Err(err) = db::upsert_cert_pin(pool, monitor_id, fingerprint, now).await {
+    if let Err(err) = db::upsert_cert_pin(store, monitor_id, fingerprint, now).await {
         warn!(monitor = %monitor_id, "failed to store cert pin: {err:#}");
         return;
     }
     let against_key = format!("{}{monitor_id}", db::CERT_PIN_AGAINST_META_PREFIX);
-    if let Err(err) = db::meta_set(pool, &against_key, &expected_pin.to_ascii_lowercase()).await {
+    if let Err(err) = db::meta_set(store, &against_key, &expected_pin.to_ascii_lowercase()).await {
         warn!(monitor = %monitor_id, "failed to store cert pin: {err:#}");
     }
 }
@@ -678,72 +678,64 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreported_pin_mismatch_keeps_alerting() {
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(":memory:")
-            .create_if_missing(true);
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        db::migrator().run(&pool).await.unwrap();
+        let store = crate::db::Store::in_memory().await;
         let (pin, rogue) = ("aaa", "bbb");
 
         // Seen during maintenance (or the alert failed): nothing remembered,
         // so the next check reports it again instead of accepting the key.
         assert_eq!(
-            pin_to_report(&pool, "m", pin, rogue, 1).await.as_deref(),
+            pin_to_report(&store, "m", pin, rogue, 1).await.as_deref(),
             Some(pin)
         );
         assert_eq!(
-            pin_to_report(&pool, "m", pin, rogue, 2).await.as_deref(),
+            pin_to_report(&store, "m", pin, rogue, 2).await.as_deref(),
             Some(pin)
         );
 
         // Delivered: remembered, no repeat every 12 hours.
-        remember_pin(&pool, "m", pin, rogue, 3).await;
-        assert_eq!(pin_to_report(&pool, "m", pin, rogue, 4).await, None);
+        remember_pin(&store, "m", pin, rogue, 3).await;
+        assert_eq!(pin_to_report(&store, "m", pin, rogue, 4).await, None);
 
         // The operator changes cert_pin to another value the key still does
         // not match: that is a new mismatch, reported again (once).
         let other = "ccc";
         assert_eq!(
-            pin_to_report(&pool, "m", other, rogue, 4).await.as_deref(),
+            pin_to_report(&store, "m", other, rogue, 4).await.as_deref(),
             Some(other)
         );
-        remember_pin(&pool, "m", other, rogue, 4).await;
-        assert_eq!(pin_to_report(&pool, "m", other, rogue, 4).await, None);
+        remember_pin(&store, "m", other, rogue, 4).await;
+        assert_eq!(pin_to_report(&store, "m", other, rogue, 4).await, None);
         // And back to the original pin: the report was against `other`.
         assert_eq!(
-            pin_to_report(&pool, "m", pin, rogue, 4).await.as_deref(),
+            pin_to_report(&store, "m", pin, rogue, 4).await.as_deref(),
             Some(pin)
         );
-        remember_pin(&pool, "m", pin, rogue, 4).await;
+        remember_pin(&store, "m", pin, rogue, 4).await;
 
         // A mismatch reported by an older version (no pin recorded with it)
         // counts as reported against the current pin: no alert on upgrade.
-        db::upsert_cert_pin(&pool, "legacy", rogue, 1)
+        db::upsert_cert_pin(&store, "legacy", rogue, 1)
             .await
             .unwrap();
-        assert_eq!(pin_to_report(&pool, "legacy", pin, rogue, 2).await, None);
+        assert_eq!(pin_to_report(&store, "legacy", pin, rogue, 2).await, None);
         assert_eq!(
-            db::meta_get(&pool, "cert_pin_against:legacy")
+            db::meta_get(&store, "cert_pin_against:legacy")
                 .await
                 .unwrap(),
             Some(pin.to_owned())
         );
 
         // The pinned key is back: remembered, which re-arms the alert.
-        assert_eq!(pin_to_report(&pool, "m", pin, pin, 5).await, None);
+        assert_eq!(pin_to_report(&store, "m", pin, pin, 5).await, None);
         assert_eq!(
-            db::cert_pin_fingerprint(&pool, "m")
+            db::cert_pin_fingerprint(&store, "m")
                 .await
                 .unwrap()
                 .as_deref(),
             Some(pin)
         );
         assert_eq!(
-            pin_to_report(&pool, "m", pin, rogue, 6).await.as_deref(),
+            pin_to_report(&store, "m", pin, rogue, 6).await.as_deref(),
             Some(pin)
         );
     }

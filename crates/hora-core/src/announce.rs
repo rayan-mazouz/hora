@@ -3,7 +3,7 @@
 //! /api/announce`, `hora announce` and the `a` key of `hora top` - so a banner
 //! reads, and is refused, the same way whichever one it came through.
 
-use sqlx::SqlitePool;
+use crate::db::Store;
 
 pub use crate::config::{Severity, UnknownSeverity};
 use crate::{MAX_ANNOUNCE_BODY_CHARS, MAX_ANNOUNCE_TITLE_CHARS, SECONDS_PER_DAY, bounded, db};
@@ -84,9 +84,9 @@ impl Announcement {
     /// # Errors
     ///
     /// Returns an error if the insert fails.
-    pub async fn pin(&self, pool: &SqlitePool) -> sqlx::Result<i64> {
+    pub async fn pin(&self, store: &Store) -> crate::db::Result<i64> {
         db::insert_announcement(
-            pool,
+            store,
             &self.title,
             &self.body,
             self.severity.as_str(),

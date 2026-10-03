@@ -12,12 +12,12 @@ use super::{
 /// Print the monthly SLA report as text - the terminal twin of the printable
 /// `/report/{month}` page. Defaults to last month: "here is your May report".
 pub(crate) async fn report(month: Option<&str>) -> Result<(), CliError> {
-    let (config, pool) = open_database().await?;
+    let (config, store) = open_database().await?;
     let month = month.map_or_else(
         || hora_core::report::previous_month(chrono::Utc::now().timestamp()),
         str::to_owned,
     );
-    let report = hora_core::report::build(&pool, &config, &month)
+    let report = hora_core::report::build(&store, &config, &month)
         .await
         .map_err(|err| CliError::Failed(format!("{err:#}")))?;
 
@@ -79,9 +79,9 @@ pub(crate) async fn timeline(args: &[String]) -> Result<(), CliError> {
         }
     }
 
-    let (config, pool) = open_database().await?;
+    let (config, store) = open_database().await?;
     let since = chrono::Utc::now().timestamp() - days * hora_core::SECONDS_PER_DAY;
-    let sources = hora_core::timeline::fetch(&pool, since, 500).await?;
+    let sources = hora_core::timeline::fetch(&store, since, 500).await?;
     let names: std::collections::HashMap<String, String> = config
         .monitors
         .iter()
@@ -118,9 +118,9 @@ pub(crate) async fn timeline(args: &[String]) -> Result<(), CliError> {
 /// of an incident - everything Hora already recorded about it, ready to paste
 /// into a ticket. The web twin is `/incident/{id}`.
 pub(crate) async fn postmortem(id_arg: &str) -> Result<(), CliError> {
-    let (config, pool) = open_database().await?;
-    let id = resolve_incident_id(&pool, id_arg).await?;
-    let Some(incident) = hora_core::db::incident_by_id(&pool, id).await? else {
+    let (config, store) = open_database().await?;
+    let id = resolve_incident_id(&store, id_arg).await?;
+    let Some(incident) = hora_core::db::incident_by_id(&store, id).await? else {
         return Err(no_such_incident(id));
     };
     let name = config.monitor_name(&incident.monitor_id);
@@ -130,8 +130,8 @@ pub(crate) async fn postmortem(id_arg: &str) -> Result<(), CliError> {
 
 /// List recent incidents with their ids - the lookup companion of `annotate`.
 pub(crate) async fn list_incidents(limit: i64) -> Result<(), CliError> {
-    let (config, pool) = open_database().await?;
-    let incidents = hora_core::db::recent_incidents(&pool, limit).await?;
+    let (config, store) = open_database().await?;
+    let incidents = hora_core::db::recent_incidents(&store, limit).await?;
     if incidents.is_empty() {
         println!("No incidents recorded.");
         return Ok(());
@@ -169,9 +169,9 @@ pub(crate) async fn list_incidents(limit: i64) -> Result<(), CliError> {
 /// Attach (or clear, with an empty note) an annotation on an incident, shown
 /// on /history and in the Atom feed. `last` targets the most recent incident.
 pub(crate) async fn annotate(id_arg: &str, note: &str) -> Result<(), CliError> {
-    let (_, pool) = open_database().await?;
-    let id = resolve_incident_id(&pool, id_arg).await?;
-    if !hora_core::db::set_incident_note(&pool, id, note).await? {
+    let (_, store) = open_database().await?;
+    let id = resolve_incident_id(&store, id_arg).await?;
+    if !hora_core::db::set_incident_note(&store, id, note).await? {
         return Err(no_such_incident(id));
     }
     if note.is_empty() {

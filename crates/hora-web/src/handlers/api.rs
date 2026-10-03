@@ -116,7 +116,7 @@ pub(crate) async fn latency_json(
     let max_points = i64::try_from(MAX_LATENCY_POINTS).expect("MAX_LATENCY_POINTS fits in i64");
     // (Manual ceil: `i64::div_ceil` is still unstable.)
     let bucket_secs = ((window + max_points - 1) / max_points).max(1);
-    let points = db::latency_series(&state.pool, &id, since, bucket_secs).await?;
+    let points = db::latency_series(&state.store, &id, since, bucket_secs).await?;
     // The SQL already respects the cap; downsample stays as a pure backstop.
     Ok(Json(downsample(points, MAX_LATENCY_POINTS)))
 }

@@ -1,6 +1,6 @@
 //! Raw check rows: probe results, push heartbeats and missed heartbeats.
 
-use sqlx::SqlitePool;
+use super::Store;
 
 use crate::probe::Outcome;
 
@@ -53,7 +53,7 @@ struct CheckRow<'a> {
 /// recorded miss replaces the miss, so the heartbeat that ends the streak is
 /// not lost). Probes and misses never overwrite: a same-second duplicate probe
 /// is a no-op, and a miss must not erase the push it raced with.
-async fn insert_check_row(pool: &SqlitePool, row: CheckRow<'_>) -> sqlx::Result<()> {
+async fn insert_check_row(store: &Store, row: CheckRow<'_>) -> sqlx::Result<()> {
     let sql = if row.source == CheckSource::Push {
         "INSERT INTO checks (time, monitor_id, status, latency_ms, status_code, error, source) \
          VALUES (?, ?, ?, ?, ?, ?, ?) \
@@ -74,7 +74,7 @@ async fn insert_check_row(pool: &SqlitePool, row: CheckRow<'_>) -> sqlx::Result<
         .bind(row.status_code)
         .bind(row.error)
         .bind(row.source.as_str())
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }
@@ -85,13 +85,13 @@ async fn insert_check_row(pool: &SqlitePool, row: CheckRow<'_>) -> sqlx::Result<
 ///
 /// Returns an error if the insert fails.
 pub async fn insert_check(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     status: i64,
     outcome: &Outcome,
 ) -> sqlx::Result<()> {
     insert_check_row(
-        pool,
+        store,
         CheckRow {
             time: chrono::Utc::now().timestamp(),
             monitor_id,
@@ -113,21 +113,21 @@ pub async fn insert_check(
 ///
 /// Returns an error if the insert fails.
 pub async fn insert_heartbeat_miss(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     reason: &str,
 ) -> sqlx::Result<()> {
-    insert_heartbeat_miss_at(pool, monitor_id, reason, chrono::Utc::now().timestamp()).await
+    insert_heartbeat_miss_at(store, monitor_id, reason, chrono::Utc::now().timestamp()).await
 }
 
 pub(super) async fn insert_heartbeat_miss_at(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     reason: &str,
     time: i64,
 ) -> sqlx::Result<()> {
     insert_check_row(
-        pool,
+        store,
         CheckRow {
             time,
             monitor_id,
@@ -148,14 +148,14 @@ pub(super) async fn insert_heartbeat_miss_at(
 ///
 /// Returns an error if the insert fails.
 pub async fn insert_push(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     status: i64,
     latency_ms: Option<i64>,
     message: Option<&str>,
 ) -> sqlx::Result<()> {
     insert_push_at(
-        pool,
+        store,
         monitor_id,
         status,
         latency_ms,
@@ -166,7 +166,7 @@ pub async fn insert_push(
 }
 
 pub(super) async fn insert_push_at(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     status: i64,
     latency_ms: Option<i64>,
@@ -174,7 +174,7 @@ pub(super) async fn insert_push_at(
     time: i64,
 ) -> sqlx::Result<()> {
     insert_check_row(
-        pool,
+        store,
         CheckRow {
             time,
             monitor_id,
@@ -195,7 +195,7 @@ pub(super) async fn insert_push_at(
 ///
 /// Returns an error if the query fails.
 pub async fn recent_checks(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     limit: i64,
 ) -> sqlx::Result<Vec<Latest>> {
@@ -205,7 +205,7 @@ pub async fn recent_checks(
     )
     .bind(monitor_id)
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -228,7 +228,7 @@ pub struct CheckSample {
 ///
 /// Returns an error if the query fails.
 pub async fn check_samples(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     since: i64,
 ) -> sqlx::Result<Vec<CheckSample>> {
@@ -238,7 +238,7 @@ pub async fn check_samples(
     )
     .bind(monitor_id)
     .bind(since)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -247,10 +247,10 @@ pub async fn check_samples(
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn last_check_time(pool: &SqlitePool, monitor_id: &str) -> sqlx::Result<Option<i64>> {
+pub async fn last_check_time(store: &Store, monitor_id: &str) -> sqlx::Result<Option<i64>> {
     sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(time) FROM checks WHERE monitor_id = ?")
         .bind(monitor_id)
-        .fetch_one(pool)
+        .fetch_one(store.sqlx())
         .await
 }
 
@@ -281,17 +281,14 @@ pub struct Heartbeat {
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn last_heartbeat(
-    pool: &SqlitePool,
-    monitor_id: &str,
-) -> sqlx::Result<Option<Heartbeat>> {
+pub async fn last_heartbeat(store: &Store, monitor_id: &str) -> sqlx::Result<Option<Heartbeat>> {
     sqlx::query_as::<_, Heartbeat>(
         "SELECT time, status, latency_ms, error FROM checks \
          WHERE monitor_id = ? AND (source = 'push' OR (source = 'probe' AND status != 0)) \
          ORDER BY time DESC LIMIT 1",
     )
     .bind(monitor_id)
-    .fetch_optional(pool)
+    .fetch_optional(store.sqlx())
     .await
 }
 
@@ -300,8 +297,8 @@ pub async fn last_heartbeat(
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn last_heartbeat_time(pool: &SqlitePool, monitor_id: &str) -> sqlx::Result<Option<i64>> {
-    Ok(last_heartbeat(pool, monitor_id)
+pub async fn last_heartbeat_time(store: &Store, monitor_id: &str) -> sqlx::Result<Option<i64>> {
+    Ok(last_heartbeat(store, monitor_id)
         .await?
         .map(|beat| beat.time))
 }

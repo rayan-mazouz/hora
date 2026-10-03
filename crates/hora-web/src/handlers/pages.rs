@@ -182,7 +182,7 @@ pub(crate) async fn monitor_page(
     // read them), from its index - not the newest of every monitor.
     let since =
         Utc::now().timestamp() - i64::from(config.page.history_days) * hora_core::SECONDS_PER_DAY;
-    let mut incidents = db::monitor_incidents(&state.pool, &id, since, 500).await?;
+    let mut incidents = db::monitor_incidents(&state.store, &id, since, 500).await?;
     for incident in &mut incidents {
         visibility.sanitize_incident(incident);
     }
@@ -197,8 +197,13 @@ pub(crate) async fn monitor_page(
             .get_or_build(&key, config, async {
                 let now = Utc::now().timestamp();
                 let since = (now / 86_400 - (crate::heatmap::HEATMAP_DAYS - 1)) * 86_400;
-                let cells = db::latency_hourly(&state.pool, &id, since).await?;
-                Ok::<_, sqlx::Error>(crate::heatmap::render(&cells, now, &monitor.name, false))
+                let cells = db::latency_hourly(&state.store, &id, since).await?;
+                Ok::<_, hora_core::db::Error>(crate::heatmap::render(
+                    &cells,
+                    now,
+                    &monitor.name,
+                    false,
+                ))
             })
             .await?;
         Some(svg.as_ref().clone())
@@ -236,9 +241,9 @@ pub(crate) async fn watchers_page(
         return Err(AppError::NotFound("unknown page"));
     }
     let config = &viewer.config;
-    let health = hora_core::mesh::peer::report(&state.pool, config, &state.last_tick).await;
+    let health = hora_core::mesh::peer::report(&state.store, config, &state.last_tick).await;
     let summary = state.snapshot().await.summary(config, &viewer.audience);
-    let incidents = db::recent_incidents(&state.pool, 1000).await?;
+    let incidents = db::recent_incidents(&state.store, 1000).await?;
     let html = crate::watchers::WatchersTemplate {
         chrome: chrome.at("watchers").operator(true),
         page: crate::watchers::build(config, &health, &summary, &incidents),
@@ -297,7 +302,7 @@ pub(crate) async fn report_page(
         .get_or_build(
             &month,
             config,
-            hora_core::report::build(&state.pool, config, &month),
+            hora_core::report::build(&state.store, config, &month),
         )
         .await?;
     // The rendered page depends on the report, the audience and the group
@@ -414,7 +419,7 @@ async fn collect_visible<T, Fut>(
     filter: impl Fn(&mut Vec<T>),
 ) -> Result<Vec<T>, AppError>
 where
-    Fut: Future<Output = sqlx::Result<Vec<T>>>,
+    Fut: Future<Output = hora_core::db::Result<Vec<T>>>,
 {
     let wanted = usize::try_from(limit).unwrap_or(0);
     let mut window = limit.max(1);
@@ -433,13 +438,13 @@ where
 /// Recent incidents restricted to (and sanitized for) what the audience may
 /// see - see [`Visibility::sanitize_incident`].
 async fn visible_incidents(
-    pool: &sqlx::SqlitePool,
+    store: &hora_core::db::Store,
     visibility: &Visibility<'_>,
     limit: i64,
 ) -> Result<Vec<db::Incident>, AppError> {
     collect_visible(
         limit,
-        |window| db::recent_incidents(pool, window),
+        |window| db::recent_incidents(store, window),
         |rows| visibility.filter_incidents(rows),
     )
     .await
@@ -448,13 +453,13 @@ async fn visible_incidents(
 /// Recent pushed alerts restricted to (and sanitized for) what the audience
 /// may see - see [`Visibility::sanitize_alert`].
 async fn visible_pushed_alerts(
-    pool: &sqlx::SqlitePool,
+    store: &hora_core::db::Store,
     visibility: &Visibility<'_>,
     limit: i64,
 ) -> Result<Vec<db::PushedAlert>, AppError> {
     collect_visible(
         limit,
-        |window| db::recent_pushed_alerts(pool, window),
+        |window| db::recent_pushed_alerts(store, window),
         |rows| visibility.filter_alerts(rows),
     )
     .await
@@ -474,7 +479,7 @@ pub(crate) async fn incident_page(
 ) -> Result<Html<String>, AppError> {
     let config = &viewer.config;
     let visibility = Visibility::new(config, &viewer.audience);
-    let mut incident = db::incident_by_id(&state.pool, id)
+    let mut incident = db::incident_by_id(&state.store, id)
         .await?
         .ok_or(AppError::NotFound("unknown incident"))?;
     if !visibility.can_see(&incident.monitor_id) {
@@ -520,11 +525,11 @@ pub(crate) async fn history_page(
 ) -> Result<Html<String>, AppError> {
     let config = &viewer.config;
     let visibility = Visibility::new(config, &viewer.audience);
-    let incidents = visible_incidents(&state.pool, &visibility, 100).await?;
-    let pushed_alerts = visible_pushed_alerts(&state.pool, &visibility, 100).await?;
+    let incidents = visible_incidents(&state.store, &visibility, 100).await?;
+    let pushed_alerts = visible_pushed_alerts(&state.store, &visibility, 100).await?;
     // Event markers are operator info (deploy titles).
     let events = if visibility.sees_operator_streams() {
-        db::recent_events(&state.pool, 100).await?
+        db::recent_events(&state.store, 100).await?
     } else {
         Vec::new()
     };
@@ -559,15 +564,15 @@ pub(crate) async fn timeline_page(
     let since = Utc::now().timestamp() - TIMELINE_DAYS * hora_core::SECONDS_PER_DAY;
 
     let sources = if visibility.sees_operator_streams() {
-        hora_core::timeline::fetch(&state.pool, since, 500).await?
+        hora_core::timeline::fetch(&state.store, since, 500).await?
     } else {
-        let mut incidents = visible_incidents(&state.pool, &visibility, 500).await?;
+        let mut incidents = visible_incidents(&state.store, &visibility, 500).await?;
         incidents.retain(|incident| {
             incident.started_at >= since || incident.ended_at.is_some_and(|ended| ended >= since)
         });
         hora_core::timeline::Sources {
             incidents,
-            announcements: db::announcements_since(&state.pool, since).await?,
+            announcements: db::announcements_since(&state.store, since).await?,
             ..Default::default()
         }
     };
@@ -589,7 +594,7 @@ pub(crate) async fn history_atom(
 ) -> Result<impl IntoResponse, AppError> {
     let config = &viewer.config;
     let visibility = Visibility::new(config, &viewer.audience);
-    let incidents = visible_incidents(&state.pool, &visibility, 50).await?;
+    let incidents = visible_incidents(&state.store, &visibility, 50).await?;
     // Absolute feed links: scheme from the proxy's x-forwarded-proto (plain
     // http when absent), host from the Host header.
     let proto = headers

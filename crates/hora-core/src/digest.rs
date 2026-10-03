@@ -8,8 +8,8 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::db::Store;
 use hora_notify::Event;
-use sqlx::SqlitePool;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -35,7 +35,7 @@ const MAX_SUMMARY_CHARS: usize = 3500;
 /// ticks.
 #[must_use]
 pub fn spawn(
-    pool: SqlitePool,
+    store: Store,
     config: watch::Receiver<Arc<Config>>,
     notifier: Notifiers,
     mut shutdown: watch::Receiver<bool>,
@@ -44,7 +44,7 @@ pub fn spawn(
         loop {
             let snapshot = config.borrow().clone();
             let sleep_secs = match &snapshot.digest {
-                Some(digest) => tick(&pool, &snapshot, digest, &notifier).await,
+                Some(digest) => tick(&store, &snapshot, digest, &notifier).await,
                 // No [digest] yet: check back occasionally for a live reload.
                 None => 300,
             };
@@ -60,7 +60,7 @@ pub fn spawn(
 /// send, and return how long to sleep. Sleeps are capped at an hour so a
 /// reloaded schedule applies reasonably soon.
 async fn tick(
-    pool: &SqlitePool,
+    store: &Store,
     config: &Config,
     digest: &crate::config::Digest,
     notifier: &Notifiers,
@@ -74,10 +74,10 @@ async fn tick(
 
     // First run ever: baseline now, so enabling the digest mid-week waits for
     // the next scheduled slot instead of firing immediately.
-    let last_sent = if let Some(last_sent) = read_last_sent(pool).await {
+    let last_sent = if let Some(last_sent) = read_last_sent(store).await {
         last_sent
     } else {
-        store_last_sent(pool, now).await;
+        store_last_sent(store, now).await;
         now
     };
 
@@ -94,7 +94,7 @@ async fn tick(
 
     // Due (or missed while the daemon was down): send one digest, however
     // many occurrences were missed, and move the baseline to now.
-    match build_summary(pool, config, now).await {
+    match build_summary(store, config, now).await {
         Ok((period, summary)) => {
             info!(%period, "sending digest");
             let dispatcher = notifier.load_full();
@@ -115,7 +115,7 @@ async fn tick(
     }
     // Advance even on a failed build/delivery: the failure is logged, and
     // retrying every minute until next week would spam a broken channel.
-    store_last_sent(pool, now).await;
+    store_last_sent(store, now).await;
     60
 }
 
@@ -125,8 +125,8 @@ fn next_occurrence(cron: &croner::Cron, last_sent: i64) -> Option<i64> {
     Some(cron.find_next_occurrence(&from, false).ok()?.timestamp())
 }
 
-async fn read_last_sent(pool: &SqlitePool) -> Option<i64> {
-    match db::meta_get(pool, META_KEY).await {
+async fn read_last_sent(store: &Store) -> Option<i64> {
+    match db::meta_get(store, META_KEY).await {
         Ok(value) => value.and_then(|value| value.parse().ok()),
         Err(err) => {
             warn!("failed to read digest state: {err:#}");
@@ -135,8 +135,8 @@ async fn read_last_sent(pool: &SqlitePool) -> Option<i64> {
     }
 }
 
-async fn store_last_sent(pool: &SqlitePool, now: i64) {
-    if let Err(err) = db::meta_set(pool, META_KEY, &now.to_string()).await {
+async fn store_last_sent(store: &Store, now: i64) {
+    if let Err(err) = db::meta_set(store, META_KEY, &now.to_string()).await {
         warn!("failed to store digest state: {err:#}");
     }
 }
@@ -149,7 +149,7 @@ async fn store_last_sent(pool: &SqlitePool, now: i64) {
 ///
 /// Returns an error if a database read fails.
 pub async fn build_summary(
-    pool: &SqlitePool,
+    store: &Store,
     config: &Config,
     now: i64,
 ) -> anyhow::Result<(String, String)> {
@@ -163,14 +163,14 @@ pub async fn build_summary(
     // A week of checks: the hourly roll-ups plus the raw edges, not a scan
     // of every raw row in the window.
     let availability: std::collections::HashMap<String, (i64, i64)> =
-        db::window_stats_all(pool, since)
+        db::window_stats_all(store, since)
             .await?
             .into_iter()
             .map(|(id, stats)| (id, (stats.available, stats.total)))
             .collect();
     // Incidents that overlapped the window: still open, ended inside it, or
     // started inside it. Selected in SQL, so a busy week is never truncated.
-    let incidents = db::incidents_between(pool, since, now).await?;
+    let incidents = db::incidents_between(store, since, now).await?;
     let ongoing = incidents.iter().filter(|i| i.ended_at.is_none()).count();
 
     let (mut up_sum, mut total_sum) = (0_i64, 0_i64);
@@ -190,7 +190,7 @@ pub async fn build_summary(
             let _ = write!(line, ", {count} incident{plural}");
         }
         if let Some(slo_bp) = monitor.slo_uptime {
-            line.push_str(&budget_phrase(pool, monitor, slo_bp, now).await);
+            line.push_str(&budget_phrase(store, monitor, slo_bp, now).await);
         }
         lines.push(line);
     }
@@ -221,14 +221,14 @@ pub async fn build_summary(
 /// over budget it is. An unreadable history drops the clause rather than
 /// publishing a wrong number.
 async fn budget_phrase(
-    pool: &SqlitePool,
+    store: &Store,
     monitor: &crate::config::Monitor,
     slo_bp: u32,
     now: i64,
 ) -> String {
     let window_days = monitor.slo_window_days();
     let since = now - i64::from(window_days) * SECONDS_PER_DAY;
-    let Ok((available, total)) = db::availability(pool, &monitor.id, since).await else {
+    let Ok((available, total)) = db::availability(store, &monitor.id, since).await else {
         return String::new();
     };
     let budget = slo::budget_minutes(window_days, slo_bp);

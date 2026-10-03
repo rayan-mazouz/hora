@@ -1,6 +1,6 @@
 //! Release watches: the last upstream version seen and whether it was notified.
 
-use sqlx::SqlitePool;
+use super::Store;
 
 /// A monitor's release watch as stored: the latest upstream release seen, when
 /// it was looked up, and the release an alert was last sent for.
@@ -21,7 +21,7 @@ pub struct StoredRelease {
 ///
 /// Returns an error if the upsert fails.
 pub async fn upsert_release_watch(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     project: &str,
     latest: &str,
@@ -41,7 +41,7 @@ pub async fn upsert_release_watch(
     .bind(latest)
     .bind(url)
     .bind(checked_at)
-    .execute(pool)
+    .execute(store.sqlx())
     .await?;
     Ok(())
 }
@@ -51,15 +51,12 @@ pub async fn upsert_release_watch(
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn release_watch(
-    pool: &SqlitePool,
-    monitor_id: &str,
-) -> sqlx::Result<Option<StoredRelease>> {
+pub async fn release_watch(store: &Store, monitor_id: &str) -> sqlx::Result<Option<StoredRelease>> {
     sqlx::query_as::<_, StoredRelease>(
         "SELECT project, latest, url, checked_at, notified FROM release_watch WHERE monitor_id = ?",
     )
     .bind(monitor_id)
-    .fetch_optional(pool)
+    .fetch_optional(store.sqlx())
     .await
 }
 
@@ -69,15 +66,11 @@ pub async fn release_watch(
 /// # Errors
 ///
 /// Returns an error if the update fails.
-pub async fn mark_release_notified(
-    pool: &SqlitePool,
-    monitor_id: &str,
-    tag: &str,
-) -> sqlx::Result<()> {
+pub async fn mark_release_notified(store: &Store, monitor_id: &str, tag: &str) -> sqlx::Result<()> {
     sqlx::query("UPDATE release_watch SET notified = ? WHERE monitor_id = ?")
         .bind(tag)
         .bind(monitor_id)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }

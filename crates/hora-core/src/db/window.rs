@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use sqlx::SqlitePool;
+use super::Store;
 
 use super::DayRow;
 use super::aggregates::{DayCounts, Point, merge_days, read_daily_buckets, read_raw_days};
@@ -39,9 +39,9 @@ pub struct WindowStats {
 
 /// The roll-up frontier: hours below it are in `checks_hourly`. `None`
 /// before the first roll-up.
-async fn hourly_frontier(pool: &SqlitePool) -> sqlx::Result<Option<i64>> {
+async fn hourly_frontier(store: &Store) -> sqlx::Result<Option<i64>> {
     let newest: Option<i64> = sqlx::query_scalar("SELECT MAX(hour) FROM checks_hourly")
-        .fetch_one(pool)
+        .fetch_one(store.sqlx())
         .await?;
     Ok(newest.map(|hour| hour + SECONDS_PER_HOUR))
 }
@@ -60,16 +60,16 @@ async fn hourly_frontier(pool: &SqlitePool) -> sqlx::Result<Option<i64>> {
 ///
 /// Returns an error if a query fails.
 pub async fn window_stats_all(
-    pool: &SqlitePool,
+    store: &Store,
     since: i64,
 ) -> sqlx::Result<HashMap<String, WindowStats>> {
     let first_hour = ceil_to(since, SECONDS_PER_HOUR);
-    let frontier = hourly_frontier(pool).await?.unwrap_or(first_hour);
+    let frontier = hourly_frontier(store).await?.unwrap_or(first_hour);
     let rolled_end = frontier.max(first_hour);
     let mut stats: HashMap<String, WindowStats> = HashMap::new();
-    add_raw(pool, &mut stats, since, first_hour, Raw::Add).await?;
-    add_rolled_up(pool, &mut stats, first_hour, rolled_end).await?;
-    add_raw(pool, &mut stats, rolled_end, i64::MAX, Raw::Add).await?;
+    add_raw(store, &mut stats, since, first_hour, Raw::Add).await?;
+    add_rolled_up(store, &mut stats, first_hour, rolled_end).await?;
+    add_raw(store, &mut stats, rolled_end, i64::MAX, Raw::Add).await?;
     Ok(stats)
 }
 
@@ -114,11 +114,11 @@ impl WindowCache {
     /// Returns an error if a query fails; the cache is then reset.
     pub async fn refresh(
         &mut self,
-        pool: &SqlitePool,
+        store: &Store,
         since: i64,
         now: i64,
     ) -> sqlx::Result<HashMap<String, WindowStats>> {
-        let result = self.refresh_inner(pool, since, now).await;
+        let result = self.refresh_inner(store, since, now).await;
         if result.is_err() {
             *self = Self::default();
         }
@@ -127,12 +127,12 @@ impl WindowCache {
 
     async fn refresh_inner(
         &mut self,
-        pool: &SqlitePool,
+        store: &Store,
         since: i64,
         now: i64,
     ) -> sqlx::Result<HashMap<String, WindowStats>> {
         let first_hour = ceil_to(since, SECONDS_PER_HOUR);
-        let frontier = hourly_frontier(pool).await?.unwrap_or(first_hour);
+        let frontier = hourly_frontier(store).await?.unwrap_or(first_hour);
         let rolled_end = frontier.max(first_hour);
         let fresh = !self.ready
             || first_hour != self.first_hour
@@ -147,13 +147,13 @@ impl WindowCache {
                 tail_end: first_hour,
                 ..Self::default()
             };
-            add_raw(pool, &mut self.lead, since, first_hour, Raw::Add).await?;
+            add_raw(store, &mut self.lead, since, first_hour, Raw::Add).await?;
         } else if self.lead_since < since {
-            add_raw(pool, &mut self.lead, self.lead_since, since, Raw::Remove).await?;
+            add_raw(store, &mut self.lead, self.lead_since, since, Raw::Remove).await?;
             self.lead_since = since;
         }
         if self.middle_end < rolled_end {
-            add_rolled_up(pool, &mut self.middle, self.middle_end, rolled_end).await?;
+            add_rolled_up(store, &mut self.middle, self.middle_end, rolled_end).await?;
             self.middle_end = rolled_end;
             // The tail's rows below the new frontier are in the middle now.
             self.tail = HashMap::new();
@@ -161,11 +161,11 @@ impl WindowCache {
         }
         let settled = (now - TAIL_LAG_SECS).max(self.tail_end);
         if self.tail_end < settled {
-            add_raw(pool, &mut self.tail, self.tail_end, settled, Raw::Add).await?;
+            add_raw(store, &mut self.tail, self.tail_end, settled, Raw::Add).await?;
             self.tail_end = settled;
         }
         let mut stats = HashMap::new();
-        add_raw(pool, &mut stats, self.tail_end, i64::MAX, Raw::Add).await?;
+        add_raw(store, &mut stats, self.tail_end, i64::MAX, Raw::Add).await?;
         for part in [&self.lead, &self.middle, &self.tail] {
             for (id, figures) in part {
                 stats.entry(id.clone()).or_default().add(figures);
@@ -194,7 +194,7 @@ enum Raw {
 /// monitor (a roll-up writes an hour's histograms together, so a missing one
 /// means the hour predates them).
 async fn add_rolled_up(
-    pool: &SqlitePool,
+    store: &Store,
     stats: &mut HashMap<String, WindowStats>,
     start: i64,
     end: i64,
@@ -209,7 +209,7 @@ async fn add_rolled_up(
     )
     .bind(start)
     .bind(end)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
     let mut raw_hours: BTreeSet<i64> = BTreeSet::new();
     let mut histograms = Vec::with_capacity(buckets.len());
@@ -235,14 +235,14 @@ async fn add_rolled_up(
         }
     }
     for (start, end) in hour_ranges(&raw_hours) {
-        add_raw(pool, stats, start, end, Raw::LatencyOnly).await?;
+        add_raw(store, stats, start, end, Raw::LatencyOnly).await?;
     }
     Ok(())
 }
 
 /// Fold the raw checks in `[start, end)` into `stats` (see [`Raw`]).
 async fn add_raw(
-    pool: &SqlitePool,
+    store: &Store,
     stats: &mut HashMap<String, WindowStats>,
     start: i64,
     end: i64,
@@ -259,7 +259,7 @@ async fn add_raw(
     )
     .bind(start)
     .bind(end)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
     for (id, latency_ms, available, total) in rows {
         let entry = stats.entry(id).or_default();
@@ -356,7 +356,7 @@ impl SparklineCache {
     /// Returns an error if a query fails; the cache is then left as it was.
     pub async fn refresh(
         &mut self,
-        pool: &SqlitePool,
+        store: &Store,
         since: i64,
         bucket_secs: i64,
         now: i64,
@@ -372,8 +372,8 @@ impl SparklineCache {
         }
         let close_before = (now - SPARKLINE_CLOSE_LAG_SECS).div_euclid(bucket_secs) * bucket_secs;
 
-        let lead = sparkline_rows(pool, since, lead_end, bucket_secs).await?;
-        let fresh = sparkline_rows(pool, self.closed_until, i64::MAX, bucket_secs).await?;
+        let lead = sparkline_rows(store, since, lead_end, bucket_secs).await?;
+        let fresh = sparkline_rows(store, self.closed_until, i64::MAX, bucket_secs).await?;
 
         for series in self.closed.values_mut() {
             series.retain(|&bucket, _| bucket > first_bucket);
@@ -407,7 +407,7 @@ impl SparklineCache {
 
 /// Raw latency in `[start, end)` per monitor and bucket.
 async fn sparkline_rows(
-    pool: &SqlitePool,
+    store: &Store,
     start: i64,
     end: i64,
     bucket_secs: i64,
@@ -423,7 +423,7 @@ async fn sparkline_rows(
     .bind(start)
     .bind(end)
     .bind(bucket_secs)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
     Ok(rows
         .into_iter()
@@ -452,11 +452,11 @@ impl DailyCache {
     /// Returns an error if a query fails; the cache is then reset.
     pub async fn refresh(
         &mut self,
-        pool: &SqlitePool,
+        store: &Store,
         since: i64,
         until: i64,
     ) -> sqlx::Result<HashMap<String, Vec<DayRow>>> {
-        let result = self.refresh_inner(pool, since, until).await;
+        let result = self.refresh_inner(store, since, until).await;
         if result.is_err() {
             *self = Self::default();
         }
@@ -465,12 +465,12 @@ impl DailyCache {
 
     async fn refresh_inner(
         &mut self,
-        pool: &SqlitePool,
+        store: &Store,
         since: i64,
         until: i64,
     ) -> sqlx::Result<HashMap<String, Vec<DayRow>>> {
         // The same frontier as `daily_all`.
-        let frontier = hourly_frontier(pool)
+        let frontier = hourly_frontier(store)
             .await?
             .map_or(since, |frontier| since.max(frontier).min(until + 1));
         let first_day = ceil_to(since, SECONDS_PER_DAY);
@@ -492,7 +492,7 @@ impl DailyCache {
             self.start = first_day;
         }
         if self.end < cached_end {
-            for (id, day, counts) in hourly_days(pool, self.end, cached_end).await? {
+            for (id, day, counts) in hourly_days(store, self.end, cached_end).await? {
                 self.days
                     .entry(id)
                     .or_default()
@@ -504,8 +504,8 @@ impl DailyCache {
         }
 
         let mut sums = self.days.clone();
-        let head = hourly_days(pool, since, first_day.min(frontier)).await?;
-        let raw = read_raw_days(pool, frontier, until).await?;
+        let head = hourly_days(store, since, first_day.min(frontier)).await?;
+        let raw = read_raw_days(store, frontier, until).await?;
         for (id, day, counts) in head.into_iter().chain(raw) {
             sums.entry(id)
                 .or_default()
@@ -513,19 +513,19 @@ impl DailyCache {
                 .or_default()
                 .add(counts);
         }
-        let daily = read_daily_buckets(pool, since, until).await?;
+        let daily = read_daily_buckets(store, since, until).await?;
         Ok(merge_days(sums, daily))
     }
 }
 
 /// Hourly buckets in `[start, end)` summed per monitor and UTC day.
 async fn hourly_days(
-    pool: &SqlitePool,
+    store: &Store,
     start: i64,
     end: i64,
 ) -> sqlx::Result<Vec<(String, i64, DayCounts)>> {
     if start >= end {
         return Ok(Vec::new());
     }
-    super::aggregates::read_hourly_days(pool, start, end).await
+    super::aggregates::read_hourly_days(store, start, end).await
 }

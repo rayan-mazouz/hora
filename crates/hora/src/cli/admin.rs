@@ -121,9 +121,9 @@ pub(crate) async fn backup(dest: &str) -> Result<(), CliError> {
 /// Print the digest exactly as the `[digest]` task would send it - a dry run
 /// to check the wording (and the data) without notifying anyone.
 pub(crate) async fn digest_preview() -> Result<(), CliError> {
-    let (config, pool) = open_database().await?;
+    let (config, store) = open_database().await?;
     let now = chrono::Utc::now().timestamp();
-    let (period, summary) = hora_core::digest::build_summary(&pool, &config, now).await?;
+    let (period, summary) = hora_core::digest::build_summary(&store, &config, now).await?;
     println!("Hora digest ({period})");
     println!("{summary}");
     Ok(())

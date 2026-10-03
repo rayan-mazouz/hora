@@ -3,6 +3,37 @@
 //! Connection and backup live here; the queries are grouped by table family in
 //! the submodules and re-exported, so callers keep using `db::insert_check`,
 //! `db::recent_incidents`, ...
+//!
+//! # The storage seam
+//!
+//! Every caller - the scheduler, the web layer, the CLI - holds a [`Store`] and
+//! goes through the functions of this module; none of them sees sqlx or a
+//! `SqlitePool`. Errors surface as [`Error`] / [`Result`]. That boundary is
+//! where a second backend (a columnar "scale" mode for very large histories)
+//! would plug in. `SQLite` stays the default and the reference: a second
+//! backend would have to provide, with the same semantics (UTC epoch seconds,
+//! `status` 0 down / 1 up / 2 degraded, newest-first orderings):
+//!
+//! - lifecycle: [`connect`] (schema creation and migrations), [`backup_into`],
+//!   [`check_writable`], [`Store::ping`];
+//! - the time series: [`insert_check`], [`insert_push`],
+//!   [`insert_heartbeat_miss`], [`recent_checks`], [`check_samples`],
+//!   [`last_heartbeat`];
+//! - the aggregates the status page reads: [`window_stats_all`] and the
+//!   [`WindowCache`] / [`DailyCache`] / [`SparklineCache`] fills,
+//!   [`availability_all`], [`daily_all`], [`latency_series`],
+//!   [`latency_hourly`], [`latency_percentiles_all`],
+//!   [`latency_sparkline_all`];
+//! - the roll-ups and retention: [`roll_up_recent`], [`downsample_hourly`],
+//!   [`downsample_daily`], the prune of raw rows and orphans;
+//! - the small relational tables: incidents, events, announcements,
+//!   silences, pushed alerts, certificates, domain expiry, release watch and
+//!   the `meta` key/value store.
+//!
+//! The query functions take `&Store`, so a second implementation means turning
+//! `Store` into an enum (or a trait object) over the backends, not touching
+//! the callers. The conformance tests in `db/tests.rs` run against a
+//! [`Store`], so they are the suite a second backend would have to pass.
 
 #[macro_use]
 mod sql;
@@ -51,8 +82,7 @@ pub use window::{DailyCache, SparklineCache, WindowCache, WindowStats, window_st
 
 use std::time::Duration;
 
-// Re-exported so the CLI can hold a pool without depending on sqlx directly.
-pub use sqlx::SqlitePool;
+use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
 /// `meta` key prefix recording since when a push monitor or watched peer has
@@ -63,9 +93,78 @@ pub(crate) const HEARTBEAT_EXPECTED_META_PREFIX: &str = "heartbeat_expected_sinc
 /// reported mismatch is not taken as reported against a *different* pin.
 pub(crate) const CERT_PIN_AGAINST_META_PREFIX: &str = "cert_pin_against:";
 
+/// A storage error. Today the sqlx error itself; a second backend would make
+/// this an enum over the backends' errors.
+pub type Error = sqlx::Error;
+/// A storage result.
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// The handle on the database every caller holds: cheap to clone (a shared
+/// connection pool underneath), safe to use from any task. See the module
+/// documentation for the seam it draws.
+#[derive(Clone, Debug)]
+pub struct Store {
+    pool: SqlitePool,
+}
+
+impl Store {
+    /// The sqlx pool, for the query functions of this module only.
+    pub(crate) fn sqlx(&self) -> &SqlitePool {
+        &self.pool
+    }
+
+    /// A trivial round trip, to tell a wedged or locked database from a live one.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the database returns.
+    pub async fn ping(&self) -> Result<()> {
+        sqlx::query_scalar::<_, i64>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await
+            .map(drop)
+    }
+
+    /// Close every connection, waiting for in-flight queries to finish.
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
+    /// A fresh, migrated in-memory database on a single connection (an
+    /// in-memory `SQLite` database lives and dies with its connection, so a
+    /// pool of several would see several databases). For tests.
+    ///
+    /// # Panics
+    ///
+    /// When the in-memory database cannot be opened or migrated.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn in_memory() -> Self {
+        let options = SqliteConnectOptions::new()
+            .filename(":memory:")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open in-memory database");
+        migrator()
+            .run(&pool)
+            .await
+            .expect("migrate in-memory database");
+        Self { pool }
+    }
+
+    /// The raw pool, for test fixtures that insert rows no public function
+    /// writes (an old-format row, a forged timestamp). Never for product code.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn fixture_pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+}
+
 /// The embedded database migrations.
-#[must_use]
-pub fn migrator() -> sqlx::migrate::Migrator {
+fn migrator() -> sqlx::migrate::Migrator {
     sqlx::migrate!("./migrations")
 }
 
@@ -74,7 +173,7 @@ pub fn migrator() -> sqlx::migrate::Migrator {
 /// # Errors
 ///
 /// Returns an error if the database cannot be opened or migrations fail.
-pub async fn connect(database_path: &str) -> anyhow::Result<SqlitePool> {
+pub async fn connect(database_path: &str) -> anyhow::Result<Store> {
     // The database holds failure snippets, push payloads and incident detail, so
     // create it private (0600) rather than at the process umask. SQLite then
     // mirrors that mode onto the -wal/-shm sidecars it spawns.
@@ -111,7 +210,7 @@ pub async fn connect(database_path: &str) -> anyhow::Result<SqlitePool> {
     // re-runs ANALYZE when the shape of the data has drifted, so on most boots
     // this is a no-op; the first one pays a sub-second full ANALYZE.
     sqlx::query("PRAGMA optimize").execute(&pool).await?;
-    Ok(pool)
+    Ok(Store { pool })
 }
 
 /// Create the database file with owner-only (0600) permissions before sqlx opens
@@ -154,6 +253,32 @@ fn create_private(path: &str) -> std::io::Result<()> {
         options.mode(0o600);
     }
     options.open(path).map(drop)
+}
+
+/// Whether the existing database at `database_path` opens and takes the
+/// write lock, without writing anything: `BEGIN IMMEDIATE` takes the reserved
+/// lock (it fails on a read-only mount), `ROLLBACK` releases it. Never creates
+/// nor migrates a database (`hora doctor`).
+///
+/// # Errors
+///
+/// The open or lock error, as text.
+pub async fn check_writable(database_path: &str) -> std::result::Result<(), String> {
+    let options = SqliteConnectOptions::new()
+        .filename(database_path)
+        .busy_timeout(Duration::from_secs(2));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .map_err(|err| err.to_string())?;
+    let writable = sqlx::raw_sql("BEGIN IMMEDIATE; ROLLBACK;")
+        .execute(&pool)
+        .await;
+    pool.close().await;
+    writable
+        .map(drop)
+        .map_err(|err| format!("not writable: {err}"))
 }
 
 /// Copy the database into `dest` with `VACUUM INTO`: a consistent, compacted

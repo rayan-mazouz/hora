@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use axum::http::{HeaderName, Request};
 use hora_core::config::Config;
+use hora_core::db::Store;
 use hora_core::notifications::Notifiers;
-use sqlx::SqlitePool;
 use tokio::sync::watch;
 use tower_governor::errors::GovernorError;
 use tower_governor::key_extractor::{KeyExtractor, PeerIpKeyExtractor};
@@ -69,7 +69,7 @@ pub(crate) const PERMISSIONS_POLICY: &str = "accelerometer=(), camera=(), geoloc
 /// Shared application state handed to every handler.
 #[derive(Clone)]
 pub struct AppState {
-    pool: SqlitePool,
+    store: Store,
     config: watch::Receiver<Arc<Config>>,
     /// The status summary, rebuilt in the background (see [`snapshot`]).
     refresher: Arc<Refresher>,
@@ -103,13 +103,13 @@ pub struct AppState {
 impl AppState {
     #[must_use]
     pub fn new(
-        pool: SqlitePool,
+        store: Store,
         config: watch::Receiver<Arc<Config>>,
         last_tick: Arc<AtomicU64>,
         notifier: Notifiers,
     ) -> Self {
         Self {
-            pool,
+            store,
             config,
             refresher: Arc::new(Refresher::default()),
             heatmaps: Arc::new(Memo::new(VIEW_CACHE_TTL)),

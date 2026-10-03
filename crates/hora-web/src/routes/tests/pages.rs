@@ -4,9 +4,9 @@ use super::*;
 
 #[tokio::test]
 async fn incident_page_sanitizes_for_anonymous_and_serves_markdown() {
-    let (app, pool) = test_app_with_pool().await;
+    let (app, store) = test_app_with_pool().await;
     let id = hora_core::db::insert_incident_start(
-        &pool,
+        &store,
         "web",
         Some("HTTP 503: secret stack trace"),
         None,
@@ -16,7 +16,7 @@ async fn incident_page_sanitizes_for_anonymous_and_serves_markdown() {
     )
     .await
     .unwrap();
-    hora_core::db::update_incident_vantage(&pool, id, "seen UP by Hora B")
+    hora_core::db::update_incident_vantage(&store, id, "seen UP by Hora B")
         .await
         .unwrap();
 
@@ -53,8 +53,8 @@ async fn incident_page_sanitizes_for_anonymous_and_serves_markdown() {
 
 #[tokio::test]
 async fn private_monitor_incident_page_is_hidden_from_anonymous() {
-    let (app, pool) = test_app_with_pool().await;
-    let id = hora_core::db::insert_incident_start(&pool, "intra", None, None, &[], None, None)
+    let (app, store) = test_app_with_pool().await;
+    let id = hora_core::db::insert_incident_start(&store, "intra", None, None, &[], None, None)
         .await
         .unwrap();
 
@@ -75,12 +75,12 @@ async fn private_monitor_incident_page_is_hidden_from_anonymous() {
 
 #[tokio::test]
 async fn timeline_merges_and_keeps_operator_streams_private() {
-    let (app, pool) = test_app_with_pool().await;
-    hora_core::db::insert_event(&pool, "deploy api v2.3")
+    let (app, store) = test_app_with_pool().await;
+    hora_core::db::insert_event(&store, "deploy api v2.3")
         .await
         .unwrap();
     hora_core::db::insert_silence(
-        &pool,
+        &store,
         "web",
         chrono::Utc::now().timestamp() + 600,
         Some("deploying"),
@@ -88,7 +88,7 @@ async fn timeline_merges_and_keeps_operator_streams_private() {
     .await
     .unwrap();
     let incident_id = hora_core::db::insert_incident_start(
-        &pool,
+        &store,
         "web",
         Some("HTTP 503: secret detail"),
         None,
@@ -98,7 +98,7 @@ async fn timeline_merges_and_keeps_operator_streams_private() {
     )
     .await
     .unwrap();
-    hora_core::db::insert_announcement(&pool, "Fiber cut", "ETA 6pm", "warning", None)
+    hora_core::db::insert_announcement(&store, "Fiber cut", "ETA 6pm", "warning", None)
         .await
         .unwrap();
 
@@ -287,7 +287,7 @@ const TENANTS: &str = r#"
 
 #[tokio::test]
 async fn group_token_gets_its_detail_but_no_operator_data() {
-    let (app, pool) = app_with_pool(TENANTS).await;
+    let (app, store) = app_with_pool(TENANTS).await;
     let now = chrono::Utc::now().timestamp();
     // Web and the DB are down (3 failures meet the threshold); Intra has
     // a latency series (so its sparkline can carry markers) and a
@@ -297,7 +297,7 @@ async fn group_token_gets_its_detail_but_no_operator_data() {
             sqlx::query("INSERT INTO checks (time, monitor_id, status, error) VALUES (?, ?, 0, 'HTTP 503: boom')")
                     .bind(now - offset)
                     .bind(id)
-                    .execute(&pool)
+                    .execute(store.fixture_pool())
                     .await
                     .unwrap();
         }
@@ -306,13 +306,13 @@ async fn group_token_gets_its_detail_but_no_operator_data() {
         sqlx::query("INSERT INTO checks (time, monitor_id, status, latency_ms, error) VALUES (?, 'intra', ?, 40, 'HTTP 500: tenant secret')")
                 .bind(now - offset)
                 .bind(status)
-                .execute(&pool)
+                .execute(store.fixture_pool())
                 .await
                 .unwrap();
     }
     sqlx::query("INSERT INTO events (title, created_at) VALUES ('deploy billing v9', ?)")
         .bind(now - 1800)
-        .execute(&pool)
+        .execute(store.fixture_pool())
         .await
         .unwrap();
 
@@ -352,14 +352,14 @@ async fn group_token_gets_its_detail_but_no_operator_data() {
 
 #[tokio::test]
 async fn anonymous_history_fills_its_page_past_private_incidents() {
-    let (app, pool) = test_app_with_pool().await;
+    let (app, store) = test_app_with_pool().await;
     // One old public incident, buried under more private ones than the
     // page shows.
-    hora_core::db::insert_incident_start(&pool, "web", Some("HTTP 503"), None, &[], None, None)
+    hora_core::db::insert_incident_start(&store, "web", Some("HTTP 503"), None, &[], None, None)
         .await
         .unwrap();
     for _ in 0..120 {
-        hora_core::db::insert_incident_start(&pool, "intra", None, None, &[], None, None)
+        hora_core::db::insert_incident_start(&store, "intra", None, None, &[], None, None)
             .await
             .unwrap();
     }
@@ -467,14 +467,14 @@ async fn theme_and_token_travel_with_the_navigation() {
 
 #[tokio::test]
 async fn status_page_states_every_state_in_words() {
-    let (app, pool) = test_app_with_pool().await;
+    let (app, store) = test_app_with_pool().await;
     let now = chrono::Utc::now().timestamp();
     for offset in [30, 60, 90] {
         sqlx::query(
             "INSERT INTO checks (time, monitor_id, status, error) VALUES (?, 'web', 0, 'HTTP 503')",
         )
         .bind(now - offset)
-        .execute(&pool)
+        .execute(store.fixture_pool())
         .await
         .unwrap();
     }
@@ -545,21 +545,21 @@ fn web_seen_from_paris(status: &str) -> hora_core::mesh::vantage::VantageMap {
 }
 
 /// Web is down from this node: three failed checks and the incident open.
-async fn web_down_here(pool: &sqlx::SqlitePool) {
+async fn web_down_here(store: &hora_core::db::Store) {
     let now = chrono::Utc::now().timestamp();
     for offset in [30, 60, 90] {
         sqlx::query(
             "INSERT INTO checks (time, monitor_id, status, error) VALUES (?, 'web', 0, 'timeout')",
         )
         .bind(now - offset)
-        .execute(pool)
+        .execute(store.fixture_pool())
         .await
         .unwrap();
     }
     sqlx::query("INSERT INTO incidents (monitor_id, started_at, created_at) VALUES ('web', ?, ?)")
         .bind(now - 9 * 60)
         .bind(now - 9 * 60)
-        .execute(pool)
+        .execute(store.fixture_pool())
         .await
         .unwrap();
 }
@@ -568,8 +568,8 @@ async fn web_down_here(pool: &sqlx::SqlitePool) {
 /// up: the page says "Up" with a calm "Not an outage", never "Web is down".
 #[tokio::test]
 async fn a_down_seen_from_here_only_reads_as_up_with_the_notice() {
-    let (app, pool) = test_app_with_vantage(web_seen_from_paris("up")).await;
-    web_down_here(&pool).await;
+    let (app, store) = test_app_with_vantage(web_seen_from_paris("up")).await;
+    web_down_here(&store).await;
 
     let body = body_text(app.clone().oneshot(get("/")).await.unwrap()).await;
     assert!(body.contains("Not an outage"), "{body}");
@@ -603,8 +603,8 @@ async fn a_down_seen_from_here_only_reads_as_up_with_the_notice() {
 /// long it has lasted.
 #[tokio::test]
 async fn a_down_the_peers_confirm_is_an_outage_with_its_length() {
-    let (app, pool) = test_app_with_vantage(web_seen_from_paris("down")).await;
-    web_down_here(&pool).await;
+    let (app, store) = test_app_with_vantage(web_seen_from_paris("down")).await;
+    web_down_here(&store).await;
 
     let body = body_text(app.clone().oneshot(get("/")).await.unwrap()).await;
     assert!(body.contains("Web is down."), "{body}");

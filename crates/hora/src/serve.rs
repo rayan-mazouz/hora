@@ -15,7 +15,7 @@ use tracing_subscriber::EnvFilter;
 pub(crate) async fn serve() -> anyhow::Result<()> {
     let config_path = config::path();
     let initial = config::load_from(&config_path).context("loading configuration")?;
-    let pool = hora_core::db::connect(&initial.server.database_path)
+    let store = hora_core::db::connect(&initial.server.database_path)
         .await
         .context("opening database")?;
     // The notifier client (no proxy); per-monitor probe clients are built by the
@@ -36,13 +36,13 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
     let handle = hora_core::supervisor::start(
         initial,
         config_path,
-        pool.clone(),
+        store.clone(),
         client.clone(),
         Arc::clone(&last_tick),
         shutdown_rx.clone(),
     );
     let cert_task = hora_core::cert::spawn_watcher(
-        pool.clone(),
+        store.clone(),
         handle.config.clone(),
         handle.notifier.clone(),
         client.clone(),
@@ -55,7 +55,7 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
     // hot-reloaded by the supervisor alongside the monitors.
     let heartbeat_task = hora_core::mesh::peer::spawn_heartbeat(
         handle.config.clone(),
-        pool.clone(),
+        store.clone(),
         client.clone(),
         Arc::clone(&last_tick),
         shutdown_rx.clone(),
@@ -73,14 +73,14 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
     );
 
     let digest_task = hora_core::digest::spawn(
-        pool.clone(),
+        store.clone(),
         handle.config.clone(),
         handle.notifier.clone(),
         shutdown_rx.clone(),
     );
 
     let prune_task =
-        hora_core::maintenance::spawn_pruner(&pool, handle.config.clone(), shutdown_rx);
+        hora_core::maintenance::spawn_pruner(&store, handle.config.clone(), shutdown_rx);
 
     let bind = handle.config.borrow().server.bind.clone();
     let listener = tokio::net::TcpListener::bind(&bind)
@@ -92,7 +92,7 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
     );
 
     let state = hora_web::AppState::new(
-        pool,
+        store,
         handle.config.clone(),
         Arc::clone(&last_tick),
         handle.notifier.clone(),

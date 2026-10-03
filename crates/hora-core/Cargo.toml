@@ -41,3 +41,7 @@ tokio = { workspace = true, features = ["rt", "macros", "process"] }
 
 [lints]
 workspace = true
+
+[features]
+# `db::Store::in_memory` and the raw fixture pool, for the other crates' tests.
+test-support = []

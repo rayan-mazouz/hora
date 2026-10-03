@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 
+use crate::db::Store;
 use hora_notify::Event;
-use sqlx::SqlitePool;
 use tracing::{info, warn};
 
 use crate::SECONDS_PER_DAY;
@@ -25,7 +25,7 @@ const DOMAIN_CHECK_SECS: i64 = 20 * 3600;
 /// alert once when it enters the warning window - the same edge-triggered,
 /// maintenance-muted policy as the certificate expiry in [`crate::cert`].
 pub(crate) async fn check_domains(
-    pool: &SqlitePool,
+    store: &Store,
     snapshot: &Config,
     notifier: &Notifiers,
     client: &reqwest::Client,
@@ -37,7 +37,7 @@ pub(crate) async fn check_domains(
         let Some(domain) = &monitor.domain_expiry else {
             continue;
         };
-        let stored = match db::domain_expiry(pool, &monitor.id).await {
+        let stored = match db::domain_expiry(store, &monitor.id).await {
             Ok(stored) => stored,
             Err(err) => {
                 warn!(monitor = %monitor.id, "failed to read domain expiry: {err:#}");
@@ -54,7 +54,7 @@ pub(crate) async fn check_domains(
             _ => match crate::rdap::domain_expiration(client, domain).await {
                 Ok(expires_at) => {
                     if let Err(err) =
-                        db::upsert_domain_expiry(pool, &monitor.id, domain, expires_at, now).await
+                        db::upsert_domain_expiry(store, &monitor.id, domain, expires_at, now).await
                     {
                         warn!(monitor = %monitor.id, "failed to store domain expiry: {err:#}");
                     }

@@ -103,7 +103,7 @@ pub(crate) async fn push(
         .msg
         .as_deref()
         .map(|msg| msg.chars().take(MAX_PUSH_MSG_CHARS).collect::<String>());
-    db::insert_push(&state.pool, &id, status, query.ping, msg.as_deref()).await?;
+    db::insert_push(&state.store, &id, status, query.ping, msg.as_deref()).await?;
     Ok("ok")
 }
 
@@ -252,7 +252,7 @@ pub(crate) async fn post_alert(
     // fan the alert out to the monitor's channels. The dispatch is spawned, so a
     // slow channel never holds up the producer.
     let alert_id = db::insert_pushed_alert(
-        &state.pool,
+        &state.store,
         &id,
         severity.as_str(),
         &title,

@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn event_requires_token_records_and_validates() {
-    let (app, pool) = test_app_with_pool().await;
+    let (app, store) = test_app_with_pool().await;
     // Recording a change marker is an operator action: closed anonymously.
     let res = app
         .clone()
@@ -21,7 +21,7 @@ async fn event_requires_token_records_and_validates() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let events = hora_core::db::recent_events(&pool, 10).await.unwrap();
+    let events = hora_core::db::recent_events(&store, 10).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].title, "deploy api v2.3");
 
@@ -34,8 +34,8 @@ async fn event_requires_token_records_and_validates() {
 
 #[tokio::test]
 async fn events_reach_authenticated_viewers_only() {
-    let (app, pool) = test_app_with_pool().await;
-    hora_core::db::insert_event(&pool, "deploy api v2.3")
+    let (app, store) = test_app_with_pool().await;
+    hora_core::db::insert_event(&store, "deploy api v2.3")
         .await
         .unwrap();
 
@@ -136,7 +136,7 @@ async fn silence_requires_the_viewer_token() {
 
 #[tokio::test]
 async fn silence_mutes_the_monitor_in_the_database() {
-    let (app, pool) = test_app_with_pool().await;
+    let (app, store) = test_app_with_pool().await;
     let res = app
         .oneshot(push(
             "/api/silence?monitors=web&duration=10m&reason=deploy&token=0123456789abcdef",
@@ -146,15 +146,19 @@ async fn silence_mutes_the_monitor_in_the_database() {
     assert_eq!(res.status(), StatusCode::OK);
 
     let now = chrono::Utc::now().timestamp();
-    assert!(hora_core::db::is_silenced(&pool, "web", now).await.unwrap());
     assert!(
-        !hora_core::db::is_silenced(&pool, "beat", now)
+        hora_core::db::is_silenced(&store, "web", now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !hora_core::db::is_silenced(&store, "beat", now)
             .await
             .unwrap()
     );
     // Within the requested window, never past it.
     assert!(
-        !hora_core::db::is_silenced(&pool, "web", now + 601)
+        !hora_core::db::is_silenced(&store, "web", now + 601)
             .await
             .unwrap()
     );
@@ -162,7 +166,7 @@ async fn silence_mutes_the_monitor_in_the_database() {
 
 #[tokio::test]
 async fn silence_accepts_a_watched_peer() {
-    let (app, pool) = test_app_with_pool().await;
+    let (app, store) = test_app_with_pool().await;
     let res = app
         .oneshot(push(
             "/api/silence?monitors=web,peer-x&duration=5m&token=0123456789abcdef",
@@ -172,7 +176,7 @@ async fn silence_accepts_a_watched_peer() {
     assert_eq!(res.status(), StatusCode::OK);
     let now = chrono::Utc::now().timestamp();
     assert!(
-        hora_core::db::is_silenced(&pool, "peer-x", now)
+        hora_core::db::is_silenced(&store, "peer-x", now)
             .await
             .unwrap()
     );
@@ -180,7 +184,7 @@ async fn silence_accepts_a_watched_peer() {
 
 #[tokio::test]
 async fn silence_all_uses_the_wildcard() {
-    let (app, pool) = test_app_with_pool().await;
+    let (app, store) = test_app_with_pool().await;
     let res = app
         .oneshot(push(
             "/api/silence?monitors=all&duration=5m&token=0123456789abcdef",
@@ -190,7 +194,7 @@ async fn silence_all_uses_the_wildcard() {
     assert_eq!(res.status(), StatusCode::OK);
     let now = chrono::Utc::now().timestamp();
     assert!(
-        hora_core::db::is_silenced(&pool, "beat", now)
+        hora_core::db::is_silenced(&store, "beat", now)
             .await
             .unwrap()
     );

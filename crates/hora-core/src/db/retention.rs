@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use sqlx::SqlitePool;
+use super::Store;
 
 use crate::SECONDS_PER_DAY;
 use crate::config::{Config, Peer};
@@ -36,38 +36,38 @@ const PER_ID_META_PREFIXES: &[&str] =
     &[HEARTBEAT_EXPECTED_META_PREFIX, CERT_PIN_AGAINST_META_PREFIX];
 
 /// Drop announcements whose expiry passed before `cutoff`.
-pub(super) async fn prune_announcements(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+pub(super) async fn prune_announcements(store: &Store, cutoff: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM announcements WHERE until IS NOT NULL AND until < ?")
         .bind(cutoff)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }
 
 /// Drop event markers older than `cutoff` (they age out with the closed
 /// incidents they may have been correlated into).
-pub(super) async fn prune_events(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+pub(super) async fn prune_events(store: &Store, cutoff: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM events WHERE created_at < ?")
         .bind(cutoff)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }
 
 /// Drop pushed alerts older than `cutoff` (by `created_at`).
-async fn prune_pushed_alerts(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+async fn prune_pushed_alerts(store: &Store, cutoff: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM pushed_alerts WHERE created_at < ?")
         .bind(cutoff)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }
 
 /// Drop silences that have expired before `cutoff`.
-pub(super) async fn prune_silences(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+pub(super) async fn prune_silences(store: &Store, cutoff: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM silences WHERE until < ?")
         .bind(cutoff)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }
@@ -90,9 +90,9 @@ pub(super) async fn prune_silences(pool: &SqlitePool, cutoff: i64) -> sqlx::Resu
 /// # Errors
 ///
 /// Returns an error if the aggregation fails.
-pub async fn downsample_hourly(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+pub async fn downsample_hourly(store: &Store, cutoff: i64) -> sqlx::Result<()> {
     let newest: Option<i64> = sqlx::query_scalar("SELECT MAX(hour) FROM checks_hourly")
-        .fetch_one(pool)
+        .fetch_one(store.sqlx())
         .await?;
     let floor = newest.map_or(i64::MIN, |hour| hour + 3600);
     // Only whole hours below the cutoff: with none ended since the newest
@@ -117,7 +117,7 @@ pub async fn downsample_hourly(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<(
     )
     .bind(floor)
     .bind(end)
-    .execute(pool)
+    .execute(store.sqlx())
     .await?;
     Ok(())
 }
@@ -137,14 +137,14 @@ const MAX_HISTOGRAM_HOURS_PER_FILL: usize = 26;
 /// # Errors
 ///
 /// Returns an error if a query fails.
-pub async fn fill_latency_histograms(pool: &SqlitePool, since: i64) -> sqlx::Result<()> {
+pub async fn fill_latency_histograms(store: &Store, since: i64) -> sqlx::Result<()> {
     let hours: Vec<i64> = sqlx::query_scalar(
         "SELECT DISTINCT hour FROM checks_hourly \
          WHERE hour >= ? AND latency_hist IS NULL ORDER BY hour DESC LIMIT ?",
     )
     .bind(since)
     .bind(i64::try_from(MAX_HISTOGRAM_HOURS_PER_FILL).unwrap_or(i64::MAX))
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
     for hour in hours {
         let rows = sqlx::query_as::<_, (String, i64, i64)>(
@@ -154,7 +154,7 @@ pub async fn fill_latency_histograms(pool: &SqlitePool, since: i64) -> sqlx::Res
         )
         .bind(hour)
         .bind(hour + 3600)
-        .fetch_all(pool)
+        .fetch_all(store.sqlx())
         .await?;
         let mut histograms: HashMap<String, LatencyHistogram> = HashMap::new();
         for (id, latency_ms, count) in rows {
@@ -163,7 +163,7 @@ pub async fn fill_latency_histograms(pool: &SqlitePool, since: i64) -> sqlx::Res
                 .or_default()
                 .record(latency_ms, u64::try_from(count).unwrap_or(0));
         }
-        let mut tx = pool.begin().await?;
+        let mut tx = store.sqlx().begin().await?;
         for (id, histogram) in &histograms {
             sqlx::query(
                 "UPDATE checks_hourly SET latency_hist = ? \
@@ -195,10 +195,10 @@ pub async fn fill_latency_histograms(pool: &SqlitePool, since: i64) -> sqlx::Res
 /// # Errors
 ///
 /// Returns an error if a query fails.
-pub async fn roll_up_recent(pool: &SqlitePool, now: i64) -> sqlx::Result<()> {
-    downsample_hourly(pool, now - HOURLY_ROLLUP_LAG_SECS).await?;
+pub async fn roll_up_recent(store: &Store, now: i64) -> sqlx::Result<()> {
+    downsample_hourly(store, now - HOURLY_ROLLUP_LAG_SECS).await?;
     // The 24h window's hours, plus the one it starts in.
-    fill_latency_histograms(pool, now - SECONDS_PER_DAY - 3600).await
+    fill_latency_histograms(store, now - SECONDS_PER_DAY - 3600).await
 }
 
 /// Aggregate hourly buckets into daily ones for even longer-term storage.
@@ -212,9 +212,9 @@ pub async fn roll_up_recent(pool: &SqlitePool, now: i64) -> sqlx::Result<()> {
 /// # Errors
 ///
 /// Returns an error if the aggregation fails.
-pub async fn downsample_daily(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+pub async fn downsample_daily(store: &Store, cutoff: i64) -> sqlx::Result<()> {
     let newest: Option<i64> = sqlx::query_scalar("SELECT MAX(day) FROM checks_daily")
-        .fetch_one(pool)
+        .fetch_one(store.sqlx())
         .await?;
     let floor = newest.map_or(i64::MIN, |day| day + 86400);
     sqlx::query(
@@ -237,7 +237,7 @@ pub async fn downsample_daily(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()
     .bind(floor)
     .bind(cutoff)
     .bind(cutoff)
-    .execute(pool)
+    .execute(store.sqlx())
     .await?;
     Ok(())
 }
@@ -247,10 +247,10 @@ pub async fn downsample_daily(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()
 /// # Errors
 ///
 /// Returns an error if the deletion fails.
-pub async fn prune_hourly(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+pub async fn prune_hourly(store: &Store, cutoff: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM checks_hourly WHERE hour < ?")
         .bind(cutoff)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }
@@ -260,26 +260,26 @@ pub async fn prune_hourly(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
 /// # Errors
 ///
 /// Returns an error if the deletion fails.
-pub async fn prune_daily(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+pub async fn prune_daily(store: &Store, cutoff: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM checks_daily WHERE day < ?")
         .bind(cutoff)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }
 
 /// Downsample old history and age the aggregates out. Failures are logged and
 /// non-fatal: the retention pruning in [`prune`] still runs.
-async fn roll_up_history(pool: &SqlitePool, now: i64) {
+async fn roll_up_history(store: &Store, now: i64) {
     // Downsample before any deletion: every ended hour rolls up into an hourly
     // bucket, hourly buckets older than 90 days into daily ones. Each bucket is
     // written exactly once (see `downsample_hourly`), so the aggregates survive
     // after retention prunes the raw rows they came from.
-    if let Err(err) = roll_up_recent(pool, now).await {
+    if let Err(err) = roll_up_recent(store, now).await {
         tracing::warn!("hourly downsampling failed: {err}");
     }
     let daily_cutoff = now - DOWNSAMPLE_DAILY_AFTER_DAYS * SECONDS_PER_DAY;
-    if let Err(err) = downsample_daily(pool, daily_cutoff).await {
+    if let Err(err) = downsample_daily(store, daily_cutoff).await {
         tracing::warn!("daily downsampling failed: {err}");
     }
 
@@ -287,40 +287,40 @@ async fn roll_up_history(pool: &SqlitePool, now: i64) {
     // only hours already rolled up into a *complete* daily bucket are dropped),
     // daily beyond a year.
     let hourly_prune_cutoff = (daily_cutoff / 86400) * 86400;
-    if let Err(err) = prune_hourly(pool, hourly_prune_cutoff).await {
+    if let Err(err) = prune_hourly(store, hourly_prune_cutoff).await {
         tracing::warn!("hourly prune failed: {err}");
     }
     let yearly_cutoff = now - AGGREGATE_RETENTION_DAYS * SECONDS_PER_DAY;
-    if let Err(err) = prune_daily(pool, yearly_cutoff).await {
+    if let Err(err) = prune_daily(store, yearly_cutoff).await {
         tracing::warn!("daily prune failed: {err}");
     }
     // Closed incidents age out with the daily aggregates; open ones are kept
     // (they are still being displayed, and close on the next healthy tick).
-    if let Err(err) = prune_incidents(pool, yearly_cutoff).await {
+    if let Err(err) = prune_incidents(store, yearly_cutoff).await {
         tracing::warn!("incident prune failed: {err}");
     }
     // Expired silences are dead weight the moment they lapse.
-    if let Err(err) = prune_silences(pool, now).await {
+    if let Err(err) = prune_silences(store, now).await {
         tracing::warn!("silence prune failed: {err}");
     }
     // Same for expired announcements (the active query already hides them).
-    if let Err(err) = prune_announcements(pool, now).await {
+    if let Err(err) = prune_announcements(store, now).await {
         tracing::warn!("announcement prune failed: {err}");
     }
     // Pushed alerts age out with the closed incidents (a year of timeline).
-    if let Err(err) = prune_pushed_alerts(pool, yearly_cutoff).await {
+    if let Err(err) = prune_pushed_alerts(store, yearly_cutoff).await {
         tracing::warn!("pushed-alert prune failed: {err}");
     }
     // Event markers too: a year covers any incident they could correlate with.
-    if let Err(err) = prune_events(pool, yearly_cutoff).await {
+    if let Err(err) = prune_events(store, yearly_cutoff).await {
         tracing::warn!("event prune failed: {err}");
     }
 }
 
-pub(crate) async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
+pub(crate) async fn prune(store: &Store, config: &Config) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
 
-    roll_up_history(pool, now).await;
+    roll_up_history(store, now).await;
 
     // Trim each monitor's history to its retention window. Monitors are grouped
     // by cutoff (most share the default), so this is one DELETE per distinct
@@ -351,16 +351,16 @@ pub(crate) async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<
         )
         .bind(cutoff)
         .bind(&ids)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     }
 
-    delete_orphans(pool, config, now).await?;
+    delete_orphans(store, config, now).await?;
 
     // Keep the planner statistics current as the tables grow and the prunes
     // reshape them - same rationale as the call in [`connect`]; cheap unless
     // the data actually drifted.
-    sqlx::query("PRAGMA optimize").execute(pool).await?;
+    sqlx::query("PRAGMA optimize").execute(store.sqlx()).await?;
     Ok(())
 }
 
@@ -397,11 +397,7 @@ const ORPHAN_TABLES: [&str; 9] = [
 /// seconds every prune tick, timing out the scheduler's inserts, all to
 /// usually delete nothing. Reads don't block writers under WAL, and the
 /// targeted deletes only run once a removed monitor's grace has run out.
-pub(super) async fn delete_orphans(
-    pool: &SqlitePool,
-    config: &Config,
-    now: i64,
-) -> anyhow::Result<()> {
+pub(super) async fn delete_orphans(store: &Store, config: &Config, now: i64) -> anyhow::Result<()> {
     let keep: std::collections::HashSet<&str> = config
         .monitors
         .iter()
@@ -428,7 +424,7 @@ pub(super) async fn delete_orphans(
         let present: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT DISTINCT monitor_id FROM {table}"
         )))
-        .fetch_all(pool)
+        .fetch_all(store.sqlx())
         .await?;
         for id in present {
             if !keep.contains(id.as_str()) {
@@ -443,7 +439,7 @@ pub(super) async fn delete_orphans(
     let marks: Vec<(String, String)> =
         sqlx::query_as("SELECT key, value FROM meta WHERE substr(key, 1, length(?1)) = ?1")
             .bind(ORPHAN_META_PREFIX)
-            .fetch_all(pool)
+            .fetch_all(store.sqlx())
             .await?;
     let mut missing_since: HashMap<String, i64> = HashMap::new();
     for (key, value) in marks {
@@ -452,7 +448,7 @@ pub(super) async fn delete_orphans(
             Ok(since) if orphans.contains_key(id) => {
                 missing_since.insert(id.to_owned(), since);
             }
-            _ => meta_delete(pool, &key).await?,
+            _ => meta_delete(store, &key).await?,
         }
     }
 
@@ -461,7 +457,7 @@ pub(super) async fn delete_orphans(
         let key = format!("{ORPHAN_META_PREFIX}{id}");
         match missing_since.get(id) {
             None => {
-                meta_set(pool, &key, &now.to_string()).await?;
+                meta_set(store, &key, &now.to_string()).await?;
                 scheduled.push(id.as_str());
             }
             Some(&since) if now - since >= ORPHAN_GRACE_SECS => {
@@ -470,12 +466,12 @@ pub(super) async fn delete_orphans(
                         "DELETE FROM {table} WHERE monitor_id = ?"
                     )))
                     .bind(id)
-                    .execute(pool)
+                    .execute(store.sqlx())
                     .await?;
                 }
-                meta_delete(pool, &key).await?;
+                meta_delete(store, &key).await?;
                 for prefix in PER_ID_META_PREFIXES {
-                    meta_delete(pool, &format!("{prefix}{id}")).await?;
+                    meta_delete(store, &format!("{prefix}{id}")).await?;
                 }
                 tracing::warn!(
                     monitor = %id,
@@ -493,12 +489,12 @@ pub(super) async fn delete_orphans(
         let keys: Vec<String> =
             sqlx::query_scalar("SELECT key FROM meta WHERE substr(key, 1, length(?1)) = ?1")
                 .bind(prefix)
-                .fetch_all(pool)
+                .fetch_all(store.sqlx())
                 .await?;
         for key in keys {
             let id = &key[prefix.len()..];
             if !keep.contains(id) && !orphans.contains_key(id) {
-                meta_delete(pool, &key).await?;
+                meta_delete(store, &key).await?;
             }
         }
     }
@@ -515,10 +511,10 @@ pub(super) async fn delete_orphans(
 
 /// Drop closed incidents older than `cutoff` (by start time). Open incidents
 /// are never pruned here.
-pub(super) async fn prune_incidents(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+pub(super) async fn prune_incidents(store: &Store, cutoff: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM incidents WHERE ended_at IS NOT NULL AND started_at < ?")
         .bind(cutoff)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }

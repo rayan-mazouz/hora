@@ -14,7 +14,7 @@ async fn push_records_heartbeat_with_token() {
 
 #[tokio::test]
 async fn push_rejects_unknown_status_and_negative_ping() {
-    let (app, pool) = test_app_with_pool().await;
+    let (app, store) = test_app_with_pool().await;
     for bad in [
         "/api/push/beat?token=s3cret&status=dwon",
         "/api/push/beat?token=s3cret&status=0",
@@ -24,7 +24,7 @@ async fn push_rejects_unknown_status_and_negative_ping() {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
     }
     // Nothing was recorded by the rejected pushes.
-    let recorded = hora_core::db::recent_checks(&pool, "beat", 10)
+    let recorded = hora_core::db::recent_checks(&store, "beat", 10)
         .await
         .unwrap();
     assert!(recorded.is_empty());
@@ -194,7 +194,7 @@ async fn query_tokens_on_writes_are_flagged_deprecated() {
 
 #[tokio::test]
 async fn alert_dispatches_with_item_token_and_records_it() {
-    let (app, pool) = test_app_with_pool().await;
+    let (app, store) = test_app_with_pool().await;
     let res = app
             .oneshot(alert(
                 "/api/monitors/beat/alert",
@@ -206,7 +206,7 @@ async fn alert_dispatches_with_item_token_and_records_it() {
             .unwrap();
     assert_eq!(res.status(), StatusCode::ACCEPTED);
 
-    let alerts = hora_core::db::recent_pushed_alerts(&pool, 10)
+    let alerts = hora_core::db::recent_pushed_alerts(&store, 10)
         .await
         .unwrap();
     assert_eq!(alerts.len(), 1);
@@ -328,7 +328,7 @@ async fn alert_rejects_empty_title_and_bad_severity() {
 
 #[tokio::test]
 async fn alert_coalesces_a_repeated_dedup_key() {
-    let (app, pool) = test_app_with_pool().await;
+    let (app, store) = test_app_with_pool().await;
     let body = r#"{"severity":"error","title":"flap","dedup_key":"ekb:mat"}"#;
 
     let first = app
@@ -358,7 +358,7 @@ async fn alert_coalesces_a_repeated_dedup_key() {
     assert_eq!(second.status(), StatusCode::ACCEPTED);
     assert!(body_text(second).await.contains("coalesced"));
 
-    let alerts = hora_core::db::recent_pushed_alerts(&pool, 10)
+    let alerts = hora_core::db::recent_pushed_alerts(&store, 10)
         .await
         .unwrap();
     assert_eq!(alerts.len(), 1, "the repeat must not add a second row");

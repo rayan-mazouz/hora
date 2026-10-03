@@ -141,10 +141,12 @@ fn limit_and_days_flags_validate() {
 
 #[tokio::test]
 async fn incident_ids_resolve_last_or_a_number() {
-    let pool = hora_core::db::connect(":memory:").await.expect("db");
-    assert_eq!(resolve_incident_id(&pool, "42").await.expect("number"), 42);
-    assert!(usage_message(resolve_incident_id(&pool, "4x2").await).contains("a number, or 'last'"));
-    match resolve_incident_id(&pool, "last").await {
+    let store = hora_core::db::Store::in_memory().await;
+    assert_eq!(resolve_incident_id(&store, "42").await.expect("number"), 42);
+    assert!(
+        usage_message(resolve_incident_id(&store, "4x2").await).contains("a number, or 'last'")
+    );
+    match resolve_incident_id(&store, "last").await {
         Err(CliError::Failed(message)) => assert_eq!(message, "No incidents recorded yet."),
         other => panic!("expected a failure on an empty database, got {other:?}"),
     }

@@ -30,7 +30,7 @@ pub(crate) async fn tune(args: &[String]) -> Result<(), CliError> {
         }
     }
 
-    let (config, pool) = open_database().await?;
+    let (config, store) = open_database().await?;
     let selected: Vec<&hora_core::config::Monitor> = match only {
         Some(id) => vec![find_monitor(&config, id)?],
         None => config.monitors.iter().collect(),
@@ -56,7 +56,7 @@ pub(crate) async fn tune(args: &[String]) -> Result<(), CliError> {
         let retention = i64::from(monitor.retention_days(config.alerts.default_retention_days));
         let window_days = days.map_or(retention, |d| d.min(retention));
         let since = now - window_days * hora_core::SECONDS_PER_DAY;
-        let samples = hora_core::db::check_samples(&pool, &monitor.id, since).await?;
+        let samples = hora_core::db::check_samples(&store, &monitor.id, since).await?;
 
         let ctx = hora_core::tune::MonitorContext {
             id: &monitor.id,

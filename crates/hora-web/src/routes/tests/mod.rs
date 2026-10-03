@@ -19,23 +19,15 @@ async fn test_app() -> Router {
     test_app_with_pool().await.0
 }
 
-async fn test_app_with_pool() -> (Router, sqlx::SqlitePool) {
+async fn test_app_with_pool() -> (Router, hora_core::db::Store) {
     test_app_with_vantage(hora_core::mesh::vantage::new_map()).await
 }
 
 /// The test app, with the peers' view of the shared targets already polled.
 async fn test_app_with_vantage(
     vantage: hora_core::mesh::vantage::VantageMap,
-) -> (Router, sqlx::SqlitePool) {
-    let options = sqlx::sqlite::SqliteConnectOptions::new()
-        .filename(":memory:")
-        .create_if_missing(true);
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await
-        .expect("pool");
-    hora_core::db::migrator().run(&pool).await.expect("migrate");
+) -> (Router, hora_core::db::Store) {
+    let store = hora_core::db::Store::in_memory().await;
     let config = hora_core::config::parse(
         r#"
             [page]
@@ -78,14 +70,14 @@ async fn test_app_with_vantage(
     let (_tx, rx) = watch::channel(config);
     let app = router(
         AppState::new(
-            pool.clone(),
+            store.clone(),
             rx,
             Arc::new(AtomicU64::new(fresh_tick())),
             notifier,
         )
         .with_vantage(vantage),
     );
-    (app, pool)
+    (app, store)
 }
 
 /// A scheduler beacon that just ticked, so `/healthz` reports ok.
@@ -161,10 +153,10 @@ async fn healthz_is_503_when_degraded_with_the_same_body() {
 }
 
 /// Like [`app_from`], with a live scheduler beacon and the pool returned.
-async fn app_with_pool(toml: &str) -> (Router, sqlx::SqlitePool) {
-    let (app, pool, tx) = app_with_reload(toml).await;
+async fn app_with_pool(toml: &str) -> (Router, hora_core::db::Store) {
+    let (app, store, tx) = app_with_reload(toml).await;
     std::mem::forget(tx);
-    (app, pool)
+    (app, store)
 }
 
 /// Like [`app_with_pool`], plus the config sender, to reload the config.
@@ -172,43 +164,27 @@ async fn app_with_reload(
     toml: &str,
 ) -> (
     Router,
-    sqlx::SqlitePool,
+    hora_core::db::Store,
     watch::Sender<Arc<hora_core::config::Config>>,
 ) {
-    let options = sqlx::sqlite::SqliteConnectOptions::new()
-        .filename(":memory:")
-        .create_if_missing(true);
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await
-        .expect("pool");
-    hora_core::db::migrator().run(&pool).await.expect("migrate");
+    let store = hora_core::db::Store::in_memory().await;
     let config = Arc::new(hora_core::config::parse(toml).expect("config"));
     let client = hora_core::http::client(None).expect("client");
     let notifier = hora_core::notifications::shared(&config, &client);
     let (tx, rx) = watch::channel(config);
     let app = router(AppState::new(
-        pool.clone(),
+        store.clone(),
         rx,
         Arc::new(AtomicU64::new(fresh_tick())),
         notifier,
     ));
-    (app, pool, tx)
+    (app, store, tx)
 }
 
 /// Build an app from an arbitrary config TOML (the shared `test_app` has a
 /// fixed one; the peer-probe tests need targets bound to live local ports).
 async fn app_from(toml: &str) -> Router {
-    let options = sqlx::sqlite::SqliteConnectOptions::new()
-        .filename(":memory:")
-        .create_if_missing(true);
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await
-        .expect("pool");
-    hora_core::db::migrator().run(&pool).await.expect("migrate");
+    let store = hora_core::db::Store::in_memory().await;
     let config = Arc::new(hora_core::config::parse(toml).expect("config"));
     let client = hora_core::http::client(None).expect("client");
     let notifier = hora_core::notifications::shared(&config, &client);
@@ -216,7 +192,7 @@ async fn app_from(toml: &str) -> Router {
     // Keep the sender alive for the app's lifetime.
     std::mem::forget(tx);
     router(AppState::new(
-        pool,
+        store,
         rx,
         Arc::new(AtomicU64::new(0)),
         notifier,
@@ -308,12 +284,12 @@ async fn pages_have_their_own_more_generous_rate_limit() {
 
 #[tokio::test]
 async fn metrics_skip_up_for_unknown_monitors() {
-    let (app, pool) = test_app_with_pool().await;
+    let (app, store) = test_app_with_pool().await;
     sqlx::query(
         "INSERT INTO checks (time, monitor_id, status, latency_ms) VALUES (?, 'web', 1, 12)",
     )
     .bind(chrono::Utc::now().timestamp())
-    .execute(&pool)
+    .execute(store.fixture_pool())
     .await
     .unwrap();
     let body = body_text(

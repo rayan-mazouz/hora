@@ -122,7 +122,7 @@ impl utoipa::Modify for SecuritySchemes {
 )]
 pub(crate) async fn healthz(State(state): State<AppState>) -> Response {
     let config = state.config.borrow().clone();
-    let report = hora_core::mesh::peer::report(&state.pool, &config, &state.last_tick).await;
+    let report = hora_core::mesh::peer::report(&state.store, &config, &state.last_tick).await;
     // A degraded node answers 503 so plain health checks (Docker's
     // HEALTHCHECK, a load balancer) notice; the body is unchanged for the
     // peers and keyword monitors that read it.

@@ -98,11 +98,11 @@ pub(crate) fn unknown_monitor(config: &hora_core::config::Config, id: &str) -> C
 /// Resolve an incident argument: a numeric id, or `last` for the most recent
 /// incident.
 pub(crate) async fn resolve_incident_id(
-    pool: &hora_core::db::SqlitePool,
+    store: &hora_core::db::Store,
     arg: &str,
 ) -> Result<i64, CliError> {
     if arg == "last" {
-        return hora_core::db::latest_incident_id(pool)
+        return hora_core::db::latest_incident_id(store)
             .await?
             .ok_or_else(|| CliError::Failed("No incidents recorded yet.".to_owned()));
     }
@@ -173,7 +173,7 @@ pub(crate) fn print_help() {
 /// different working directory, usually), and silently creating an empty
 /// database there would only hide the mistake.
 pub(crate) async fn open_database()
--> anyhow::Result<(hora_core::config::Config, hora_core::db::SqlitePool)> {
+-> anyhow::Result<(hora_core::config::Config, hora_core::db::Store)> {
     let config_path = config::path();
     let config = config::load_from(&config_path).context("loading configuration")?;
     let path = &config.server.database_path;
@@ -183,10 +183,10 @@ pub(crate) async fn open_database()
              or point HORA_CONFIG at its config"
         );
     }
-    let pool = hora_core::db::connect(path)
+    let store = hora_core::db::connect(path)
         .await
         .context("opening database")?;
-    Ok((config, pool))
+    Ok((config, store))
 }
 
 /// `"1 day"` / `"30 days"` - the only place the lookback is pluralised.

@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sqlx::SqlitePool;
+use hora_core::db::Store;
 
 use hora_core::SECONDS_PER_DAY;
 use hora_core::config::{Config, Monitor};
@@ -74,7 +74,7 @@ const RECENT_SHOWN: usize = 3;
 /// event markers and channel health. Every other audience's view is derived
 /// from it in memory ([`derive`]), never from another pass over the database.
 pub(crate) async fn build_summary(
-    pool: &SqlitePool,
+    store: &Store,
     config: &Config,
     state: &mut BuildState,
     channel_health: &[ChannelHealthEntry],
@@ -119,14 +119,14 @@ pub(crate) async fn build_summary(
         daily,
     } = state;
     let (window, daily, sparklines, certs, recent, events, marks, logged) = tokio::join!(
-        window.refresh(pool, since_24h, timestamp),
-        daily.refresh(pool, since_history, timestamp),
-        sparklines.refresh(pool, since_24h, bucket_secs, timestamp),
-        db::cert_all(pool),
-        recent_checks_map(pool, &monitors, ctx.threshold.max(1)),
-        db::events_since(pool, since_24h),
-        db::incident_marks(pool),
-        db::recent_incidents(pool, RECENT_SCAN),
+        window.refresh(store, since_24h, timestamp),
+        daily.refresh(store, since_history, timestamp),
+        sparklines.refresh(store, since_24h, bucket_secs, timestamp),
+        db::cert_all(store),
+        recent_checks_map(store, &monitors, ctx.threshold.max(1)),
+        db::events_since(store, since_24h),
+        db::incident_marks(store),
+        db::recent_incidents(store, RECENT_SCAN),
     );
     let window = or_empty(window, "24h window");
     let daily = or_empty(daily, "daily");
@@ -164,12 +164,12 @@ pub(crate) async fn build_summary(
 
     // Watched peers form their own section; their state does not roll into the
     // overall badge (it tracks the monitored services, not the surveillance mesh).
-    let peers = build_peers(pool, config, ctx.threshold).await;
+    let peers = build_peers(store, config, ctx.threshold).await;
 
     // Banner order: ad-hoc announcements (the fresh operational news) first,
     // then the config-declared ones. A read failure costs the ad-hoc banners
     // only, never the page.
-    let mut incidents = announcement_banners(pool, timestamp).await;
+    let mut incidents = announcement_banners(store, timestamp).await;
     incidents.extend(build_incident_banners(config));
 
     // Active maintenance windows shown as a top banner (so a long reason never
@@ -523,8 +523,8 @@ pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Opti
 
 /// The ad-hoc announcements (`hora announce` / `POST /api/announce`),
 /// rendered like the config-declared banners. Newest first.
-async fn announcement_banners(pool: &SqlitePool, now: i64) -> Vec<IncidentView> {
-    or_empty(db::active_announcements(pool, now).await, "announcements")
+async fn announcement_banners(store: &Store, now: i64) -> Vec<IncidentView> {
+    or_empty(db::active_announcements(store, now).await, "announcements")
         .into_iter()
         .map(|announcement| IncidentView {
             title: announcement.title,
@@ -563,11 +563,11 @@ fn build_incident_banners(config: &Config) -> Vec<IncidentView> {
 
 /// Build the view for each watched peer (its current status and last-seen time),
 /// rendered in a section of its own apart from the monitors.
-async fn build_peers(pool: &SqlitePool, config: &Config, threshold: i64) -> Vec<PeerView> {
+async fn build_peers(store: &Store, config: &Config, threshold: i64) -> Vec<PeerView> {
     let mut peers = Vec::new();
     for peer in config.peers.iter().filter(|peer| peer.is_watched()) {
         let recent = or_empty(
-            db::recent_checks(pool, peer.listen_id(), threshold.max(1)).await,
+            db::recent_checks(store, peer.listen_id(), threshold.max(1)).await,
             "peer recent checks",
         );
         peers.push(PeerView {
@@ -583,7 +583,7 @@ async fn build_peers(pool: &SqlitePool, config: &Config, threshold: i64) -> Vec<
 
 /// Unwrap a batch query, logging and using empty data on error so one failed
 /// query degrades to "no data" cards instead of failing the whole page.
-pub(crate) fn or_empty<T: Default>(result: sqlx::Result<T>, what: &str) -> T {
+pub(crate) fn or_empty<T: Default>(result: hora_core::db::Result<T>, what: &str) -> T {
     result.unwrap_or_else(|err| {
         tracing::error!("summary: {what} query failed: {err:#}");
         T::default()
@@ -597,7 +597,7 @@ pub(crate) fn or_empty<T: Default>(result: sqlx::Result<T>, what: &str) -> T {
 /// "unknown". A few run at a time: one by one, their round trips added up to a
 /// fifth of a second for 700 monitors.
 pub(crate) async fn recent_checks_map(
-    pool: &SqlitePool,
+    store: &Store,
     monitors: &[&Monitor],
     limit: i64,
 ) -> HashMap<String, Vec<Latest>> {
@@ -608,9 +608,9 @@ pub(crate) async fn recent_checks_map(
     let ids: Vec<String> = monitors.iter().map(|monitor| monitor.id.clone()).collect();
     futures_util::stream::iter(ids)
         .map(|id| {
-            let pool = pool.clone();
+            let store = store.clone();
             async move {
-                let checks = or_empty(db::recent_checks(&pool, &id, limit).await, "recent checks");
+                let checks = or_empty(db::recent_checks(&store, &id, limit).await, "recent checks");
                 (id, checks)
             }
         })

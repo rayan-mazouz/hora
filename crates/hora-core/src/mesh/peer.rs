@@ -13,10 +13,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::db::Store;
 use futures_util::future::join_all;
 use hora_notify::Event;
 use reqwest::Client;
-use sqlx::SqlitePool;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -50,14 +50,14 @@ const MAX_REPORT_BYTES: usize = 64 * 1024;
 // --- /healthz report ------------------------------------------------------
 
 /// Build the `/healthz` report for the current configuration and scheduler state.
-pub async fn report(pool: &SqlitePool, config: &Config, last_tick: &AtomicU64) -> HealthReport {
+pub async fn report(store: &Store, config: &Config, last_tick: &AtomicU64) -> HealthReport {
     let now = chrono::Utc::now().timestamp();
     let (scheduler_ok, last_tick_age) = scheduler_liveness(config, last_tick, now);
-    let db_ok = db_ok(pool).await;
+    let db_ok = db_ok(store).await;
 
     let mut peers = HashMap::new();
     for peer in config.peers.iter().filter(|peer| peer.is_watched()) {
-        peers.insert(peer.id.clone(), peer_seen(pool, peer, now).await);
+        peers.insert(peer.id.clone(), peer_seen(store, peer, now).await);
     }
 
     HealthReport {
@@ -105,11 +105,10 @@ pub(crate) fn scheduler_liveness(config: &Config, last_tick: &AtomicU64, now: i6
 /// Whether the database answers a trivial query within a short timeout. A wedged
 /// or locked database makes this false, which (with the scheduler check) stops the
 /// outbound heartbeat - so the dead-man fires rather than a zombie pinging "ok".
-pub(crate) async fn db_ok(pool: &SqlitePool) -> bool {
-    let query = sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(pool);
+pub(crate) async fn db_ok(store: &Store) -> bool {
     matches!(
-        tokio::time::timeout(Duration::from_secs(2), query).await,
-        Ok(Ok(_))
+        tokio::time::timeout(Duration::from_secs(2), store.ping()).await,
+        Ok(Ok(()))
     )
 }
 
@@ -118,9 +117,9 @@ pub(crate) async fn db_ok(pool: &SqlitePool) -> bool {
 /// expected interval, `down` once that lapses, `unknown` if never seen. `age` is
 /// the seconds since that last real heartbeat, so it stays meaningful through an
 /// outage instead of resetting on each recorded miss.
-async fn peer_seen(pool: &SqlitePool, peer: &Peer, now: i64) -> PeerSeen {
+async fn peer_seen(store: &Store, peer: &Peer, now: i64) -> PeerSeen {
     let expect = i64::try_from(peer.expect_every_secs.unwrap_or(0)).unwrap_or(i64::MAX);
-    match db::last_heartbeat_time(pool, peer.listen_id()).await {
+    match db::last_heartbeat_time(store, peer.listen_id()).await {
         Ok(Some(last)) => {
             let age = (now - last).max(0);
             PeerSeen {
@@ -144,7 +143,7 @@ async fn peer_seen(pool: &SqlitePool, peer: &Peer, now: i64) -> PeerSeen {
 #[must_use]
 pub fn spawn_heartbeat(
     config: watch::Receiver<Arc<Config>>,
-    pool: SqlitePool,
+    store: Store,
     client: Client,
     last_tick: Arc<AtomicU64>,
     mut shutdown: watch::Receiver<bool>,
@@ -169,7 +168,7 @@ pub fn spawn_heartbeat(
 
             let now = chrono::Utc::now().timestamp();
             let (scheduler_ok, age) = scheduler_liveness(&snapshot, &last_tick, now);
-            let db_ok = db_ok(&pool).await;
+            let db_ok = db_ok(&store).await;
             if !(scheduler_ok && db_ok) {
                 warn!(scheduler_ok, db_ok, "heartbeat skipped: node unhealthy");
                 continue;
@@ -244,7 +243,7 @@ enum Verdict {
 pub(crate) fn spawn_watch(
     peer: Peer,
     config: watch::Receiver<Arc<Config>>,
-    pool: SqlitePool,
+    store: Store,
     client: Client,
     notifier: Notifiers,
     alert_state: AlertCell,
@@ -260,7 +259,7 @@ pub(crate) fn spawn_watch(
         let started = chrono::Utc::now().timestamp();
         // A peer that never pinged at all is judged from when its first
         // heartbeat was expected (persisted across restarts), not left unknown.
-        let expected_since = heartbeat_expected_since(&pool, peer.listen_id(), started).await;
+        let expected_since = heartbeat_expected_since(&store, peer.listen_id(), started).await;
         let mut ticker = tokio::time::interval(Duration::from_secs(expect));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut state = alert_state.get().unwrap_or_default();
@@ -274,7 +273,7 @@ pub(crate) fn spawn_watch(
             // `None` = never pinged and not yet late (or a read error): nothing
             // to react to.
             let Some(outcome) = heartbeat_outcome_for(
-                &pool,
+                &store,
                 peer.listen_id(),
                 &cadence,
                 expected_since,
@@ -289,7 +288,7 @@ pub(crate) fn spawn_watch(
             // Muted by a maintenance window or an ad-hoc silence, exactly like a
             // monitor: the miss is still recorded, only alerts are skipped.
             if snapshot.in_maintenance(peer.listen_id(), now)
-                || silenced(&pool, peer.listen_id()).await
+                || silenced(&store, peer.listen_id()).await
             {
                 continue;
             }
@@ -462,24 +461,9 @@ async fn dispatch(notifier: &Notifiers, peer: &Peer, event: Event<'_>) {
 mod tests {
     use super::*;
 
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-
     use crate::config;
 
-    async fn memory_pool() -> SqlitePool {
-        let options = SqliteConnectOptions::new()
-            .filename(":memory:")
-            .create_if_missing(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .expect("connect in-memory");
-        db::migrator().run(&pool).await.expect("run migrations");
-        pool
-    }
-
-    async fn insert(pool: &SqlitePool, id: &str, time: i64, status: i64) {
+    async fn insert(store: &Store, id: &str, time: i64, status: i64) {
         sqlx::query(
             "INSERT INTO checks (time, monitor_id, status, latency_ms, status_code, error) \
              VALUES (?, ?, ?, NULL, NULL, NULL)",
@@ -487,7 +471,7 @@ mod tests {
         .bind(time)
         .bind(id)
         .bind(status)
-        .execute(pool)
+        .execute(store.sqlx())
         .await
         .expect("insert check");
     }
@@ -523,7 +507,7 @@ mod tests {
 
     #[tokio::test]
     async fn peer_seen_reflects_freshness_and_status() {
-        let pool = memory_pool().await;
+        let store = Store::in_memory().await;
         let base = cfg("[page]\n[server]\n[health]\nid=\"a\"\n\
              [[peers]]\nid=\"x\"\nname=\"X\"\nexpect_every_secs=100\n");
         let mut peer = base.peers[0].clone();
@@ -531,37 +515,37 @@ mod tests {
 
         // Never seen.
         peer.id = "never".to_owned();
-        assert_eq!(peer_seen(&pool, &peer, now).await.state, "unknown");
+        assert_eq!(peer_seen(&store, &peer, now).await.state, "unknown");
 
         // Recent up ping.
         peer.id = "up".to_owned();
-        insert(&pool, "up", now - 10, 1).await;
-        let seen = peer_seen(&pool, &peer, now).await;
+        insert(&store, "up", now - 10, 1).await;
+        let seen = peer_seen(&store, &peer, now).await;
         assert_eq!(seen.state, "up");
         assert_eq!(seen.age, 10);
 
         // A lone recorded miss (no positive heartbeat ever) is still unknown:
         // staleness is measured from real heartbeats, not from recorded misses.
         peer.id = "miss".to_owned();
-        insert(&pool, "miss", now - 1, 0).await;
-        assert_eq!(peer_seen(&pool, &peer, now).await.state, "unknown");
+        insert(&store, "miss", now - 1, 0).await;
+        assert_eq!(peer_seen(&store, &peer, now).await.state, "unknown");
 
         // Stale up ping, with a fresh miss on top: age is measured from the last
         // real heartbeat (200s), so it is down despite the recent miss row.
         peer.id = "stale".to_owned();
-        insert(&pool, "stale", now - 200, 1).await;
-        insert(&pool, "stale", now - 1, 0).await;
-        assert_eq!(peer_seen(&pool, &peer, now).await.state, "down");
-        assert_eq!(peer_seen(&pool, &peer, now).await.age, 200);
+        insert(&store, "stale", now - 200, 1).await;
+        insert(&store, "stale", now - 1, 0).await;
+        assert_eq!(peer_seen(&store, &peer, now).await.state, "down");
+        assert_eq!(peer_seen(&store, &peer, now).await.age, 200);
     }
 
     #[tokio::test]
     async fn report_includes_watched_peers_and_status() {
-        let pool = memory_pool().await;
+        let store = Store::in_memory().await;
         let config = cfg("[page]\n[server]\n[health]\nid=\"hora-a\"\n\
              [[peers]]\nid=\"hora-b\"\nname=\"B\"\nexpect_every_secs=100\n\
              [[peers]]\nid=\"hc\"\nname=\"HC\"\nping_url=\"https://hc-ping.com/x\"\n");
-        let report = report(&pool, &config, &AtomicU64::new(0)).await;
+        let report = report(&store, &config, &AtomicU64::new(0)).await;
         assert_eq!(report.id.as_deref(), Some("hora-a"));
         assert!(report.db_ok);
         // No monitors -> scheduler trivially alive, so status is ok.

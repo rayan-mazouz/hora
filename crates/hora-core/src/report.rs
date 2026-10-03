@@ -8,8 +8,8 @@
 //! (`hora report 2026-05`) - the "here is your May report, 99.95%" feature
 //! for operators hosting other people's services.
 
+use crate::db::Store;
 use chrono::Datelike as _;
-use sqlx::SqlitePool;
 
 use crate::SECONDS_PER_DAY;
 use crate::config::{Config, Monitor};
@@ -105,7 +105,7 @@ pub fn previous_month(now: i64) -> String {
 /// # Errors
 ///
 /// Returns an error if the month is malformed or a database read fails.
-pub async fn build(pool: &SqlitePool, config: &Config, month: &str) -> anyhow::Result<MonthReport> {
+pub async fn build(store: &Store, config: &Config, month: &str) -> anyhow::Result<MonthReport> {
     let (start, end) = month_bounds(month)
         .ok_or_else(|| anyhow::anyhow!("month must be YYYY-MM and not in the future"))?;
     let now = chrono::Utc::now().timestamp();
@@ -115,9 +115,9 @@ pub async fn build(pool: &SqlitePool, config: &Config, month: &str) -> anyhow::R
     // Daily counts from raw checks and the downsampled buckets over the
     // covered part of the month only, keyed by day string - the month prefix
     // filter below drops a bucket straddling the end.
-    let daily = db::daily_all(pool, start, covered_end).await?;
+    let daily = db::daily_all(store, start, covered_end).await?;
     // Every incident overlapping the month, however many came after it.
-    let incidents = db::incidents_between(pool, start, covered_end).await?;
+    let incidents = db::incidents_between(store, start, covered_end).await?;
 
     // The days elapsed so far (all of them for a past month).
     let day_count =
@@ -263,15 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn report_counts_checks_incidents_and_budget() {
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(":memory:")
-            .create_if_missing(true);
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .expect("pool");
-        db::migrator().run(&pool).await.expect("migrate");
+        let store = crate::db::Store::in_memory().await;
 
         let (start, _end) = month_bounds("2021-01").unwrap();
         // Nine up checks and one down inside January; one up check in February
@@ -279,23 +271,23 @@ mod tests {
         for i in 0..9_i64 {
             sqlx::query("INSERT INTO checks (time, monitor_id, status) VALUES (?, 'm', 1)")
                 .bind(start + i * 3600)
-                .execute(&pool)
+                .execute(store.sqlx())
                 .await
                 .unwrap();
         }
         sqlx::query("INSERT INTO checks (time, monitor_id, status) VALUES (?, 'm', 0)")
             .bind(start + 10 * 3600)
-            .execute(&pool)
+            .execute(store.sqlx())
             .await
             .unwrap();
         sqlx::query("INSERT INTO checks (time, monitor_id, status) VALUES (?, 'm', 1)")
             .bind(start + 35 * SECONDS_PER_DAY)
-            .execute(&pool)
+            .execute(store.sqlx())
             .await
             .unwrap();
         // A live database would long since have rolled 2021 checks into hourly
         // buckets (daily_all only scans raw over the recent window); mirror it.
-        db::downsample_hourly(&pool, start + 40 * SECONDS_PER_DAY)
+        db::downsample_hourly(&store, start + 40 * SECONDS_PER_DAY)
             .await
             .unwrap();
         // One resolved incident fully inside the month (10 minutes).
@@ -306,7 +298,7 @@ mod tests {
         .bind(start + 10 * 3600)
         .bind(start + 10 * 3600 + 600)
         .bind(start)
-        .execute(&pool)
+        .execute(store.sqlx())
         .await
         .unwrap();
 
@@ -324,7 +316,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = build(&pool, &config, "2021-01").await.expect("report");
+        let report = build(&store, &config, "2021-01").await.expect("report");
         assert_eq!(report.label, "January 2021");
         let row = &report.rows[0];
         assert_eq!((row.up, row.down), (9, 1));
@@ -357,15 +349,15 @@ mod tests {
              SELECT 'm', ?1 + i * 60, ?1 + i * 60 + 30, 30, ?1 FROM n",
         )
         .bind(start + 35 * SECONDS_PER_DAY)
-        .execute(&pool)
+        .execute(store.sqlx())
         .await
         .unwrap();
-        let report = build(&pool, &config, "2021-01").await.expect("report");
+        let report = build(&store, &config, "2021-01").await.expect("report");
         assert_eq!(report.rows[0].incidents, 1);
         assert_eq!(report.rows[0].downtime_secs, 600);
 
         // A malformed or future month is rejected.
-        assert!(build(&pool, &config, "garbage").await.is_err());
-        assert!(build(&pool, &config, "2999-01").await.is_err());
+        assert!(build(&store, &config, "garbage").await.is_err());
+        assert!(build(&store, &config, "2999-01").await.is_err());
     }
 }

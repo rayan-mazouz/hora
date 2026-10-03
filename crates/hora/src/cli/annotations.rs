@@ -16,9 +16,9 @@ pub(crate) async fn announce(args: &[String]) -> Result<(), CliError> {
     match args.first().map(String::as_str) {
         Some("--") if args.len() > 1 => pin_announcement(&args[1..]).await?,
         Some("list") => {
-            let (_, pool) = open_database().await?;
+            let (_, store) = open_database().await?;
             let now = chrono::Utc::now().timestamp();
-            let pinned = hora_core::db::active_announcements(&pool, now).await?;
+            let pinned = hora_core::db::active_announcements(&store, now).await?;
             if pinned.is_empty() {
                 println!("No announcements pinned.");
             }
@@ -34,9 +34,9 @@ pub(crate) async fn announce(args: &[String]) -> Result<(), CliError> {
             }
         }
         Some("clear") => {
-            let (_, pool) = open_database().await?;
+            let (_, store) = open_database().await?;
             let cleared =
-                hora_core::db::clear_announcements(&pool, chrono::Utc::now().timestamp()).await?;
+                hora_core::db::clear_announcements(&store, chrono::Utc::now().timestamp()).await?;
             println!("Cleared {cleared} announcement(s).");
         }
         Some(first) if first != "--" => pin_announcement(args).await?,
@@ -53,8 +53,8 @@ pub(crate) async fn announce(args: &[String]) -> Result<(), CliError> {
 
 async fn pin_announcement(args: &[String]) -> anyhow::Result<()> {
     let announcement = parse_announce_args(args, chrono::Utc::now().timestamp())?;
-    let (_, pool) = open_database().await?;
-    announcement.pin(&pool).await?;
+    let (_, store) = open_database().await?;
+    announcement.pin(&store).await?;
     let expiry = announcement.until.map_or_else(
         || "until `hora announce clear`".to_owned(),
         |ts| format!("until {}", fmt::utc(ts)),
@@ -91,8 +91,8 @@ pub(super) fn parse_announce_args(args: &[String], now: i64) -> anyhow::Result<A
 pub(crate) async fn event(args: &[String]) -> Result<(), CliError> {
     match parse_event_args(args)? {
         EventCommand::List(limit) => {
-            let (_, pool) = open_database().await?;
-            let events = hora_core::db::recent_events(&pool, limit).await?;
+            let (_, store) = open_database().await?;
+            let events = hora_core::db::recent_events(&store, limit).await?;
             if events.is_empty() {
                 println!("No events recorded.");
             }
@@ -101,8 +101,8 @@ pub(crate) async fn event(args: &[String]) -> Result<(), CliError> {
             }
         }
         EventCommand::Record(title) => {
-            let (_, pool) = open_database().await?;
-            hora_core::db::insert_event(&pool, &title).await?;
+            let (_, store) = open_database().await?;
+            hora_core::db::insert_event(&store, &title).await?;
             println!("Recorded event: {title}");
         }
     }
@@ -156,9 +156,9 @@ pub(super) fn parse_event_args(args: &[String]) -> Result<EventCommand, CliError
 pub(crate) async fn silence(args: &[String]) -> Result<(), CliError> {
     match args.first().map(String::as_str) {
         Some("list") => {
-            let (_, pool) = open_database().await?;
+            let (_, store) = open_database().await?;
             let now = chrono::Utc::now().timestamp();
-            let silences = hora_core::db::active_silences(&pool, now).await?;
+            let silences = hora_core::db::active_silences(&store, now).await?;
             if silences.is_empty() {
                 println!("No active silences.");
             }
@@ -180,16 +180,16 @@ pub(crate) async fn silence(args: &[String]) -> Result<(), CliError> {
             }
         }
         Some("clear") => {
-            let (_, pool) = open_database().await?;
+            let (_, store) = open_database().await?;
             let cleared =
-                hora_core::db::clear_silences(&pool, chrono::Utc::now().timestamp()).await?;
+                hora_core::db::clear_silences(&store, chrono::Utc::now().timestamp()).await?;
             println!("Cleared {cleared} active silence(s).");
         }
         Some(ids) if args.len() >= 2 => {
-            let (config, pool) = open_database().await?;
+            let (config, store) = open_database().await?;
             let reason = (args.len() > 2).then(|| args[2..].join(" "));
             let silenced =
-                match hora_core::silence::apply(&pool, &config, ids, &args[1], reason.as_deref())
+                match hora_core::silence::apply(&store, &config, ids, &args[1], reason.as_deref())
                     .await
                 {
                     Ok(silenced) => silenced,

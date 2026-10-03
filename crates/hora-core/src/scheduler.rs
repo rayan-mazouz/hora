@@ -3,9 +3,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::db::Store;
 use hora_notify::Event;
 use reqwest::Client;
-use sqlx::SqlitePool;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -126,7 +126,7 @@ impl AlertCell {
 /// client, the notifier set (degraded/burn alerts), the coalescer inbox
 /// (down/recovered alerts), the liveness beacon, and its alert state.
 pub struct MonitorDeps {
-    pub pool: SqlitePool,
+    pub store: Store,
     pub client: Client,
     /// The shared plain client for multi-vantage confirmation requests to the
     /// peers. Distinct from `client` on purpose: that one may be bound to the
@@ -187,7 +187,7 @@ async fn run(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let MonitorDeps {
-        pool,
+        store,
         client,
         confirm_client,
         notifier,
@@ -211,7 +211,7 @@ async fn run(
     // Re-attach to an incident left open by a previous run (restart mid-outage,
     // monitor edited live): it gets closed on the first healthy tick instead of
     // staying open forever, and a still-down monitor keeps its original start.
-    let mut open_incident: Option<i64> = db::find_open_incident(&pool, &monitor.id)
+    let mut open_incident: Option<i64> = db::find_open_incident(&store, &monitor.id)
         .await
         .ok()
         .flatten();
@@ -230,7 +230,7 @@ async fn run(
     // counted from the first heartbeat expected (persisted, so a monitor that
     // never pinged still alerts across restarts).
     let heartbeat = if monitor.kind == Kind::Push {
-        HeartbeatWatch::for_monitor(&pool, &monitor).await
+        HeartbeatWatch::for_monitor(&store, &monitor).await
     } else {
         None
     };
@@ -253,7 +253,7 @@ async fn run(
         // window (or a read error): status stays unknown, nothing to react to.
         let Some(outcome) = tick_outcome(
             &client,
-            &pool,
+            &store,
             &monitor,
             exec_dir.as_deref(),
             heartbeat.as_ref(),
@@ -278,13 +278,13 @@ async fn run(
         let (muted, threshold, alert_on_degraded) = alert_settings(&config, &monitor.id);
         // Ad-hoc silences (`hora silence`, POST /api/silence) mute exactly like
         // a maintenance window, read fresh each tick so they apply immediately.
-        let muted = muted || silenced(&pool, &monitor.id).await;
+        let muted = muted || silenced(&store, &monitor.id).await;
         // An incident is bound to confirmed-down alerts; any up tick (healthy
         // or merely degraded) ends it, whatever the alert state machine does -
         // including an incident inherited from a previous run, and even during
         // maintenance (the record should reflect the real outage span).
         if outcome.up {
-            close_open_incident(&pool, &monitor.id, &mut open_incident).await;
+            close_open_incident(&store, &monitor.id, &mut open_incident).await;
         }
 
         if muted {
@@ -300,7 +300,7 @@ async fn run(
         if let Some(slo_bp) = monitor.slo_uptime
             && (!outcome.up || state.burn.any())
         {
-            evaluate_burn(&pool, &notifier, &monitor, slo_bp, &mut state.burn).await;
+            evaluate_burn(&store, &notifier, &monitor, slo_bp, &mut state.burn).await;
             alert_state.set(state);
         }
 
@@ -312,7 +312,7 @@ async fn run(
                 let snapshot = config.borrow().clone();
                 confirm_down(
                     &snapshot,
-                    &pool,
+                    &store,
                     &confirm_client,
                     &alerts,
                     &monitor,
@@ -359,7 +359,7 @@ async fn run(
 #[allow(clippy::too_many_arguments)]
 async fn confirm_down(
     config: &Config,
-    pool: &SqlitePool,
+    store: &Store,
     confirm_client: &Client,
     alerts: &mpsc::UnboundedSender<AlertMsg>,
     monitor: &Monitor,
@@ -367,19 +367,19 @@ async fn confirm_down(
     threshold: u32,
     open_incident: &mut Option<i64>,
 ) {
-    let (cause, impacted_names) = down_context(config, pool, monitor, threshold).await;
+    let (cause, impacted_names) = down_context(config, store, monitor, threshold).await;
 
     // "What changed?": the most recent event marker (`hora event`) within the
     // lookback, phrased relative to now ("deploy api v2.3, 3m before"). Read
     // errors just drop the annotation - it must never delay the alert.
-    let event = correlated_event(pool, chrono::Utc::now().timestamp()).await;
+    let event = correlated_event(store, chrono::Utc::now().timestamp()).await;
 
     // Unless one is already open (resumed from a previous run mid-outage).
     // Recorded *before* the peers are consulted, so the incident history
     // never waits on the network.
     if open_incident.is_none() {
         *open_incident = open_incident_record(
-            pool,
+            store,
             monitor,
             outcome,
             cause.as_ref().map(|(_, name)| name.as_str()),
@@ -398,7 +398,7 @@ async fn confirm_down(
         // Recorded on the incident too (best effort), so the post-mortem can
         // replay what the mesh saw, not just what this node saw.
         if let Some(incident_id) = *open_incident
-            && let Err(err) = db::update_incident_vantage(pool, incident_id, verdict).await
+            && let Err(err) = db::update_incident_vantage(store, incident_id, verdict).await
         {
             error!(monitor = %monitor.id, "failed to record vantage verdict: {err:#}");
         }
@@ -435,8 +435,8 @@ const EVENT_LOOKBACK_SECS: i64 = 3600;
 /// The correlated-event phrase for a down confirming at `now` ("deploy api
 /// v2.3, 3m before"), or `None` when no event was recorded within the
 /// lookback. A read error drops the annotation (logged), never the alert.
-async fn correlated_event(pool: &SqlitePool, now: i64) -> Option<String> {
-    match db::latest_event_before(pool, now, EVENT_LOOKBACK_SECS).await {
+async fn correlated_event(store: &Store, now: i64) -> Option<String> {
+    match db::latest_event_before(store, now, EVENT_LOOKBACK_SECS).await {
         Ok(found) => found.map(|event| event_phrase(&event.title, now - event.created_at)),
         Err(err) => {
             error!("failed to read event markers: {err:#}");
@@ -483,8 +483,8 @@ async fn alert_degraded(notifier: &Notifiers, monitor: &Monitor, outcome: &Outco
 
 /// Whether an ad-hoc silence covers this monitor right now. A read error fails
 /// open (logged, not silenced): a database hiccup must never mute an alert.
-pub(crate) async fn silenced(pool: &SqlitePool, monitor_id: &str) -> bool {
-    match db::is_silenced(pool, monitor_id, chrono::Utc::now().timestamp()).await {
+pub(crate) async fn silenced(store: &Store, monitor_id: &str) -> bool {
+    match db::is_silenced(store, monitor_id, chrono::Utc::now().timestamp()).await {
         Ok(silenced) => silenced,
         Err(err) => {
             error!(monitor = %monitor_id, "failed to read silences: {err:#}");
@@ -494,9 +494,9 @@ pub(crate) async fn silenced(pool: &SqlitePool, monitor_id: &str) -> bool {
 }
 
 /// Close the open incident, if any. Failures are logged, never fatal.
-async fn close_open_incident(pool: &SqlitePool, monitor_id: &str, open_incident: &mut Option<i64>) {
+async fn close_open_incident(store: &Store, monitor_id: &str, open_incident: &mut Option<i64>) {
     if let Some(incident_id) = open_incident.take()
-        && let Err(err) = db::update_incident_end(pool, incident_id).await
+        && let Err(err) = db::update_incident_end(store, incident_id).await
     {
         error!(monitor = %monitor_id, "failed to close incident: {err:#}");
     }
@@ -507,7 +507,7 @@ async fn close_open_incident(pool: &SqlitePool, monitor_id: &str, open_incident:
 /// to react to yet.
 async fn tick_outcome(
     client: &Client,
-    pool: &SqlitePool,
+    store: &Store,
     monitor: &Monitor,
     exec_dir: Option<&std::path::Path>,
     heartbeat: Option<&HeartbeatWatch>,
@@ -516,7 +516,7 @@ async fn tick_outcome(
         // `None` only for an unusable cron schedule (logged at startup).
         let watch = heartbeat?;
         return heartbeat_outcome_for(
-            pool,
+            store,
             &monitor.id,
             &watch.cadence,
             watch.expected_since,
@@ -533,7 +533,7 @@ async fn tick_outcome(
     } else {
         probe::run(client, monitor).await
     };
-    if let Err(err) = db::insert_check(pool, &monitor.id, outcome.status_value(), &outcome).await {
+    if let Err(err) = db::insert_check(store, &monitor.id, outcome.status_value(), &outcome).await {
         error!(monitor = %monitor.id, "failed to record check: {err:#}");
     }
     Some(outcome)
@@ -542,7 +542,7 @@ async fn tick_outcome(
 /// Open an incident record for a confirmed-down monitor; `None` (logged) when
 /// the insert fails, so a database hiccup never blocks the alert itself.
 async fn open_incident_record(
-    pool: &SqlitePool,
+    store: &Store,
     monitor: &Monitor,
     outcome: &Outcome,
     cause: Option<&str>,
@@ -550,7 +550,7 @@ async fn open_incident_record(
     event: Option<&str>,
 ) -> Option<i64> {
     match db::insert_incident_start(
-        pool,
+        store,
         &monitor.id,
         outcome.error.as_deref(),
         cause,
@@ -573,7 +573,7 @@ async fn open_incident_record(
 /// spike never pages), warn when ~5% burns within six hours (confirmed by 30
 /// minutes). A fast alert subsumes the slow one for the same episode.
 async fn evaluate_burn(
-    pool: &SqlitePool,
+    store: &Store,
     notifier: &Notifiers,
     monitor: &Monitor,
     slo_bp: u32,
@@ -582,15 +582,15 @@ async fn evaluate_burn(
     let window_days = monitor.slo_window_days();
     let now = chrono::Utc::now().timestamp();
 
-    let burn_1h = burn_window(pool, &monitor.id, now - 3600, slo_bp).await;
+    let burn_1h = burn_window(store, &monitor.id, now - 3600, slo_bp).await;
     let fast_threshold = slo::fast_burn_threshold_x10(window_days);
     let fast_now = burn_1h >= fast_threshold
-        && burn_window(pool, &monitor.id, now - 300, slo_bp).await >= fast_threshold;
+        && burn_window(store, &monitor.id, now - 300, slo_bp).await >= fast_threshold;
     if fast_now {
         if !state.fast {
             state.fast = true;
             state.slow = true;
-            fire_burn_alert(pool, notifier, monitor, slo_bp, burn_1h, "1h").await;
+            fire_burn_alert(store, notifier, monitor, slo_bp, burn_1h, "1h").await;
         }
         return;
     }
@@ -598,13 +598,13 @@ async fn evaluate_burn(
         state.fast = false;
     }
 
-    let burn_6h = burn_window(pool, &monitor.id, now - 6 * 3600, slo_bp).await;
+    let burn_6h = burn_window(store, &monitor.id, now - 6 * 3600, slo_bp).await;
     let slow_threshold = slo::slow_burn_threshold_x10(window_days);
     let slow_now = burn_6h >= slow_threshold
-        && burn_window(pool, &monitor.id, now - 1800, slo_bp).await >= slow_threshold;
+        && burn_window(store, &monitor.id, now - 1800, slo_bp).await >= slow_threshold;
     if slow_now && !state.slow {
         state.slow = true;
-        fire_burn_alert(pool, notifier, monitor, slo_bp, burn_6h, "6h").await;
+        fire_burn_alert(store, notifier, monitor, slo_bp, burn_6h, "6h").await;
     } else if burn_6h < slow_threshold {
         state.slow = false;
     }
@@ -612,8 +612,8 @@ async fn evaluate_burn(
 
 /// The burn rate over one lookback window, in tenths. A read error counts as
 /// zero: never alert (or re-arm) off unreadable data.
-async fn burn_window(pool: &SqlitePool, id: &str, since: i64, slo_bp: u32) -> i64 {
-    match db::availability(pool, id, since).await {
+async fn burn_window(store: &Store, id: &str, since: i64, slo_bp: u32) -> i64 {
+    match db::availability(store, id, since).await {
         Ok((available, total)) => slo::burn_rate_x10(available, total, slo_bp),
         Err(err) => {
             error!(monitor = %id, "failed to read availability: {err:#}");
@@ -627,7 +627,7 @@ async fn burn_window(pool: &SqlitePool, id: &str, since: i64, slo_bp: u32) -> i6
 /// monitor younger than the window this overstates consumption, which only
 /// makes the estimate conservative.
 async fn fire_burn_alert(
-    pool: &SqlitePool,
+    store: &Store,
     notifier: &Notifiers,
     monitor: &Monitor,
     slo_bp: u32,
@@ -638,7 +638,7 @@ async fn fire_burn_alert(
     let now = chrono::Utc::now().timestamp();
     let since = now - i64::from(window_days) * crate::SECONDS_PER_DAY;
     // No estimate beats a wrong one: unreadable history drops the ETA only.
-    let exhausted_in_secs = match db::availability(pool, &monitor.id, since).await {
+    let exhausted_in_secs = match db::availability(store, &monitor.id, since).await {
         Ok((available, total)) => {
             let remaining = slo::remaining_minutes(window_days, slo_bp, available, total);
             slo::exhausted_in_secs(remaining, burn_x10, slo_bp)
@@ -669,7 +669,7 @@ async fn fire_burn_alert(
 /// `(None, vec![])` when the monitor has no topology configured.
 async fn down_context(
     config: &Config,
-    pool: &SqlitePool,
+    store: &Store,
     monitor: &Monitor,
     threshold: u32,
 ) -> (Option<(String, String)>, Vec<String>) {
@@ -677,7 +677,7 @@ async fn down_context(
 
     let upstreams = topology::transitive_upstreams(&config.monitors, &monitor.id);
     for up_id in &upstreams {
-        let Ok(recent) = db::recent_checks(pool, up_id, threshold_i64).await else {
+        let Ok(recent) = db::recent_checks(store, up_id, threshold_i64).await else {
             continue;
         };
         if db::derive_status(&recent, threshold_i64) == "down"
@@ -701,21 +701,6 @@ mod tests {
     use super::*;
 
     use std::time::Duration;
-
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-
-    async fn memory_pool() -> SqlitePool {
-        let options = SqliteConnectOptions::new()
-            .filename(":memory:")
-            .create_if_missing(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .expect("connect in-memory");
-        db::migrator().run(&pool).await.expect("run migrations");
-        pool
-    }
 
     #[test]
     fn stagger_offset_is_stable_and_bounded() {
@@ -782,7 +767,7 @@ mod tests {
     /// A push monitor ticking every two seconds with a threshold of 1, wired to a
     /// test coalescer inbox.
     fn push_task(
-        pool: &SqlitePool,
+        store: &Store,
         config: &watch::Receiver<Arc<Config>>,
         alerts: &mpsc::UnboundedSender<AlertMsg>,
         cell: &AlertCell,
@@ -794,7 +779,7 @@ mod tests {
             monitor,
             config.clone(),
             MonitorDeps {
-                pool: pool.clone(),
+                store: store.clone(),
                 client: client.clone(),
                 confirm_client: client.clone(),
                 notifier: crate::notifications::shared(&config.borrow(), &client),
@@ -820,7 +805,7 @@ mod tests {
 
     #[tokio::test]
     async fn restarted_monitor_task_keeps_its_alert_state() {
-        let pool = memory_pool().await;
+        let store = Store::in_memory().await;
         let config = crate::config::parse(
             r#"
             [page]
@@ -841,10 +826,10 @@ mod tests {
         let cell = AlertCell::default();
 
         // The job reports a failure: confirmed down, announced once.
-        db::insert_push(&pool, "job", 0, None, Some("backup failed"))
+        db::insert_push(&store, "job", 0, None, Some("backup failed"))
             .await
             .unwrap();
-        let task = push_task(&pool, &config_rx, &alerts_tx, &cell, &shutdown_rx);
+        let task = push_task(&store, &config_rx, &alerts_tx, &cell, &shutdown_rx);
         assert_eq!(
             next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
             Some(("down", "job".to_owned()))
@@ -852,7 +837,7 @@ mod tests {
 
         // A config edit restarts the task while still down: no second alert.
         task.abort();
-        let task = push_task(&pool, &config_rx, &alerts_tx, &cell, &shutdown_rx);
+        let task = push_task(&store, &config_rx, &alerts_tx, &cell, &shutdown_rx);
         assert_eq!(
             next_alert(&mut alerts_rx, Duration::from_secs(3)).await,
             None
@@ -862,14 +847,14 @@ mod tests {
         // incident instead: still no second alert.
         task.abort();
         let fresh = AlertCell::default();
-        let task = push_task(&pool, &config_rx, &alerts_tx, &fresh, &shutdown_rx);
+        let task = push_task(&store, &config_rx, &alerts_tx, &fresh, &shutdown_rx);
         assert_eq!(
             next_alert(&mut alerts_rx, Duration::from_secs(3)).await,
             None
         );
 
         // The job recovers: the recovery is announced, exactly once.
-        db::insert_push(&pool, "job", 1, None, None).await.unwrap();
+        db::insert_push(&store, "job", 1, None, None).await.unwrap();
         assert_eq!(
             next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
             Some(("recovered", "job".to_owned()))

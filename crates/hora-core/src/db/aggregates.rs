@@ -3,8 +3,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use super::Store;
 use serde::Serialize;
-use sqlx::SqlitePool;
 
 use crate::SECONDS_PER_DAY;
 
@@ -29,11 +29,7 @@ pub struct Point {
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn availability(
-    pool: &SqlitePool,
-    monitor_id: &str,
-    since: i64,
-) -> sqlx::Result<(i64, i64)> {
+pub async fn availability(store: &Store, monitor_id: &str, since: i64) -> sqlx::Result<(i64, i64)> {
     sqlx::query_as::<_, (i64, i64)>(concat!(
         "SELECT ",
         available_total!(),
@@ -41,7 +37,7 @@ pub async fn availability(
     ))
     .bind(monitor_id)
     .bind(since)
-    .fetch_one(pool)
+    .fetch_one(store.sqlx())
     .await
 }
 
@@ -59,7 +55,7 @@ pub async fn availability(
 ///
 /// Returns an error if the query fails.
 pub async fn latency_series(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     since: i64,
     bucket_secs: i64,
@@ -72,7 +68,7 @@ pub async fn latency_series(
     .bind(monitor_id)
     .bind(since)
     .bind(bucket_secs)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -88,7 +84,7 @@ pub async fn latency_series(
 ///
 /// Returns an error if the query fails.
 pub async fn availability_all(
-    pool: &SqlitePool,
+    store: &Store,
     since: i64,
 ) -> sqlx::Result<HashMap<String, (i64, i64)>> {
     let rows = sqlx::query_as::<_, (String, i64, i64)>(concat!(
@@ -97,7 +93,7 @@ pub async fn availability_all(
         " FROM checks WHERE time >= ? GROUP BY monitor_id"
     ))
     .bind(since)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
     Ok(rows
         .into_iter()
@@ -125,18 +121,18 @@ pub async fn availability_all(
 ///
 /// Returns an error if a query fails.
 pub async fn daily_all(
-    pool: &SqlitePool,
+    store: &Store,
     since: i64,
     until: i64,
 ) -> sqlx::Result<HashMap<String, Vec<DayRow>>> {
     let newest_hour: Option<i64> = sqlx::query_scalar("SELECT MAX(hour) FROM checks_hourly")
-        .fetch_one(pool)
+        .fetch_one(store.sqlx())
         .await?;
     // Past `until` nothing is read, so the frontier never needs to exceed it.
     let frontier = newest_hour.map_or(since, |hour| since.max(hour + 3600).min(until + 1));
-    let raw = read_raw_days(pool, frontier, until).await?;
-    let hourly = read_hourly_days(pool, since, frontier).await?;
-    let daily = read_daily_buckets(pool, since, until).await?;
+    let raw = read_raw_days(store, frontier, until).await?;
+    let hourly = read_hourly_days(store, since, frontier).await?;
+    let daily = read_daily_buckets(store, since, until).await?;
 
     // Hourly buckets and raw rows cover disjoint ranges of the same day: sum.
     let mut sums: HashMap<String, BTreeMap<i64, DayCounts>> = HashMap::new();
@@ -183,7 +179,7 @@ fn day_count_rows(rows: Vec<(String, i64, i64, i64, i64)>) -> Vec<DayCountRow> {
 /// a per-row `strftime` string, and the string-keyed GROUP BY it forces, was
 /// half of this scan's cost.
 pub(super) async fn read_raw_days(
-    pool: &SqlitePool,
+    store: &Store,
     since: i64,
     until: i64,
 ) -> sqlx::Result<Vec<DayCountRow>> {
@@ -194,14 +190,14 @@ pub(super) async fn read_raw_days(
     )
     .bind(since)
     .bind(until)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
     Ok(day_count_rows(rows))
 }
 
 /// Hourly buckets starting in `[since, until)` per monitor and UTC day.
 pub(super) async fn read_hourly_days(
-    pool: &SqlitePool,
+    store: &Store,
     since: i64,
     until: i64,
 ) -> sqlx::Result<Vec<DayCountRow>> {
@@ -212,14 +208,14 @@ pub(super) async fn read_hourly_days(
     )
     .bind(since)
     .bind(until)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
     Ok(day_count_rows(rows))
 }
 
 /// Daily buckets starting in `[since, until]`.
 pub(super) async fn read_daily_buckets(
-    pool: &SqlitePool,
+    store: &Store,
     since: i64,
     until: i64,
 ) -> sqlx::Result<Vec<DayCountRow>> {
@@ -230,7 +226,7 @@ pub(super) async fn read_daily_buckets(
     )
     .bind(since)
     .bind(until)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
     Ok(day_count_rows(rows))
 }
@@ -281,7 +277,7 @@ pub(super) fn iso_day(day: i64) -> String {
 ///
 /// Returns an error if the query fails.
 pub async fn latency_percentiles_all(
-    pool: &SqlitePool,
+    store: &Store,
     since: i64,
 ) -> sqlx::Result<HashMap<String, (i64, i64, i64)>> {
     let rows = sqlx::query_as::<_, (String, i64, i64, i64)>(
@@ -300,7 +296,7 @@ pub async fn latency_percentiles_all(
          GROUP BY monitor_id",
     )
     .bind(since)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
 
     Ok(rows
@@ -320,7 +316,7 @@ pub async fn latency_percentiles_all(
 ///
 /// Returns an error if the query fails.
 pub async fn latency_sparkline_all(
-    pool: &SqlitePool,
+    store: &Store,
     since: i64,
     bucket_secs: i64,
 ) -> sqlx::Result<HashMap<String, Vec<Point>>> {
@@ -333,7 +329,7 @@ pub async fn latency_sparkline_all(
     )
     .bind(since)
     .bind(bucket_secs)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
 
     let mut map: HashMap<String, Vec<Point>> = HashMap::new();
@@ -355,12 +351,12 @@ pub async fn latency_sparkline_all(
 ///
 /// Returns an error if a query fails.
 pub async fn latency_hourly(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     since: i64,
 ) -> sqlx::Result<Vec<(i64, i64)>> {
     let newest_hour: Option<i64> = sqlx::query_scalar("SELECT MAX(hour) FROM checks_hourly")
-        .fetch_one(pool)
+        .fetch_one(store.sqlx())
         .await?;
     let frontier = newest_hour.map_or(since, |hour| since.max(hour + 3600));
     let buckets = sqlx::query_as::<_, (i64, i64)>(
@@ -370,7 +366,7 @@ pub async fn latency_hourly(
     .bind(monitor_id)
     .bind(since)
     .bind(frontier)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
     let raw = sqlx::query_as::<_, (i64, i64)>(
         "SELECT (time / 3600) * 3600 AS hour, CAST(AVG(latency_ms) AS INTEGER) FROM checks \
@@ -378,7 +374,7 @@ pub async fn latency_hourly(
     )
     .bind(monitor_id)
     .bind(frontier)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
 
     // Disjoint ranges; the map only orders them.

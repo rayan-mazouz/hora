@@ -43,8 +43,8 @@ pub(crate) async fn heatmap_svg(
         .get_or_build(&id, config, async {
             let now = Utc::now().timestamp();
             let since = (now / 86_400 - (crate::heatmap::HEATMAP_DAYS - 1)) * 86_400;
-            let cells = db::latency_hourly(&state.pool, &id, since).await?;
-            Ok::<_, sqlx::Error>(crate::heatmap::render(&cells, now, &monitor.name, true))
+            let cells = db::latency_hourly(&state.store, &id, since).await?;
+            Ok::<_, hora_core::db::Error>(crate::heatmap::render(&cells, now, &monitor.name, true))
         })
         .await?;
     Ok(svg_response(svg.as_ref().clone()))
@@ -85,7 +85,7 @@ pub(crate) async fn status_badge(
     let config = state.config.borrow().clone();
     badge_monitor(&config, &id)?;
     let threshold = i64::from(config.alerts.fail_threshold.max(1));
-    let recent = db::recent_checks(&state.pool, &id, threshold).await?;
+    let recent = db::recent_checks(&state.store, &id, threshold).await?;
     let status = db::derive_status(&recent, threshold);
     Ok(svg_response(badge(
         "status",
@@ -117,7 +117,7 @@ pub(crate) async fn uptime_badge(
     let config = state.config.borrow().clone();
     badge_monitor(&config, &id)?;
     let since = Utc::now().timestamp() - hora_core::SECONDS_PER_DAY;
-    let (available, total) = db::availability(&state.pool, &id, since).await?;
+    let (available, total) = db::availability(&state.store, &id, since).await?;
     let permille = (total > 0).then(|| available.saturating_mul(1000) / total);
     let (message, color) = match permille {
         Some(permille) => (hora_core::fmt::permille(permille), uptime_color(permille)),

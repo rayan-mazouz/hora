@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use crate::config::Config;
-use crate::db::{SqlitePool, prune, roll_up_recent};
+use crate::db::{Store, prune, roll_up_recent};
 
 const PRUNE_INTERVAL: Duration = Duration::from_hours(6);
 /// How long after startup the first prune tick runs. Boot is already the
@@ -28,11 +28,11 @@ const ROLLUP_INTERVAL: Duration = Duration::from_mins(5);
 /// shutdown signal lets it stop between ticks instead of being aborted.
 #[must_use]
 pub fn spawn_pruner(
-    pool: &SqlitePool,
+    store: &Store,
     config: watch::Receiver<Arc<Config>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
-    let pool = pool.clone();
+    let store = store.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval_at(
             tokio::time::Instant::now() + PRUNE_STARTUP_DELAY,
@@ -44,13 +44,13 @@ pub fn spawn_pruner(
             tokio::select! {
                 _ = ticker.tick() => {
                     let config = config.borrow().clone();
-                    if let Err(err) = prune(&pool, &config).await {
+                    if let Err(err) = prune(&store, &config).await {
                         tracing::warn!("pruning failed: {err}");
                     }
                 }
                 _ = rollup.tick() => {
                     let now = chrono::Utc::now().timestamp();
-                    if let Err(err) = roll_up_recent(&pool, now).await {
+                    if let Err(err) = roll_up_recent(&store, now).await {
                         tracing::warn!("hourly roll-up failed: {err}");
                     }
                 }

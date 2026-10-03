@@ -1,7 +1,7 @@
 //! Heartbeat evaluation, shared by push monitors (the scheduler) and watched
 //! peers (the mesh): when a heartbeat is due, and what the stored ones say.
 
-use sqlx::SqlitePool;
+use crate::db::Store;
 use tracing::error;
 
 use crate::config::Monitor;
@@ -55,7 +55,7 @@ pub(crate) struct HeartbeatWatch {
 impl HeartbeatWatch {
     /// `None` (logged) for a schedule that does not parse - validated at
     /// config load, so defensive only: the monitor then stays unknown.
-    pub(crate) async fn for_monitor(pool: &SqlitePool, monitor: &Monitor) -> Option<Self> {
+    pub(crate) async fn for_monitor(store: &Store, monitor: &Monitor) -> Option<Self> {
         let cadence = match &monitor.schedule {
             None => Cadence::Every(monitor.interval_secs),
             Some(schedule) => {
@@ -72,7 +72,7 @@ impl HeartbeatWatch {
         let now = chrono::Utc::now().timestamp();
         Some(Self {
             cadence,
-            expected_since: heartbeat_expected_since(pool, &monitor.id, now).await,
+            expected_since: heartbeat_expected_since(store, &monitor.id, now).await,
         })
     }
 }
@@ -83,9 +83,9 @@ impl HeartbeatWatch {
 /// is then judged against this instead of staying unknown forever. A database
 /// error falls back to `now`, unpersisted: the watch still works, just from
 /// this start.
-pub(crate) async fn heartbeat_expected_since(pool: &SqlitePool, id: &str, now: i64) -> i64 {
+pub(crate) async fn heartbeat_expected_since(store: &Store, id: &str, now: i64) -> i64 {
     let key = format!("{}{id}", db::HEARTBEAT_EXPECTED_META_PREFIX);
-    match db::meta_get(pool, &key).await {
+    match db::meta_get(store, &key).await {
         Ok(Some(stored)) => {
             if let Ok(since) = stored.parse::<i64>() {
                 return since;
@@ -97,7 +97,7 @@ pub(crate) async fn heartbeat_expected_since(pool: &SqlitePool, id: &str, now: i
             return now;
         }
     }
-    if let Err(err) = db::meta_set(pool, &key, &now.to_string()).await {
+    if let Err(err) = db::meta_set(store, &key, &now.to_string()).await {
         error!(monitor = %id, "failed to record the heartbeat start: {err:#}");
     }
     now
@@ -209,13 +209,13 @@ fn judge_heartbeat(
 /// reset the clock each tick and the monitor would flap instead of confirming
 /// down (see [`db::last_heartbeat`]).
 pub(crate) async fn heartbeat_outcome_for(
-    pool: &SqlitePool,
+    store: &Store,
     id: &str,
     cadence: &Cadence,
     expected_since: i64,
     now: i64,
 ) -> Option<Outcome> {
-    let last = match db::last_heartbeat(pool, id).await {
+    let last = match db::last_heartbeat(store, id).await {
         Ok(last) => last,
         Err(err) => {
             error!(monitor = %id, "failed to read last heartbeat: {err:#}");
@@ -228,7 +228,7 @@ pub(crate) async fn heartbeat_outcome_for(
         HeartbeatVerdict::Overdue(reason) => {
             // Recorded so the page and history show it; marked as a miss so it
             // never reads as a heartbeat (or as the job's own down).
-            if let Err(err) = db::insert_heartbeat_miss(pool, id, &reason).await {
+            if let Err(err) = db::insert_heartbeat_miss(store, id, &reason).await {
                 error!(monitor = %id, "failed to record heartbeat miss: {err:#}");
             }
             Some(Outcome::down(reason))
@@ -239,21 +239,6 @@ pub(crate) async fn heartbeat_outcome_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-
-    async fn memory_pool() -> SqlitePool {
-        let options = SqliteConnectOptions::new()
-            .filename(":memory:")
-            .create_if_missing(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .expect("connect in-memory");
-        db::migrator().run(&pool).await.expect("run migrations");
-        pool
-    }
 
     fn beat(time: i64, status: i64, error: Option<&str>) -> db::Heartbeat {
         db::Heartbeat {
@@ -414,38 +399,38 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_expectation_survives_restarts() {
-        let pool = memory_pool().await;
-        assert_eq!(heartbeat_expected_since(&pool, "job", 1000).await, 1000);
+        let store = Store::in_memory().await;
+        assert_eq!(heartbeat_expected_since(&store, "job", 1000).await, 1000);
         // A later task start (daemon restart) keeps the original deadline.
-        assert_eq!(heartbeat_expected_since(&pool, "job", 5000).await, 1000);
+        assert_eq!(heartbeat_expected_since(&store, "job", 5000).await, 1000);
         // Per id.
-        assert_eq!(heartbeat_expected_since(&pool, "other", 5000).await, 5000);
+        assert_eq!(heartbeat_expected_since(&store, "other", 5000).await, 5000);
     }
 
     #[tokio::test]
     async fn explicit_down_push_is_evaluated_and_never_recorded_as_a_miss() {
-        let pool = memory_pool().await;
+        let store = Store::in_memory().await;
         let now = chrono::Utc::now().timestamp();
-        db::insert_push(&pool, "job", 0, None, Some("backup failed"))
+        db::insert_push(&store, "job", 0, None, Some("backup failed"))
             .await
             .unwrap();
-        let outcome = heartbeat_outcome_for(&pool, "job", &Cadence::Every(60), now, now)
+        let outcome = heartbeat_outcome_for(&store, "job", &Cadence::Every(60), now, now)
             .await
             .expect("an outcome");
         assert!(!outcome.up);
         assert_eq!(outcome.error.as_deref(), Some("backup failed"));
         // Only the push itself is stored: an on-time down records no miss.
-        assert_eq!(db::recent_checks(&pool, "job", 10).await.unwrap().len(), 1);
+        assert_eq!(db::recent_checks(&store, "job", 10).await.unwrap().len(), 1);
 
         // Never pinged and past its first window: a recorded miss.
-        let outcome = heartbeat_outcome_for(&pool, "silent", &Cadence::Every(60), now - 120, now)
+        let outcome = heartbeat_outcome_for(&store, "silent", &Cadence::Every(60), now - 120, now)
             .await
             .expect("an outcome");
         assert_eq!(outcome.error.as_deref(), Some("no heartbeat received yet"));
-        let rows = db::recent_checks(&pool, "silent", 10).await.unwrap();
+        let rows = db::recent_checks(&store, "silent", 10).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, 0);
         // And that miss is not a heartbeat: still never pinged.
-        assert_eq!(db::last_heartbeat(&pool, "silent").await.unwrap(), None);
+        assert_eq!(db::last_heartbeat(&store, "silent").await.unwrap(), None);
     }
 }

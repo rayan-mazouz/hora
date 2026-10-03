@@ -23,9 +23,9 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwapOption;
 use axum::body::Bytes;
 use hora_core::config::Config;
+use hora_core::db::Store;
 use hora_core::mesh::vantage::VantageMap;
 use hora_core::notifications::{self, Notifiers};
-use sqlx::SqlitePool;
 use tokio::sync::{Notify, watch};
 
 use crate::AppState;
@@ -197,11 +197,11 @@ impl Refresher {
         }
         let refresher = Arc::downgrade(self);
         let wake = Arc::clone(&self.wake);
-        let pool = state.pool.clone();
+        let store = state.store.clone();
         let config = state.config.clone();
         let notifier = state.notifier.clone();
         let vantage = Arc::clone(&state.vantage);
-        tokio::spawn(run(refresher, wake, pool, config, notifier, vantage));
+        tokio::spawn(run(refresher, wake, store, config, notifier, vantage));
     }
 
     /// The latest snapshot. Never waits on a build, except for the very
@@ -240,7 +240,7 @@ impl Refresher {
 async fn run(
     refresher: Weak<Refresher>,
     wake: Arc<Notify>,
-    pool: SqlitePool,
+    store: Store,
     mut config: watch::Receiver<Arc<Config>>,
     notifier: Notifiers,
     vantage: VantageMap,
@@ -272,11 +272,11 @@ async fn run(
         // Built in a task of its own: a panic loses this build's caches, not
         // the refresher (the page would freeze on its last snapshot).
         let task = tokio::spawn({
-            let pool = pool.clone();
+            let store = store.clone();
             let current = Arc::clone(&current);
             let mut state = std::mem::take(&mut state);
             async move {
-                let built = build_summary(&pool, &current, &mut state, &health, &peers).await;
+                let built = build_summary(&store, &current, &mut state, &health, &peers).await;
                 (state, built)
             }
         });

@@ -1,6 +1,6 @@
 //! Incidents: one row per outage, opened and closed by the scheduler.
 
-use sqlx::SqlitePool;
+use super::Store;
 
 /// An automatically recorded incident from a down/up transition.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -33,7 +33,7 @@ pub struct Incident {
 ///
 /// Returns an error if the insert fails.
 pub async fn insert_incident_start(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     error: Option<&str>,
     cause: Option<&str>,
@@ -56,7 +56,7 @@ pub async fn insert_incident_start(
     .bind(snapshot)
     .bind(event)
     .bind(now)
-    .execute(pool)
+    .execute(store.sqlx())
     .await?;
     Ok(result.last_insert_rowid())
 }
@@ -69,14 +69,14 @@ pub async fn insert_incident_start(
 ///
 /// Returns an error if the update fails.
 pub async fn update_incident_vantage(
-    pool: &SqlitePool,
+    store: &Store,
     incident_id: i64,
     vantage: &str,
 ) -> sqlx::Result<()> {
     sqlx::query("UPDATE incidents SET vantage = ? WHERE id = ?")
         .bind(vantage)
         .bind(incident_id)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }
@@ -86,13 +86,13 @@ pub async fn update_incident_vantage(
 /// # Errors
 ///
 /// Returns an error if the update fails.
-pub async fn update_incident_end(pool: &SqlitePool, incident_id: i64) -> sqlx::Result<()> {
+pub async fn update_incident_end(store: &Store, incident_id: i64) -> sqlx::Result<()> {
     let now = chrono::Utc::now().timestamp();
     sqlx::query("UPDATE incidents SET ended_at = ?, duration_s = (? - started_at) WHERE id = ?")
         .bind(now)
         .bind(now)
         .bind(incident_id)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }
@@ -102,13 +102,13 @@ pub async fn update_incident_end(pool: &SqlitePool, incident_id: i64) -> sqlx::R
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn find_open_incident(pool: &SqlitePool, monitor_id: &str) -> sqlx::Result<Option<i64>> {
+pub async fn find_open_incident(store: &Store, monitor_id: &str) -> sqlx::Result<Option<i64>> {
     sqlx::query_scalar::<_, i64>(
         "SELECT id FROM incidents WHERE monitor_id = ? AND ended_at IS NULL \
          ORDER BY started_at DESC LIMIT 1",
     )
     .bind(monitor_id)
-    .fetch_optional(pool)
+    .fetch_optional(store.sqlx())
     .await
 }
 
@@ -117,7 +117,7 @@ pub async fn find_open_incident(pool: &SqlitePool, monitor_id: &str) -> sqlx::Re
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn recent_incidents(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<Incident>> {
+pub async fn recent_incidents(store: &Store, limit: i64) -> sqlx::Result<Vec<Incident>> {
     // The id tie-break keeps the order deterministic when incidents share a
     // start second (a cascade), and matches what [`latest_incident_id`] calls
     // "last" - so `hora annotate last` annotates the incident listed first.
@@ -127,7 +127,7 @@ pub async fn recent_incidents(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec
         " FROM incidents ORDER BY started_at DESC, id DESC LIMIT ?"
     ))
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -138,7 +138,7 @@ pub async fn recent_incidents(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec
 ///
 /// Returns an error if the query fails.
 pub async fn monitor_incidents(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     since: i64,
     limit: i64,
@@ -152,7 +152,7 @@ pub async fn monitor_incidents(
     .bind(monitor_id)
     .bind(since)
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -172,14 +172,14 @@ pub struct IncidentMarks {
 ///
 /// Returns an error if the query fails.
 pub async fn incident_marks(
-    pool: &SqlitePool,
+    store: &Store,
 ) -> sqlx::Result<std::collections::HashMap<String, IncidentMarks>> {
     let rows = sqlx::query_as::<_, (String, Option<i64>, Option<i64>)>(
         "SELECT monitor_id, MAX(ended_at), \
             MIN(CASE WHEN ended_at IS NULL THEN started_at END) \
          FROM incidents GROUP BY monitor_id",
     )
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await?;
     Ok(rows
         .into_iter()
@@ -203,7 +203,7 @@ pub async fn incident_marks(
 ///
 /// Returns an error if the query fails.
 pub async fn incidents_between(
-    pool: &SqlitePool,
+    store: &Store,
     since: i64,
     until: i64,
 ) -> sqlx::Result<Vec<Incident>> {
@@ -215,7 +215,7 @@ pub async fn incidents_between(
     ))
     .bind(until)
     .bind(since)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -224,14 +224,14 @@ pub async fn incidents_between(
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn incident_by_id(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<Incident>> {
+pub async fn incident_by_id(store: &Store, id: i64) -> sqlx::Result<Option<Incident>> {
     sqlx::query_as::<_, Incident>(concat!(
         "SELECT ",
         incident_columns!(),
         " FROM incidents WHERE id = ?"
     ))
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(store.sqlx())
     .await
 }
 
@@ -241,12 +241,12 @@ pub async fn incident_by_id(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<I
 /// # Errors
 ///
 /// Returns an error if the update fails.
-pub async fn set_incident_note(pool: &SqlitePool, id: i64, note: &str) -> sqlx::Result<bool> {
+pub async fn set_incident_note(store: &Store, id: i64, note: &str) -> sqlx::Result<bool> {
     let note = (!note.is_empty()).then_some(note);
     let result = sqlx::query("UPDATE incidents SET note = ? WHERE id = ?")
         .bind(note)
         .bind(id)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(result.rows_affected() > 0)
 }
@@ -256,10 +256,10 @@ pub async fn set_incident_note(pool: &SqlitePool, id: i64, note: &str) -> sqlx::
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn latest_incident_id(pool: &SqlitePool) -> sqlx::Result<Option<i64>> {
+pub async fn latest_incident_id(store: &Store) -> sqlx::Result<Option<i64>> {
     sqlx::query_scalar::<_, i64>(
         "SELECT id FROM incidents ORDER BY started_at DESC, id DESC LIMIT 1",
     )
-    .fetch_optional(pool)
+    .fetch_optional(store.sqlx())
     .await
 }

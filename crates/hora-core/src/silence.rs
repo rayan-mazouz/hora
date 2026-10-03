@@ -1,7 +1,7 @@
 //! Ad-hoc silences ("mute api while I deploy"): one validation for the two
 //! doors that create them, `POST /api/silence` and `hora silence`.
 
-use sqlx::SqlitePool;
+use crate::db::Store;
 
 use crate::config::Config;
 use crate::{MAX_SILENCE_REASON_CHARS, MAX_SILENCE_SECS, bounded, db, parse_duration};
@@ -24,7 +24,7 @@ pub enum SilenceError {
     /// An id that is neither a configured monitor nor a watched peer.
     UnknownId(String),
     /// The insert failed.
-    Database(sqlx::Error),
+    Database(crate::db::Error),
 }
 
 impl std::fmt::Display for SilenceError {
@@ -60,7 +60,7 @@ impl std::error::Error for SilenceError {
 ///
 /// See [`SilenceError`].
 pub async fn apply(
-    pool: &SqlitePool,
+    store: &Store,
     config: &Config,
     ids: &str,
     duration: &str,
@@ -76,7 +76,7 @@ pub async fn apply(
     let until = chrono::Utc::now()
         .timestamp()
         .saturating_add(i64::try_from(duration_secs).unwrap_or(i64::MAX));
-    db::insert_silences(pool, &ids, until, reason.as_deref())
+    db::insert_silences(store, &ids, until, reason.as_deref())
         .await
         .map_err(SilenceError::Database)?;
     Ok(Silenced { ids, until })
@@ -140,19 +140,6 @@ mod tests {
         .expect("config")
     }
 
-    async fn memory_pool() -> SqlitePool {
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(":memory:")
-            .create_if_missing(true);
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .expect("connect in-memory");
-        db::migrator().run(&pool).await.expect("run migrations");
-        pool
-    }
-
     #[test]
     fn ids_resolve_wildcards_monitors_and_watched_peers() {
         let config = config();
@@ -176,31 +163,31 @@ mod tests {
 
     #[tokio::test]
     async fn apply_validates_then_records_every_id() {
-        let pool = memory_pool().await;
+        let store = Store::in_memory().await;
         let config = config();
         assert!(matches!(
-            apply(&pool, &config, "api", "8d", None).await,
+            apply(&store, &config, "api", "8d", None).await,
             Err(SilenceError::InvalidDuration)
         ));
         assert!(matches!(
-            apply(&pool, &config, "api,typo", "10m", None).await,
+            apply(&store, &config, "api,typo", "10m", None).await,
             Err(SilenceError::UnknownId(_))
         ));
         // Nothing was written by the refused calls.
         let now = chrono::Utc::now().timestamp();
-        assert!(db::active_silences(&pool, now).await.unwrap().is_empty());
+        assert!(db::active_silences(&store, now).await.unwrap().is_empty());
 
         let long = "é".repeat(MAX_SILENCE_REASON_CHARS + 50);
-        let silenced = apply(&pool, &config, "api", "10m", Some(&long))
+        let silenced = apply(&store, &config, "api", "10m", Some(&long))
             .await
             .unwrap();
         assert_eq!(silenced.ids, ["api"]);
-        let active = db::active_silences(&pool, now).await.unwrap();
+        let active = db::active_silences(&store, now).await.unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(
             active[0].reason.as_deref().map(|r| r.chars().count()),
             Some(MAX_SILENCE_REASON_CHARS)
         );
-        assert!(db::is_silenced(&pool, "api", now).await.unwrap());
+        assert!(db::is_silenced(&store, "api", now).await.unwrap());
     }
 }

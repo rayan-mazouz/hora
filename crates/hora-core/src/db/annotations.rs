@@ -1,17 +1,17 @@
 //! What operators and producers add on top of the checks: events,
 //! announcements, pushed alerts and silences, plus the `meta` key-value table.
 
-use sqlx::SqlitePool;
+use super::Store;
 
 /// Read a value from the `meta` key-value store.
 ///
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn meta_get(pool: &SqlitePool, key: &str) -> sqlx::Result<Option<String>> {
+pub async fn meta_get(store: &Store, key: &str) -> sqlx::Result<Option<String>> {
     sqlx::query_scalar::<_, String>("SELECT value FROM meta WHERE key = ?")
         .bind(key)
-        .fetch_optional(pool)
+        .fetch_optional(store.sqlx())
         .await
 }
 
@@ -20,20 +20,20 @@ pub async fn meta_get(pool: &SqlitePool, key: &str) -> sqlx::Result<Option<Strin
 /// # Errors
 ///
 /// Returns an error if the upsert fails.
-pub async fn meta_set(pool: &SqlitePool, key: &str, value: &str) -> sqlx::Result<()> {
+pub async fn meta_set(store: &Store, key: &str, value: &str) -> sqlx::Result<()> {
     sqlx::query(upsert_sql!("meta", "key", "value"))
         .bind(key)
         .bind(value)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }
 
 /// Remove a key from the `meta` key-value store (a no-op when absent).
-pub(super) async fn meta_delete(pool: &SqlitePool, key: &str) -> sqlx::Result<()> {
+pub(super) async fn meta_delete(store: &Store, key: &str) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM meta WHERE key = ?")
         .bind(key)
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }
@@ -57,7 +57,7 @@ pub struct Announcement {
 ///
 /// Returns an error if the insert fails.
 pub async fn insert_announcement(
-    pool: &SqlitePool,
+    store: &Store,
     title: &str,
     body: &str,
     severity: &str,
@@ -72,7 +72,7 @@ pub async fn insert_announcement(
     .bind(severity)
     .bind(until)
     .bind(chrono::Utc::now().timestamp())
-    .execute(pool)
+    .execute(store.sqlx())
     .await?;
     Ok(result.last_insert_rowid())
 }
@@ -82,14 +82,14 @@ pub async fn insert_announcement(
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn active_announcements(pool: &SqlitePool, now: i64) -> sqlx::Result<Vec<Announcement>> {
+pub async fn active_announcements(store: &Store, now: i64) -> sqlx::Result<Vec<Announcement>> {
     sqlx::query_as::<_, Announcement>(concat!(
         "SELECT ",
         announcement_columns!(),
         " FROM announcements WHERE until IS NULL OR until > ? ORDER BY created_at DESC, id DESC"
     ))
     .bind(now)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -99,11 +99,11 @@ pub async fn active_announcements(pool: &SqlitePool, now: i64) -> sqlx::Result<V
 /// # Errors
 ///
 /// Returns an error if the deletion fails.
-pub async fn clear_announcements(pool: &SqlitePool, now: i64) -> sqlx::Result<u64> {
+pub async fn clear_announcements(store: &Store, now: i64) -> sqlx::Result<u64> {
     // One statement: the count describes exactly the rows deleted, even when
     // an announcement is pinned concurrently.
     let deleted: Vec<Option<i64>> = sqlx::query_scalar("DELETE FROM announcements RETURNING until")
-        .fetch_all(pool)
+        .fetch_all(store.sqlx())
         .await?;
     Ok(count_active(deleted.into_iter(), now))
 }
@@ -129,11 +129,11 @@ pub struct EventMarker {
 /// # Errors
 ///
 /// Returns an error if the insert fails.
-pub async fn insert_event(pool: &SqlitePool, title: &str) -> sqlx::Result<i64> {
+pub async fn insert_event(store: &Store, title: &str) -> sqlx::Result<i64> {
     let result = sqlx::query("INSERT INTO events (title, created_at) VALUES (?, ?)")
         .bind(title)
         .bind(chrono::Utc::now().timestamp())
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(result.last_insert_rowid())
 }
@@ -143,14 +143,14 @@ pub async fn insert_event(pool: &SqlitePool, title: &str) -> sqlx::Result<i64> {
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn recent_events(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<EventMarker>> {
+pub async fn recent_events(store: &Store, limit: i64) -> sqlx::Result<Vec<EventMarker>> {
     sqlx::query_as::<_, EventMarker>(concat!(
         "SELECT ",
         event_columns!(),
         " FROM events ORDER BY created_at DESC, id DESC LIMIT ?"
     ))
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -159,14 +159,14 @@ pub async fn recent_events(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<Ev
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn events_since(pool: &SqlitePool, since: i64) -> sqlx::Result<Vec<EventMarker>> {
+pub async fn events_since(store: &Store, since: i64) -> sqlx::Result<Vec<EventMarker>> {
     sqlx::query_as::<_, EventMarker>(concat!(
         "SELECT ",
         event_columns!(),
         " FROM events WHERE created_at >= ? ORDER BY created_at ASC, id ASC"
     ))
     .bind(since)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -177,7 +177,7 @@ pub async fn events_since(pool: &SqlitePool, since: i64) -> sqlx::Result<Vec<Eve
 ///
 /// Returns an error if the query fails.
 pub async fn latest_event_before(
-    pool: &SqlitePool,
+    store: &Store,
     now: i64,
     window_secs: i64,
 ) -> sqlx::Result<Option<EventMarker>> {
@@ -189,7 +189,7 @@ pub async fn latest_event_before(
     ))
     .bind(now)
     .bind(now - window_secs.max(0))
-    .fetch_optional(pool)
+    .fetch_optional(store.sqlx())
     .await
 }
 
@@ -199,14 +199,14 @@ pub async fn latest_event_before(
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn announcements_since(pool: &SqlitePool, since: i64) -> sqlx::Result<Vec<Announcement>> {
+pub async fn announcements_since(store: &Store, since: i64) -> sqlx::Result<Vec<Announcement>> {
     sqlx::query_as::<_, Announcement>(concat!(
         "SELECT ",
         announcement_columns!(),
         " FROM announcements WHERE created_at >= ? ORDER BY created_at DESC, id DESC"
     ))
     .bind(since)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -215,14 +215,14 @@ pub async fn announcements_since(pool: &SqlitePool, since: i64) -> sqlx::Result<
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn silences_since(pool: &SqlitePool, since: i64) -> sqlx::Result<Vec<Silence>> {
+pub async fn silences_since(store: &Store, since: i64) -> sqlx::Result<Vec<Silence>> {
     sqlx::query_as::<_, Silence>(concat!(
         "SELECT ",
         silence_columns!(),
         " FROM silences WHERE created_at >= ? ORDER BY created_at DESC, id DESC"
     ))
     .bind(since)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -248,7 +248,7 @@ pub struct PushedAlert {
 ///
 /// Returns an error if the insert fails.
 pub async fn insert_pushed_alert(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     severity: &str,
     title: &str,
@@ -265,7 +265,7 @@ pub async fn insert_pushed_alert(
     .bind(message)
     .bind(dedup_key)
     .bind(chrono::Utc::now().timestamp())
-    .execute(pool)
+    .execute(store.sqlx())
     .await?;
     Ok(result.last_insert_rowid())
 }
@@ -275,13 +275,13 @@ pub async fn insert_pushed_alert(
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn recent_pushed_alerts(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<PushedAlert>> {
+pub async fn recent_pushed_alerts(store: &Store, limit: i64) -> sqlx::Result<Vec<PushedAlert>> {
     sqlx::query_as::<_, PushedAlert>(
         "SELECT id, monitor_id, severity, title, message, dedup_key, created_at \
          FROM pushed_alerts ORDER BY created_at DESC, id DESC LIMIT ?",
     )
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -303,7 +303,7 @@ pub struct Silence {
 ///
 /// Returns an error if the insert fails.
 pub async fn insert_silence(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_id: &str,
     until: i64,
     reason: Option<&str>,
@@ -313,7 +313,7 @@ pub async fn insert_silence(
         .bind(until)
         .bind(reason)
         .bind(chrono::Utc::now().timestamp())
-        .execute(pool)
+        .execute(store.sqlx())
         .await?;
     Ok(())
 }
@@ -325,13 +325,13 @@ pub async fn insert_silence(
 ///
 /// Returns an error if an insert or the commit fails.
 pub async fn insert_silences(
-    pool: &SqlitePool,
+    store: &Store,
     monitor_ids: &[String],
     until: i64,
     reason: Option<&str>,
 ) -> sqlx::Result<()> {
     let now = chrono::Utc::now().timestamp();
-    let mut tx = pool.begin().await?;
+    let mut tx = store.sqlx().begin().await?;
     for id in monitor_ids {
         sqlx::query(
             "INSERT INTO silences (monitor_id, until, reason, created_at) VALUES (?, ?, ?, ?)",
@@ -352,14 +352,14 @@ pub async fn insert_silences(
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn is_silenced(pool: &SqlitePool, monitor_id: &str, now: i64) -> sqlx::Result<bool> {
+pub async fn is_silenced(store: &Store, monitor_id: &str, now: i64) -> sqlx::Result<bool> {
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM silences \
          WHERE (monitor_id = ?1 OR monitor_id = '*') AND until > ?2)",
     )
     .bind(monitor_id)
     .bind(now)
-    .fetch_one(pool)
+    .fetch_one(store.sqlx())
     .await
 }
 
@@ -368,14 +368,14 @@ pub async fn is_silenced(pool: &SqlitePool, monitor_id: &str, now: i64) -> sqlx:
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn active_silences(pool: &SqlitePool, now: i64) -> sqlx::Result<Vec<Silence>> {
+pub async fn active_silences(store: &Store, now: i64) -> sqlx::Result<Vec<Silence>> {
     sqlx::query_as::<_, Silence>(concat!(
         "SELECT ",
         silence_columns!(),
         " FROM silences WHERE until > ? ORDER BY until ASC"
     ))
     .bind(now)
-    .fetch_all(pool)
+    .fetch_all(store.sqlx())
     .await
 }
 
@@ -384,10 +384,10 @@ pub async fn active_silences(pool: &SqlitePool, now: i64) -> sqlx::Result<Vec<Si
 /// # Errors
 ///
 /// Returns an error if the deletion fails.
-pub async fn clear_silences(pool: &SqlitePool, now: i64) -> sqlx::Result<u64> {
+pub async fn clear_silences(store: &Store, now: i64) -> sqlx::Result<u64> {
     // One statement, so the count matches the rows actually deleted.
     let deleted: Vec<i64> = sqlx::query_scalar("DELETE FROM silences RETURNING until")
-        .fetch_all(pool)
+        .fetch_all(store.sqlx())
         .await?;
     Ok(count_active(deleted.into_iter().map(Some), now))
 }

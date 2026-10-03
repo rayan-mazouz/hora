@@ -7,9 +7,9 @@
 //! an hour per address, so the watcher gates on the stored `checked_at`
 //! rather than asking on each tick.
 
+use crate::db::Store;
 use hora_notify::Event;
 use serde_json_path::JsonPath;
-use sqlx::SqlitePool;
 use tracing::{info, warn};
 
 use crate::config::{Config, Parsed, ReleaseWatch};
@@ -163,7 +163,7 @@ fn numbers(version: &str) -> Option<Vec<u64>> {
 /// Muted during maintenance without being recorded, like the certificate and
 /// domain expiries.
 pub(crate) async fn check_releases(
-    pool: &SqlitePool,
+    store: &Store,
     snapshot: &Config,
     notifier: &Notifiers,
     client: &reqwest::Client,
@@ -173,7 +173,7 @@ pub(crate) async fn check_releases(
         let Some(watch) = &monitor.release else {
             continue;
         };
-        let stored = match db::release_watch(pool, &monitor.id).await {
+        let stored = match db::release_watch(store, &monitor.id).await {
             Ok(stored) => stored,
             Err(err) => {
                 warn!(monitor = %monitor.id, "failed to read release watch: {err:#}");
@@ -189,7 +189,7 @@ pub(crate) async fn check_releases(
             stored => match crate::release::latest(client, &watch.github).await {
                 Ok(release) => {
                     if let Err(err) = db::upsert_release_watch(
-                        pool,
+                        store,
                         &monitor.id,
                         &watch.github,
                         &release.tag,
@@ -235,7 +235,7 @@ pub(crate) async fn check_releases(
                 monitor.notify.as_deref(),
             )
             .await;
-        if let Err(err) = db::mark_release_notified(pool, &monitor.id, &latest).await {
+        if let Err(err) = db::mark_release_notified(store, &monitor.id, &latest).await {
             warn!(monitor = %monitor.id, "failed to record the release alert: {err:#}");
         }
     }

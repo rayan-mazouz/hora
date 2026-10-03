@@ -153,16 +153,8 @@ fn budget_durations_and_pct_format() {
 
 /// Three monitors - `ok` (up), `bad` (degraded, a detailed reason) and
 /// `hidden` (private) - with one check each, and their config.
-async fn three_monitors() -> (sqlx::SqlitePool, hora_core::config::Config, i64) {
-    let options = sqlx::sqlite::SqliteConnectOptions::new()
-        .filename(":memory:")
-        .create_if_missing(true);
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await
-        .unwrap();
-    db::migrator().run(&pool).await.unwrap();
+async fn three_monitors() -> (hora_core::db::Store, hora_core::config::Config, i64) {
+    let store = hora_core::db::Store::in_memory().await;
     let config = hora_core::config::parse(
         r#"
             [page]
@@ -200,18 +192,18 @@ async fn three_monitors() -> (sqlx::SqlitePool, hora_core::config::Config, i64) 
         .bind(id)
         .bind(status)
         .bind(error)
-        .execute(&pool)
+        .execute(store.fixture_pool())
         .await
         .unwrap();
     }
-    (pool, config, now)
+    (store, config, now)
 }
 
 #[tokio::test]
 async fn derived_views_share_unchanged_cards_and_redact_the_rest() {
-    let (pool, config, _) = three_monitors().await;
+    let (store, config, _) = three_monitors().await;
     let built = build_summary(
-        &pool,
+        &store,
         &config,
         &mut BuildState::default(),
         &[],
@@ -239,7 +231,7 @@ async fn derived_views_share_unchanged_cards_and_redact_the_rest() {
 
 #[tokio::test]
 async fn each_audience_lists_the_incidents_it_may_see() {
-    let (pool, config, now) = three_monitors().await;
+    let (store, config, now) = three_monitors().await;
     // Two finished incidents: the hidden monitor's, a day ago, and the
     // public one's, three days ago (with a detailed reason).
     for (id, ended, error) in [
@@ -255,12 +247,12 @@ async fn each_audience_lists_the_incidents_it_may_see() {
         .bind(ended)
         .bind(error)
         .bind(ended - 600)
-        .execute(&pool)
+        .execute(store.fixture_pool())
         .await
         .unwrap();
     }
     let built = build_summary(
-        &pool,
+        &store,
         &config,
         &mut BuildState::default(),
         &[],

@@ -21,9 +21,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
+use crate::db::Store;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use reqwest::Client;
-use sqlx::SqlitePool;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -120,7 +120,7 @@ const LIVENESS_CHECK: Duration = Duration::from_secs(30);
 /// channels on reload), the hot-swappable notifier set, and the scheduler
 /// liveness beacon.
 struct Deps {
-    pool: SqlitePool,
+    store: Store,
     client: Client,
     notifier: Notifiers,
     /// Inbox of the alert coalescer (root-cause grouping); every monitor loop
@@ -144,7 +144,7 @@ pub struct Handle {
 pub fn start(
     initial: Config,
     config_path: PathBuf,
-    pool: SqlitePool,
+    store: Store,
     client: Client,
     last_tick: Arc<AtomicU64>,
     shutdown: watch::Receiver<bool>,
@@ -159,7 +159,7 @@ pub fn start(
         shutdown.clone(),
     );
     let deps = Deps {
-        pool,
+        store,
         client,
         notifier: Arc::clone(&notifier),
         alerts: alerts_tx,
@@ -313,7 +313,7 @@ fn reconcile(
                 monitor.clone(),
                 rx.clone(),
                 scheduler::MonitorDeps {
-                    pool: deps.pool.clone(),
+                    store: deps.store.clone(),
                     client,
                     confirm_client: deps.client.clone(),
                     notifier: Arc::clone(&deps.notifier),
@@ -358,7 +358,7 @@ fn reconcile_peers(
             let task = spawn_watch(
                 peer.clone(),
                 rx.clone(),
-                deps.pool.clone(),
+                deps.store.clone(),
                 deps.client.clone(),
                 Arc::clone(&deps.notifier),
                 fleet.alert_state(&peer.id),

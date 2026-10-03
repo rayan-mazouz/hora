@@ -19,12 +19,12 @@ const TWO: &str = r#"
     interval_secs = 60
 "#;
 
-async fn insert_up(pool: &sqlx::SqlitePool, id: &str, latency: i64) {
+async fn insert_up(store: &hora_core::db::Store, id: &str, latency: i64) {
     sqlx::query("INSERT INTO checks (time, monitor_id, status, latency_ms) VALUES (?, ?, 1, ?)")
         .bind(chrono::Utc::now().timestamp())
         .bind(id)
         .bind(latency)
-        .execute(pool)
+        .execute(store.fixture_pool())
         .await
         .unwrap();
 }
@@ -36,8 +36,8 @@ async fn summary_json(app: &Router, uri: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn requests_are_served_from_the_snapshot_never_a_rebuild() {
-    let (app, pool, _tx) = app_with_reload(TWO).await;
-    insert_up(&pool, "web", 42).await;
+    let (app, store, _tx) = app_with_reload(TWO).await;
+    insert_up(&store, "web", 42).await;
     // The first request waits for the first build...
     let first = summary_json(&app, "/api/summary").await;
     assert_eq!(first["monitors"][0]["last_latency_ms"], 42);
@@ -45,7 +45,7 @@ async fn requests_are_served_from_the_snapshot_never_a_rebuild() {
     // ...later ones answer from it, even when the data moved meanwhile: the
     // refresher catches up in the background, no request rebuilds.
     sqlx::query("DELETE FROM checks")
-        .execute(&pool)
+        .execute(store.fixture_pool())
         .await
         .unwrap();
     let again = summary_json(&app, "/api/summary").await;
@@ -95,8 +95,8 @@ async fn a_reload_rebuilds_at_once_and_hides_new_private_monitors_before() {
 
 #[tokio::test]
 async fn bodies_are_rendered_once_per_snapshot_and_audience() {
-    let (app, pool, _tx) = app_with_reload(TWO).await;
-    insert_up(&pool, "web", 42).await;
+    let (app, store, _tx) = app_with_reload(TWO).await;
+    insert_up(&store, "web", 42).await;
     let public = body_text(app.clone().oneshot(get("/")).await.unwrap()).await;
     let again = body_text(app.clone().oneshot(get("/")).await.unwrap()).await;
     assert_eq!(public, again);

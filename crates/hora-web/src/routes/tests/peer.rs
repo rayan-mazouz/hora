@@ -159,7 +159,7 @@ async fn peer_monitors_authenticates_and_discloses_probeable_targets() {
 async fn peer_monitors_match_the_full_summary() {
     // The peer answer reads the same snapshot as the page: it must report
     // exactly the status and p50 the authenticated summary shows.
-    let (app, pool) = test_app_with_pool().await;
+    let (app, store) = test_app_with_pool().await;
     let now = chrono::Utc::now().timestamp();
     for (offset, latency) in [(60, 40), (120, 10), (180, 30), (240, 20), (300, 50)] {
         sqlx::query(
@@ -167,14 +167,14 @@ async fn peer_monitors_match_the_full_summary() {
         )
         .bind(now - offset)
         .bind(latency)
-        .execute(&pool)
+        .execute(store.fixture_pool())
         .await
         .unwrap();
     }
     for offset in [60, 120, 180, 240] {
         sqlx::query("INSERT INTO checks (time, monitor_id, status, latency_ms) VALUES (?, 'intra', 0, NULL)")
                 .bind(now - offset)
-                .execute(&pool)
+                .execute(store.fixture_pool())
                 .await
                 .unwrap();
     }
