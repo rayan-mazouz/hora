@@ -126,7 +126,7 @@ Rules: the word is always present (in the row, the chip, the hero sentence); the
 - **Fraunces Variable** 500: page title, hero sentence (clamp 1.75 to 2.6 rem), group names, big numbers.
 - **Cal Sans 2 VF** 400 to 600: everything else. Body 16/24, secondary 14/20, label 14/20 500, meta 13/16, tiny 12/16; never under 12 px. `tabular-nums` everywhere.
 - **Borel Display**: the name only, beside the mark, nudged down 0.16 em.
-- **JetBrains Mono**: config, CLI, captured answers.
+- **Mona Sans Mono**: config, CLI, captured answers.
 - Spacing on 4: 2, 4, 8, 12, 16, 24, 32, 48. Radius: 2, 4, 6, 8, 10, 12, 16, pill. Controls 44 / 36 / 32 px (44 on touch). Focus: 3 px petrol ring, 2 px offset.
 - Layout: Ariane's `.page` (max 2400 px, margins 16 / 24 / 32); on a big screen, more columns, never longer lines.
 
@@ -204,7 +204,7 @@ Contrast of the new pairs: body text (gray-2) 12.04:1 dark, 10.84:1 light; links
 @font-face { font-family: 'Fraunces Variable'; src: url('/hora/fonts/Fraunces-VF.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
 @font-face { font-family: 'Cal Sans'; src: url('/hora/fonts/CalSansVF.woff2') format('woff2'); font-weight: 400 700; font-display: swap; }
 @font-face { font-family: 'Borel Display'; src: url('/hora/fonts/BorelDisplay-Regular.woff2') format('woff2'); font-display: swap; }
-@font-face { font-family: 'JetBrains Mono'; src: url('/hora/fonts/JetBrainsMono.woff2') format('woff2'); font-weight: 400 800; font-display: swap; }
+@font-face { font-family: 'Mona Sans Mono'; src: url('/hora/fonts/MonaSansMono.woff2') format('woff2'); font-weight: 200 900; font-display: swap; }
 
 :root {
 	/* dark: night ground, paper ink, bright petrol */
@@ -237,7 +237,7 @@ Contrast of the new pairs: body text (gray-2) 12.04:1 dark, 10.84:1 light; links
 	--sl-color-backdrop-overlay: rgb(21 26 33 / 66%);
 
 	--sl-font: 'Cal Sans', system-ui, sans-serif;
-	--sl-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+	--sl-font-mono: 'Mona Sans Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 	--sl-line-height: 1.75;
 	--sl-line-height-headings: 1.15;
 	--sl-text-h1: 2.5rem;
@@ -302,7 +302,7 @@ body { font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; 
 :focus-visible { outline: 3px solid var(--sl-color-accent); outline-offset: 2px; }
 ```
 
-Expressive Code keeps its own syntax theme; set `expressiveCode: { themes: ['github-dark-dimmed', 'github-light'], styleOverrides: { borderRadius: '10px', codeFontFamily: "'JetBrains Mono', monospace", frames: { frameBoxShadowCssValue: 'none' } } }` in `astro.config.mjs`, or keep its defaults: the frame colours follow the variables above.
+Expressive Code keeps its own syntax theme; set `expressiveCode: { themes: ['github-dark-dimmed', 'github-light'], styleOverrides: { borderRadius: '10px', codeFontFamily: "'Mona Sans Mono', monospace", frames: { frameBoxShadowCssValue: 'none' } } }` in `astro.config.mjs`, or keep its defaults: the frame colours follow the variables above.
 
 ## 13. Open questions
 

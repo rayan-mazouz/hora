@@ -10,7 +10,7 @@ the synthe.se family, after Ariane and Maison.
   state system, type, voice (EN/FR), do and don't, and the Starlight theme
   (section 12) for `docs/`.
 - `assets/` - mark, favicon, wordmark, owl states, OG card; `fonts/` - Fraunces,
-  Cal Sans, Borel, JetBrains Mono (OFL, licences alongside).
+  Cal Sans, Borel, Mona Sans Mono (OFL, licences alongside).
 
 The mockups are generated: `python3 src/build.py` (status pages and the rest via
 `src/*.py`), thumbnails with `node src/thumbs.mjs <page>...`, which borrows the

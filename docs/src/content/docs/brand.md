@@ -91,7 +91,7 @@ blindness; the word is always there.
 - **Fraunces**: titles and the sentence you read first.
 - **Cal Sans**: everything else.
 - **Borel Display**: the name, beside the mark, and nowhere else.
-- **JetBrains Mono**: configuration, commands and captured answers.
+- **Mona Sans Mono**: configuration, commands and captured answers.
 
 All four are under the SIL Open Font License.
 

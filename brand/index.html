@@ -28,7 +28,7 @@
 @font-face { font-family: 'Fraunces Variable'; src: url('fonts/Fraunces-VF.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
 @font-face { font-family: 'Cal Sans'; src: url('fonts/CalSansVF.woff2') format('woff2'); font-weight: 400 700; font-display: swap; }
 @font-face { font-family: 'Borel Display'; src: url('fonts/BorelDisplay-Regular.woff2') format('woff2'); font-display: swap; }
-@font-face { font-family: 'JetBrains Mono'; src: url('fonts/JetBrainsMono.woff2') format('woff2'); font-weight: 400 800; font-display: swap; }
+@font-face { font-family: 'Mona Sans Mono'; src: url('fonts/MonaSansMono.woff2') format('woff2'); font-weight: 200 900; font-display: swap; }
 
 :root { color-scheme: light dark; }
 :root[data-theme='light'] { color-scheme: light; }
@@ -86,7 +86,7 @@
   --font-display: 'Fraunces Variable', Georgia, serif;
   --font-text: 'Cal Sans', system-ui, sans-serif;
   --font-brand: 'Borel Display', var(--font-display);
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-mono: 'Mona Sans Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --t-hero: 500 clamp(1.75rem, 1.35rem + 1.8vw, 2.6rem)/1.15 var(--font-display);
   --t-page: 500 1.75rem/2.125rem var(--font-display);
@@ -969,7 +969,7 @@ a.row:hover { background: color-mix(in srgb, var(--ground-raised) 55%, transpare
   <div class="spec"><span class="who">Display · Fraunces Variable 500</span><span class="big" style="font:500 2.6rem/1.1 var(--font-display)">Everything is running.</span><p>Page titles, the hero sentence, group names, big numbers (lining, tabular).</p></div>
   <div class="spec"><span class="who">Text · Cal Sans 2 VF 400 to 600</span><span class="big" style="font:400 1.25rem/1.45 var(--font-text)">Since 14:02 UTC (38 min). The other 12 services are up. 99.97 %</span><p>Body 16/24, secondary 14/20, meta 13/16, never under 12 px. Tabular figures everywhere.</p></div>
   <div class="spec"><span class="who">Name only · Borel Display</span><span class="big" style="font:400 3rem/1.3 var(--font-brand)">Hora</span><p>Beside the mark, nowhere else. Nudged down 0.16 em for its tall loops.</p></div>
-  <div class="spec"><span class="who">Code · JetBrains Mono</span><span class="big" style="font:400 0.95rem/1.6 var(--font-mono)">hora probe api --confirm<br>up from 3/3 vantage points</span><p>Config, CLI, captured answers.</p></div>
+  <div class="spec"><span class="who">Code · Mona Sans Mono</span><span class="big" style="font:400 0.95rem/1.6 var(--font-mono)">hora probe api --confirm<br>up from 3/3 vantage points</span><p>Config, CLI, captured answers.</p></div>
 </div>
 <div class="scale-row" aria-label="Spacing scale">
   <div><i style="width:4px;height:4px"></i>4</div><div><i style="width:8px;height:8px"></i>8</div><div><i style="width:12px;height:12px"></i>12</div><div><i style="width:16px;height:16px"></i>16</div><div><i style="width:24px;height:24px"></i>24</div><div><i style="width:32px;height:32px"></i>32</div><div><i style="width:48px;height:48px"></i>48</div>
@@ -1034,7 +1034,7 @@ a.row:hover { background: color-mix(in srgb, var(--ground-raised) 55%, transpare
 <li><a href="assets/owl-up.svg">assets/owl-up.svg</a><span>+ degraded, down, maint, none</span></li>
 <li><a href="assets/variant-b-clock.svg">assets/variant-b-clock.svg</a><span>alternative</span></li>
 <li><a href="assets/variant-c-lantern.svg">assets/variant-c-lantern.svg</a><span>alternative</span></li>
-<li><a href="fonts/">fonts/</a><span>Fraunces, Cal Sans 2, Borel, JetBrains Mono (OFL)</span></li>
+<li><a href="fonts/">fonts/</a><span>Fraunces, Cal Sans 2, Borel, Mona Sans Mono (OFL)</span></li>
 <li><a href="brand.md">brand.md §12</a><span>Starlight custom.css, ready to paste</span></li>
 <li><a href="src/">src/</a><span>the Python that writes every page</span></li>
 </ul></div>

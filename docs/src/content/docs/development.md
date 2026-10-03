@@ -67,6 +67,6 @@ Hora is under the [MIT licence](https://github.com/uplg/hora/blob/main/LICENSE).
 The status page embeds the [Cal Sans](https://github.com/calcom/font) font,
 under the SIL Open Font License (see
 [`crates/hora-web/assets/OFL.txt`](https://github.com/uplg/hora/blob/main/crates/hora-web/assets/OFL.txt)).
-This site also uses Fraunces, Borel Display and JetBrains Mono, all under
+This site also uses Fraunces, Borel Display and Mona Sans Mono, all under
 the same licence; the licence files sit next to the fonts in
 `docs/public/fonts/`.
