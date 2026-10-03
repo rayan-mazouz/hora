@@ -199,7 +199,12 @@ pub async fn connect(database_path: &str) -> anyhow::Result<Store> {
         .busy_timeout(Duration::from_secs(5))
         // Keep the hot index pages resident across the 5s summary rebuilds
         // (negative = KiB, so this is 16 MiB rather than the 2 MiB default).
-        .pragma("cache_size", "-16000");
+        .pragma("cache_size", "-16000")
+        // A checkpoint rewinds the WAL but leaves the file at its high-water
+        // mark, so one burst (long reads pinning a snapshot while the prune
+        // writes) kept 100 MB+ on disk. Truncate it back to 64 MiB after a
+        // checkpoint instead.
+        .pragma("journal_size_limit", "67108864");
 
     // WAL lets readers run while one writer (the scheduler) inserts, so a roomy
     // pool keeps the parallel summary queries from queueing.
