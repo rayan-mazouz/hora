@@ -476,6 +476,39 @@ async fn incidents_between_selects_every_overlap() {
 }
 
 #[tokio::test]
+async fn incident_marks_give_the_last_end_and_the_open_start() {
+    let pool = memory_pool().await;
+    for (monitor, started, ended) in [
+        ("calm", 10, Some(20)),
+        ("calm", 30, Some(45)),
+        ("down", 10, Some(20)),
+        ("down", 50, None),
+        ("first", 70, None),
+    ] {
+        sqlx::query(
+            "INSERT INTO incidents (monitor_id, started_at, ended_at, created_at) \
+                 VALUES (?, ?, ?, ?)",
+        )
+        .bind(monitor)
+        .bind(started)
+        .bind(ended)
+        .bind(started)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let marks = super::incident_marks(&pool).await.unwrap();
+    let mark = |last_end, open_since| super::IncidentMarks {
+        last_end,
+        open_since,
+    };
+    assert_eq!(marks["calm"], mark(Some(45), None));
+    assert_eq!(marks["down"], mark(Some(20), Some(50)));
+    assert_eq!(marks["first"], mark(None, Some(70)));
+    assert!(!marks.contains_key("never"));
+}
+
+#[tokio::test]
 async fn daily_all_ignores_data_past_until() {
     let pool = memory_pool().await;
     let day0 = 10 * SECONDS_PER_DAY;

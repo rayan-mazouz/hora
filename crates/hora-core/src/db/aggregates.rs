@@ -18,7 +18,7 @@ pub struct DayRow {
 }
 
 /// A single latency sample, also serialized directly by the latency API.
-#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct Point {
     pub t: i64,
     pub latency_ms: i64,

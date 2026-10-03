@@ -3,7 +3,7 @@
 use sqlx::SqlitePool;
 
 /// An automatically recorded incident from a down/up transition.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Incident {
     pub id: i64,
     pub monitor_id: String,
@@ -129,6 +129,45 @@ pub async fn recent_incidents(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec
     .bind(limit)
     .fetch_all(pool)
     .await
+}
+
+/// Where a monitor stands in its incident log: when its last finished
+/// incident ended, and since when it is down if an incident is open.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IncidentMarks {
+    pub last_end: Option<i64>,
+    pub open_since: Option<i64>,
+}
+
+/// Every monitor's [`IncidentMarks`], in one grouped pass over the incident
+/// log (one row per outage: small next to the checks), for the status page's
+/// "down since" and "no incident in N days".
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn incident_marks(
+    pool: &SqlitePool,
+) -> sqlx::Result<std::collections::HashMap<String, IncidentMarks>> {
+    let rows = sqlx::query_as::<_, (String, Option<i64>, Option<i64>)>(
+        "SELECT monitor_id, MAX(ended_at), \
+            MIN(CASE WHEN ended_at IS NULL THEN started_at END) \
+         FROM incidents GROUP BY monitor_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, last_end, open_since)| {
+            (
+                id,
+                IncidentMarks {
+                    last_end,
+                    open_since,
+                },
+            )
+        })
+        .collect())
 }
 
 /// Every incident overlapping `[since, until)`: started before `until` and
