@@ -1,29 +1,39 @@
 //! Core of Hora: configuration, probing, storage, TLS-expiry and scheduling.
 
+pub mod announce;
 pub mod cert;
 pub mod coalesce;
 pub mod config;
-pub mod confirm;
+mod connect;
 pub mod db;
 pub mod digest;
 pub mod doctor;
+mod domain_expiry;
 mod exec;
+pub mod fmt;
+mod heartbeat;
+pub mod histogram;
 pub mod http;
 pub mod import;
+pub mod maintenance;
+pub mod mesh;
 pub mod notifications;
-pub mod peer;
 pub mod postmortem;
 pub mod probe;
 mod rdap;
 mod release;
 pub mod report;
 pub mod scheduler;
+pub mod silence;
 pub mod slo;
+pub mod status;
 pub mod supervisor;
+#[cfg(test)]
+mod testing;
 pub mod timeline;
 pub mod topology;
 pub mod tune;
-pub mod vantage;
+mod tunnel;
 
 /// Seconds in a day (UTC), shared across the time-bucketing logic.
 pub const SECONDS_PER_DAY: i64 = 86_400;
@@ -33,6 +43,33 @@ pub const SECONDS_PER_DAY: i64 = 86_400;
 /// belongs in a configured `[[maintenance]]` window, which is visible on the
 /// status page.
 pub const MAX_SILENCE_SECS: u64 = 7 * 24 * 3600;
+
+// Caps on free text written through the HTTP API, the CLI or `hora top`, so a
+// record looks the same whichever door it came in through and a buggy hook or
+// producer cannot bloat the database. Counted in characters.
+
+/// An event marker's title (`hora event`, `POST /api/event`).
+pub const MAX_EVENT_TITLE_CHARS: usize = 200;
+/// An announcement's banner title.
+pub const MAX_ANNOUNCE_TITLE_CHARS: usize = 200;
+/// An announcement's banner body.
+pub const MAX_ANNOUNCE_BODY_CHARS: usize = 500;
+/// The free-text reason recorded with an ad-hoc silence.
+pub const MAX_SILENCE_REASON_CHARS: usize = 500;
+/// A pushed alert's title (`POST /api/monitors/{id}/alert`).
+pub const MAX_ALERT_TITLE_CHARS: usize = 200;
+/// A push heartbeat's `msg`, and a pushed alert's message.
+pub const MAX_PUSH_MSG_CHARS: usize = 500;
+
+/// `text` trimmed, cut to at most `max_chars` characters, its control
+/// characters (bar newlines and tabs) replaced (see [`fmt::printable`]).
+#[must_use]
+pub fn bounded(text: &str, max_chars: usize) -> String {
+    fmt::printable(text.trim())
+        .chars()
+        .take(max_chars)
+        .collect()
+}
 
 /// Parse a human duration like `90s`, `10m`, `2h`, `1d` or a concatenation
 /// (`1h30m`) into seconds. Returns `None` for anything unparseable or zero,

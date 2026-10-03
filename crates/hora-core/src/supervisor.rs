@@ -4,7 +4,9 @@
 //! On SIGHUP or a change to the config file, the file is re-read and the running
 //! monitor tasks are reconciled: new monitors start, removed ones stop, changed
 //! ones restart - unchanged monitors keep running, so a reload never interrupts
-//! existing checks.
+//! existing checks. Each monitor's (and peer's) alert state lives here, outside
+//! its task, so a restarted task neither re-announces an outage nor loses its
+//! recovery; a task that died (a panic) is noticed, logged and restarted.
 //!
 //! `server.bind` is read once at startup; changing it still requires a restart.
 //! Everything else - monitors, peers (the surveillance mesh), notification
@@ -15,40 +17,113 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use crate::db::Store;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use reqwest::Client;
-use sqlx::SqlitePool;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::coalesce::{self, AlertMsg};
 use crate::config::{self, Config, Monitor, Peer};
+use crate::mesh::peer::spawn_watch;
 use crate::notifications::{self, Notifiers};
-use crate::peer::spawn_watch;
-use crate::scheduler;
+use crate::scheduler::{self, AlertCell};
 
-struct Running {
-    monitor: Monitor,
+/// A running task and the spec (monitor or peer) it was spawned for.
+struct Running<T> {
+    spec: T,
     task: JoinHandle<()>,
 }
 
-struct RunningPeer {
-    peer: Peer,
-    task: JoinHandle<()>,
+/// The tasks of one kind (monitors or peer watches), with the alert state of
+/// each id. The state outlives the tasks: it is dropped only when the id leaves
+/// the configuration.
+struct Fleet<T> {
+    running: HashMap<String, Running<T>>,
+    alert_states: HashMap<String, AlertCell>,
 }
+
+impl<T> Default for Fleet<T> {
+    fn default() -> Self {
+        Self {
+            running: HashMap::new(),
+            alert_states: HashMap::new(),
+        }
+    }
+}
+
+impl<T: PartialEq> Fleet<T> {
+    /// Stop the tasks whose id left `desired` or whose spec changed, and drop
+    /// the alert state of the ids that left.
+    fn retire(&mut self, desired: &HashMap<&str, &T>) {
+        self.running
+            .retain(|id, run| match desired.get(id.as_str()) {
+                Some(spec) if **spec == run.spec => true,
+                _ => {
+                    run.task.abort();
+                    false
+                }
+            });
+        self.alert_states
+            .retain(|id, _| desired.contains_key(id.as_str()));
+    }
+
+    /// The alert state for `id`, created empty on first use.
+    fn alert_state(&mut self, id: &str) -> AlertCell {
+        self.alert_states.entry(id.to_owned()).or_default().clone()
+    }
+
+    /// Remove (and log) every task that finished on its own - only a panic
+    /// does that before shutdown - so the next reconcile restarts it with its
+    /// alert state. Returns whether any was found.
+    async fn reap_dead(&mut self, what: &str) -> bool {
+        let dead: Vec<String> = self
+            .running
+            .iter()
+            .filter(|(_, run)| run.task.is_finished())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &dead {
+            if let Some(run) = self.running.remove(id) {
+                // A JoinError's Display carries the panic message.
+                let cause = run
+                    .task
+                    .await
+                    .err()
+                    .map_or_else(|| "it returned".to_owned(), |err| err.to_string());
+                error!(id = %id, "{what} task stopped unexpectedly ({cause}); restarting it");
+            }
+        }
+        !dead.is_empty()
+    }
+
+    /// Await every task (they observe the shutdown signal themselves).
+    async fn drain(&mut self) {
+        for (_, run) in self.running.drain() {
+            let _ = run.task.await;
+        }
+    }
+}
+
+/// How often the supervisor checks for tasks that died (a panic in a probe or
+/// in the timer, which nothing else would notice: a monitor would silently
+/// stop being checked).
+const LIVENESS_CHECK: Duration = Duration::from_secs(30);
 
 /// The shared handles threaded from [`start`] through the reload loop into each
 /// spawned monitor: the database pool, the notifier client (used to rebuild
 /// channels on reload), the hot-swappable notifier set, and the scheduler
 /// liveness beacon.
 struct Deps {
-    pool: SqlitePool,
+    store: Store,
     client: Client,
+    /// The monitors' probe clients, one per proxy (see [`ProbeClients`]).
+    probe_clients: Mutex<ProbeClients>,
     notifier: Notifiers,
     /// Inbox of the alert coalescer (root-cause grouping); every monitor loop
     /// gets a clone.
@@ -71,7 +146,7 @@ pub struct Handle {
 pub fn start(
     initial: Config,
     config_path: PathBuf,
-    pool: SqlitePool,
+    store: Store,
     client: Client,
     last_tick: Arc<AtomicU64>,
     shutdown: watch::Receiver<bool>,
@@ -86,8 +161,9 @@ pub fn start(
         shutdown.clone(),
     );
     let deps = Deps {
-        pool,
+        store,
         client,
+        probe_clients: Mutex::default(),
         notifier: Arc::clone(&notifier),
         alerts: alerts_tx,
         last_tick,
@@ -115,10 +191,10 @@ async fn supervise(
     coalescer: JoinHandle<()>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let mut running: HashMap<String, Running> = HashMap::new();
-    let mut running_peers: HashMap<String, RunningPeer> = HashMap::new();
-    reconcile(&mut running, &rx, &deps, &shutdown);
-    reconcile_peers(&mut running_peers, &rx, &deps, &shutdown);
+    let mut monitors: Fleet<Monitor> = Fleet::default();
+    let mut peers: Fleet<Peer> = Fleet::default();
+    reconcile(&mut monitors, &rx, &deps, &shutdown);
+    reconcile_peers(&mut peers, &rx, &deps, &shutdown);
 
     // The raw text last applied: a file event whose content is unchanged (a touch,
     // or a spurious event from some filesystems) is ignored, so a flapping watcher
@@ -126,9 +202,29 @@ async fn supervise(
     let mut last_raw = std::fs::read_to_string(&config_path).unwrap_or_default();
 
     let mut reloads = reload_signals(&config_path);
+    let mut liveness = tokio::time::interval(LIVENESS_CHECK);
+    liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut coalescer_dead_logged = false;
     loop {
         let signal = tokio::select! {
             signal = reloads.recv() => signal,
+            _ = liveness.tick() => {
+                // A task finishing because shutdown began is not a death.
+                if *shutdown.borrow() {
+                    break;
+                }
+                if monitors.reap_dead("monitor").await {
+                    reconcile(&mut monitors, &rx, &deps, &shutdown);
+                }
+                if peers.reap_dead("peer watch").await {
+                    reconcile_peers(&mut peers, &rx, &deps, &shutdown);
+                }
+                if coalescer.is_finished() && !coalescer_dead_logged {
+                    coalescer_dead_logged = true;
+                    error!("the alert coalescer stopped: down and recovered alerts can no longer be delivered until restart");
+                }
+                continue;
+            }
             _ = shutdown.changed() => break,
         };
         if signal.is_none() {
@@ -166,8 +262,8 @@ async fn supervise(
                 if tx.send(Arc::clone(&config)).is_err() {
                     break;
                 }
-                reconcile(&mut running, &rx, &deps, &shutdown);
-                reconcile_peers(&mut running_peers, &rx, &deps, &shutdown);
+                reconcile(&mut monitors, &rx, &deps, &shutdown);
+                reconcile_peers(&mut peers, &rx, &deps, &shutdown);
                 info!(
                     "configuration reloaded ({} monitors, {} peers, {} channels)",
                     config.monitors.len(),
@@ -181,12 +277,8 @@ async fn supervise(
 
     // On shutdown the monitor and peer-watch tasks observe the same signal and
     // break; await them, then the coalescer (which drains its queue).
-    for (_, run) in running.drain() {
-        let _ = run.task.await;
-    }
-    for (_, run) in running_peers.drain() {
-        let _ = run.task.await;
-    }
+    monitors.drain().await;
+    peers.drain().await;
     let _ = coalescer.await;
 }
 
@@ -195,9 +287,10 @@ async fn supervise(
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// Diff running tasks against the latest config: stop removed or changed
-/// monitors, start new or changed ones, leave unchanged ones untouched.
+/// monitors, start new or changed ones, leave unchanged ones untouched. A
+/// restarted monitor resumes its alert state (see [`AlertCell`]).
 fn reconcile(
-    running: &mut HashMap<String, Running>,
+    fleet: &mut Fleet<Monitor>,
     rx: &watch::Receiver<Arc<Config>>,
     deps: &Deps,
     shutdown: &watch::Receiver<bool>,
@@ -206,20 +299,17 @@ fn reconcile(
 
     let desired: HashMap<&str, &Monitor> =
         config.monitors.iter().map(|m| (m.id.as_str(), m)).collect();
+    fleet.retire(&desired);
 
-    running.retain(|id, run| match desired.get(id.as_str()) {
-        Some(monitor) if **monitor == run.monitor => true,
-        _ => {
-            run.task.abort();
-            false
-        }
-    });
-
+    let mut probe_clients = deps
+        .probe_clients
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    probe_clients.retain_used(&config);
     for monitor in &config.monitors {
-        if !running.contains_key(&monitor.id) {
-            // Each monitor gets its own client so it can carry its own proxy.
+        if !fleet.running.contains_key(&monitor.id) {
             // The proxy URL is validated at config load, so this rarely fails.
-            let client = match crate::http::probe_client(monitor.proxy.as_deref()) {
+            let client = match probe_clients.get(monitor.proxy()) {
                 Ok(client) => client,
                 Err(err) => {
                     warn!(monitor = %monitor.id, "monitor not started, bad proxy: {err:#}");
@@ -230,19 +320,20 @@ fn reconcile(
                 monitor.clone(),
                 rx.clone(),
                 scheduler::MonitorDeps {
-                    pool: deps.pool.clone(),
+                    store: deps.store.clone(),
                     client,
                     confirm_client: deps.client.clone(),
                     notifier: Arc::clone(&deps.notifier),
                     alerts: deps.alerts.clone(),
                     last_tick: Arc::clone(&deps.last_tick),
+                    alert_state: fleet.alert_state(&monitor.id),
                 },
                 shutdown.clone(),
             );
-            running.insert(
+            fleet.running.insert(
                 monitor.id.clone(),
                 Running {
-                    monitor: monitor.clone(),
+                    spec: monitor.clone(),
                     task,
                 },
             );
@@ -250,11 +341,47 @@ fn reconcile(
     }
 }
 
+/// The probe clients monitors share: one for every monitor without a proxy,
+/// one per proxy URL for the others. A client carries its own TLS setup and
+/// connection pool - about 45 KB - so one per monitor cost 450 MB at 10,000
+/// monitors. Monitors on one client share its pool, as requests to the same
+/// host from one process do anyway; nothing else about a probe client is
+/// per monitor (credentials and timeouts are set per request).
+#[derive(Default)]
+struct ProbeClients {
+    clients: HashMap<Option<String>, Client>,
+}
+
+impl ProbeClients {
+    /// The client for `proxy`, built on first use.
+    fn get(&mut self, proxy: Option<&str>) -> reqwest::Result<Client> {
+        let key = proxy.map(str::to_owned);
+        if let Some(client) = self.clients.get(&key) {
+            return Ok(client.clone());
+        }
+        let client = crate::http::probe_client(proxy)?;
+        self.clients.insert(key, client.clone());
+        Ok(client)
+    }
+
+    /// Forget the clients of proxies no monitor uses any more (running
+    /// monitors keep their own handle on theirs until they restart).
+    fn retain_used(&mut self, config: &Config) {
+        self.clients.retain(|proxy, _| {
+            proxy.is_none()
+                || config
+                    .monitors
+                    .iter()
+                    .any(|monitor| monitor.proxy() == proxy.as_deref())
+        });
+    }
+}
+
 /// Diff running peer-watch tasks against the latest config: stop removed or
 /// changed peers, start new or changed ones, leave unchanged ones running. Only
 /// watched peers (those with `expect_every_secs`) get a task.
 fn reconcile_peers(
-    running: &mut HashMap<String, RunningPeer>,
+    fleet: &mut Fleet<Peer>,
     rx: &watch::Receiver<Arc<Config>>,
     deps: &Deps,
     shutdown: &watch::Receiver<bool>,
@@ -267,29 +394,23 @@ fn reconcile_peers(
         .filter(|peer| peer.is_watched())
         .map(|peer| (peer.id.as_str(), peer))
         .collect();
-
-    running.retain(|id, run| match desired.get(id.as_str()) {
-        Some(peer) if **peer == run.peer => true,
-        _ => {
-            run.task.abort();
-            false
-        }
-    });
+    fleet.retire(&desired);
 
     for peer in config.peers.iter().filter(|peer| peer.is_watched()) {
-        if !running.contains_key(&peer.id) {
+        if !fleet.running.contains_key(&peer.id) {
             let task = spawn_watch(
                 peer.clone(),
                 rx.clone(),
-                deps.pool.clone(),
+                deps.store.clone(),
                 deps.client.clone(),
                 Arc::clone(&deps.notifier),
+                fleet.alert_state(&peer.id),
                 shutdown.clone(),
             );
-            running.insert(
+            fleet.running.insert(
                 peer.id.clone(),
-                RunningPeer {
-                    peer: peer.clone(),
+                Running {
+                    spec: peer.clone(),
                     task,
                 },
             );
@@ -371,4 +492,33 @@ fn file_watcher(config_path: &Path, tx: mpsc::Sender<()>) -> notify::Result<Reco
     })?;
     watcher.watch(&directory, RecursiveMode::NonRecursive)?;
     Ok(watcher)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitors_share_a_probe_client_per_proxy() {
+        let mut clients = ProbeClients::default();
+        clients.get(None).unwrap();
+        clients.get(None).unwrap();
+        clients.get(Some("http://proxy.example:3128")).unwrap();
+        clients.get(Some("http://proxy.example:3128")).unwrap();
+        assert_eq!(
+            clients.clients.len(),
+            2,
+            "one client per proxy, not per monitor"
+        );
+
+        // A reload that drops the proxied monitor forgets its client.
+        let config = config::parse(
+            "[page]\n[server]\n[[monitors]]\nid = \"a\"\nname = \"A\"\n\
+             target = \"https://example.com\"\ninterval_secs = 60\n",
+        )
+        .unwrap();
+        clients.retain_used(&config);
+        assert_eq!(clients.clients.len(), 1);
+        assert!(clients.clients.contains_key(&None));
+    }
 }

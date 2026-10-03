@@ -3,28 +3,21 @@
 use async_trait::async_trait;
 use reqwest::Client;
 
-use crate::util::{
-    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, event_suffix,
-    latency_suffix, send_retrying, topology_suffix, vantage_suffix,
-};
-use crate::{AlertSeverity, Event, Notifier};
+use crate::message::{Message, Urgency};
+use crate::util::{Unit, send_retrying};
+use crate::{Event, Notifier};
 
 const PUSHOVER_API: &str = "https://api.pushover.net/1/messages.json";
+
+/// Pushover rejects a message over 1024 characters (and a title over 250;
+/// ours is a short constant).
+const HEAD_MAX: usize = 256;
+const BODY_MAX: usize = 1024 - HEAD_MAX - 1;
 
 pub struct PushoverNotifier {
     client: Client,
     token: String,
     user: String,
-}
-
-/// A release event as one text: what is out, what runs, where the notes are.
-fn release_text(release: &crate::Release<'_>) -> String {
-    format!(
-        "RELEASE: {}: {}\n{}",
-        release.monitor,
-        crate::util::release_phrase(release),
-        release.url
-    )
 }
 
 impl PushoverNotifier {
@@ -38,89 +31,18 @@ impl PushoverNotifier {
     }
 
     fn message(event: Event<'_>) -> (String, i8) {
-        match event {
-            Event::Down {
-                monitor,
-                error,
-                cause,
-                impacted,
-                vantage,
-                event,
-            } => {
-                let suffix = topology_suffix(cause, impacted);
-                let vantage = vantage_suffix(vantage);
-                let event = event_suffix(event);
-                let detail = error.map_or_else(String::new, |e| format!("\n{e}"));
-                (
-                    format!("DOWN: {monitor}{detail}{suffix}{vantage}{event}"),
-                    1,
-                )
-            }
-            Event::Degraded {
-                monitor,
-                latency_ms,
-            } => (
-                format!("DEGRADED: {monitor}{}", latency_suffix(latency_ms)),
-                0,
-            ),
-            Event::Recovered { monitor } => (format!("RECOVERED: {monitor}"), -1),
-            Event::CertExpiring { monitor, days_left } => (
-                format!("CERT: {monitor} {}", cert_expiry_phrase(days_left)),
-                0,
-            ),
-            Event::DomainExpiring {
-                monitor,
-                domain,
-                days_left,
-            } => (
-                format!(
-                    "DOMAIN: {monitor} {}",
-                    domain_expiry_phrase(domain, days_left)
-                ),
-                0,
-            ),
-            Event::ReleaseAvailable(release) => (release_text(&release), 0),
-            Event::Digest { period, summary } => (format!("DIGEST ({period}):\n{summary}"), -1),
-            Event::PeerLinkDegraded { peer, witness } => (
-                format!("PEER: {peer} unreachable, but {witness} sees it up (partition)"),
-                0,
-            ),
-            Event::CertChanged {
-                monitor,
-                old_fingerprint,
-                new_fingerprint,
-            } => (
-                format!("CERT CHANGED: {monitor}\nold: {old_fingerprint}\nnew: {new_fingerprint}"),
-                1,
-            ),
-            Event::BudgetBurn {
-                monitor,
-                burn_rate_x10,
-                window,
-                exhausted_in_secs,
-            } => (
-                format!(
-                    "BUDGET: {monitor} {}",
-                    budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)
-                ),
-                1,
-            ),
-            Event::Alert {
-                monitor,
-                severity,
-                title,
-                message,
-            } => {
-                // Pushover priority: -1 quiet, 0 normal, 1 high. We stop at 1 -
-                // priority 2 (emergency) would require retry/expire parameters.
-                let priority = match severity {
-                    AlertSeverity::Info => -1,
-                    AlertSeverity::Warning => 0,
-                    AlertSeverity::Error | AlertSeverity::Critical => 1,
-                };
-                (alert_phrase(monitor, severity, title, message), priority)
-            }
-        }
+        let message = Message::render(event).fit(HEAD_MAX, BODY_MAX, Unit::Chars);
+        (message.plain(), priority(message.urgency()))
+    }
+}
+
+/// Pushover priority: -1 quiet, 0 normal, 1 high. We stop at 1 - priority 2
+/// (emergency) would require retry/expire parameters.
+fn priority(urgency: Urgency) -> i8 {
+    match urgency {
+        Urgency::Quiet => -1,
+        Urgency::Notice | Urgency::Warning => 0,
+        Urgency::High | Urgency::Critical => 1,
     }
 }
 
@@ -144,9 +66,46 @@ impl Notifier for PushoverNotifier {
         // The user key is a quasi-secret too: it lets anyone message the user.
         send_retrying(
             build,
-            "pushover",
+            self.name(),
             &[self.token.as_str(), self.user.as_str()],
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AlertSeverity;
+
+    #[test]
+    fn maps_events_to_text_and_priority() {
+        let (text, priority) = PushoverNotifier::message(Event::CertChanged {
+            monitor: "API",
+            old_fingerprint: "aa",
+            new_fingerprint: "bb",
+        });
+        assert!(text.starts_with("API TLS certificate changed unexpectedly\nold: aa\nnew: bb"));
+        assert_eq!(priority, 1);
+
+        let (_, priority) = PushoverNotifier::message(Event::Digest {
+            period: "week",
+            summary: "ok",
+        });
+        assert_eq!(priority, -1);
+    }
+
+    #[test]
+    fn long_alerts_fit_the_message_limit() {
+        let title = "t".repeat(200);
+        let message = "m".repeat(3000);
+        let (text, _) = PushoverNotifier::message(Event::Alert {
+            monitor: "API",
+            severity: AlertSeverity::Error,
+            title: &title,
+            message: &message,
+        });
+        assert!(text.chars().count() <= 1024, "{}", text.chars().count());
+        assert!(text.starts_with("[ERROR] API: ttt"));
     }
 }

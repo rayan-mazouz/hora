@@ -15,7 +15,7 @@ documents every option; this page covers the mechanics.
 | `[page]` | Status page title, days rendered in the uptime bars |
 | `[server]` | Bind address, database path, CORS, rate limits, viewer token |
 | `[[channels]]` | Named notification channels (Telegram, Discord, email, ...) |
-| `[alerts]` | Fail threshold, cert expiry warning, retention, alert grouping, channel watchdog |
+| `[alerts]` | Fail threshold, cert expiry warning, retention, alert grouping, channel watchdog, the quiet channels for local-only downs (`notify_unconfirmed`) |
 | `[[maintenance]]` | Scheduled windows that mute alerts |
 | `[[incidents]]` | Manual announcements shown as a status page banner |
 | `[[monitors]]` | The monitors themselves |
@@ -51,8 +51,12 @@ changed ones are started or stopped, and the notification channels are
 rebuilt - adding a Telegram token takes effect live too. Existing checks never
 pause, so there is no window where nothing is watching.
 
-Only `server.bind` and the API rate-limit settings are read once at startup
-and require a restart.
+A few `[server]` settings are read once at startup and need a restart:
+`bind`, `allowed_origins`, the rate limit (`rate_limit_burst`,
+`rate_limit_refill_secs`) and `client_ip_header`.
+
+A reload that fails validation is refused: Hora logs why and keeps running
+with the previous config.
 
 ## Validation
 
@@ -66,6 +70,23 @@ pre-deploy hooks. Validation is strict: inverted maintenance windows, cyclic
 tokens and malformed cron schedules are all rejected at load, not discovered
 at 3 a.m.
 
+### Bounds
+
+Values that cannot work are refused too:
+
+| Setting | Accepted |
+| --- | --- |
+| `interval_secs`, `timeout_secs`, `expect_every_secs`, `health.interval_secs` | at most 30 days (2592000) |
+| `expected_status` | 100 to 599 |
+| An IPv6 `tcp` target | bracketed: `[::1]:80`, not `::1:80` |
+| `dns_resolver` | an IP and a port (`8.8.8.8:53`, `[2620:fe::fe]:53`), not a hostname |
+
+A `timeout_secs` longer than `interval_secs` is accepted with a warning.
+
+Before upgrading, run `hora check` with the **new** binary against your
+config: a key or a value an older release accepted may be refused now (see
+[Upgrading](../upgrading/)).
+
 ## Retention and downsampling
 
 Raw checks are kept per monitor (`retention_days`, default
@@ -74,7 +95,22 @@ rolled up into an hourly bucket; hourly buckets become daily ones after 90
 days, kept for a year. The daily
 uptime bars keep working beyond the raw retention window, and the database
 never grows forever. Closed incidents age out after a year; expired silences
-are swept too.
+are swept too. The prune runs every 6 hours (the first one 5 minutes after
+start) and deletes five minutes of checks per statement, pausing in
+between, so the checks being recorded never wait on it. A tick spends at
+most two minutes deleting: after lowering a retention a lot, the backlog is
+worked off over the following ticks, five minutes apart, with the hourly
+roll-ups in between. The WAL file
+(`<db>-wal`) is truncated back to 64 MiB after each checkpoint.
+
+### Removed monitors
+
+Taking a monitor out of the config does not delete its history at once.
+Hora notes when the id disappeared, logs a warning that names it and the
+date its data will go, and deletes its checks, aggregates and incidents
+**7 days** later. Put the id back within the week (after a rename, or a
+monitor commented out for an afternoon) and everything is kept. Watched
+peers are treated the same way, by their `listen_id`.
 
 For backups, `hora backup <dest>` snapshots the live database with SQLite's
 `VACUUM INTO` - see the [CLI reference](../reference/cli/#hora-backup).

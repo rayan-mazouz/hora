@@ -38,7 +38,7 @@
 //! `maxretries` becomes a comment: Hora's equivalent is the global
 //! `[alerts].fail_threshold`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use anyhow::{Context, Result};
@@ -107,11 +107,15 @@ pub fn convert_kuma_to_hora(json_str: &str) -> Result<String> {
     let mut out = String::new();
     out.push_str("# Imported from Uptime Kuma\n# Review and adjust as needed\n\n");
 
+    // Kuma names need not be unique, Hora ids must be: a clash gets a numeric
+    // suffix instead of producing a config that fails validation.
+    let mut ids = HashSet::new();
     for (idx, monitor) in backup.monitor_list.iter().enumerate() {
         if monitor.monitor_type == "group" {
             continue; // Folders become `group = "..."` on their children.
         }
-        convert_monitor(&mut out, monitor, idx, &group_names);
+        let id = unique_id(&sanitize_id(&monitor.name, idx), &mut ids);
+        convert_monitor(&mut out, monitor, &id, &group_names);
     }
 
     Ok(out)
@@ -120,45 +124,46 @@ pub fn convert_kuma_to_hora(json_str: &str) -> Result<String> {
 fn convert_monitor(
     out: &mut String,
     monitor: &KumaMonitor,
-    idx: usize,
+    id: &str,
     group_names: &HashMap<i64, &str>,
 ) {
-    let id = sanitize_id(&monitor.name, idx);
-    let name = escape_toml_string(&monitor.name);
-
     // Anything we cannot probe becomes a commented stub instead of a half
     // valid entry: emitting `kind = "http"` without a target would make the
     // whole generated file fail validation.
     let Some(kind) = kind_for(&monitor.monitor_type) else {
+        // `{:?}` escapes newlines and control characters, which would
+        // otherwise end the comment and inject a line into the file.
         let _ = writeln!(
             out,
-            "# Skipped \"{name}\": unsupported Uptime Kuma type {:?}\n",
-            monitor.monitor_type
+            "# Skipped {:?}: unsupported Uptime Kuma type {:?}\n",
+            monitor.name, monitor.monitor_type
         );
         return;
     };
 
-    let _ = writeln!(out, "[[monitors]]\nid = \"{id}\"\nname = \"{name}\"");
+    let _ = writeln!(out, "[[monitors]]\nid = {}", toml_string(id));
+    let _ = writeln!(out, "name = {}", toml_string(&monitor.name));
     let _ = writeln!(out, "kind = \"{kind}\"");
     if let Some(group) = monitor.parent.and_then(|parent| group_names.get(&parent)) {
-        let _ = writeln!(out, "group = \"{}\"", escape_toml_string(group));
+        let _ = writeln!(out, "group = {}", toml_string(group));
     }
     match kind {
         "http" => convert_http(out, monitor),
         "tcp" => {
             if let (Some(hostname), Some(port)) = (&monitor.hostname, monitor.port) {
-                let _ = writeln!(out, "target = \"{}:{port}\"", escape_toml_string(hostname));
+                let target = host_port(hostname, port);
+                let _ = writeln!(out, "target = {}", toml_string(&target));
             }
         }
         "icmp" => {
             if let Some(hostname) = &monitor.hostname {
-                let _ = writeln!(out, "target = \"{}\"", escape_toml_string(hostname));
+                let _ = writeln!(out, "target = {}", toml_string(hostname));
             }
         }
         "dns" => convert_dns(out, monitor),
         "push" => {
             if let Some(token) = &monitor.push_token {
-                let _ = writeln!(out, "push_token = \"{}\"", escape_toml_string(token));
+                let _ = writeln!(out, "push_token = {}", toml_string(token));
             } else {
                 let _ = writeln!(out, "# push_token = \"...\"  # set a token");
             }
@@ -180,18 +185,18 @@ fn convert_monitor(
 
 fn convert_http(out: &mut String, monitor: &KumaMonitor) {
     if let Some(url) = &monitor.url {
-        let _ = writeln!(out, "target = \"{}\"", escape_toml_string(url));
+        let _ = writeln!(out, "target = {}", toml_string(url));
     }
     if let Some(keyword) = &monitor.keyword {
-        let _ = writeln!(out, "keyword = \"{}\"", escape_toml_string(keyword));
+        let _ = writeln!(out, "keyword = {}", toml_string(keyword));
         if monitor.invert_keyword {
             let _ = writeln!(out, "keyword_invert = true");
         }
     }
     if let Some(path) = &monitor.json_path {
-        let _ = writeln!(out, "json_query = \"{}\"", escape_toml_string(path));
+        let _ = writeln!(out, "json_query = {}", toml_string(path));
         if let Some(expected) = &monitor.expected_value {
-            let _ = writeln!(out, "json_expected = \"{}\"", escape_toml_string(expected));
+            let _ = writeln!(out, "json_expected = {}", toml_string(expected));
         }
     }
     // Kuma's default is the 2xx range, which is also Hora's; a single exact
@@ -217,13 +222,7 @@ fn convert_http(out: &mut String, monitor: &KumaMonitor) {
         pairs.sort();
         let rendered: Vec<String> = pairs
             .iter()
-            .map(|(key, value)| {
-                format!(
-                    "\"{}\" = \"{}\"",
-                    escape_toml_string(key),
-                    escape_toml_string(value)
-                )
-            })
+            .map(|(key, value)| format!("{} = {}", toml_string(key), toml_string(value)))
             .collect();
         let _ = writeln!(out, "headers = {{ {} }}", rendered.join(", "));
     }
@@ -239,18 +238,36 @@ fn convert_http(out: &mut String, monitor: &KumaMonitor) {
 
 fn convert_dns(out: &mut String, monitor: &KumaMonitor) {
     if let Some(hostname) = &monitor.hostname {
-        let _ = writeln!(out, "target = \"{}\"", escape_toml_string(hostname));
+        let _ = writeln!(out, "target = {}", toml_string(hostname));
     }
     if let Some(record) = &monitor.dns_resolve_type {
-        let _ = writeln!(out, "dns_record = \"{}\"", escape_toml_string(record));
+        let _ = writeln!(out, "dns_record = {}", toml_string(record));
     }
-    if let Some(server) = &monitor.dns_resolve_server {
-        let port = monitor.port.unwrap_or(53);
-        let _ = writeln!(
-            out,
-            "dns_resolver = \"{}:{port}\"",
-            escape_toml_string(server)
-        );
+    // Kuma accepts a comma-separated list; Hora takes one resolver, by IP.
+    if let Some(server) = monitor
+        .dns_resolve_server
+        .as_deref()
+        .and_then(|servers| servers.split(',').map(str::trim).find(|s| !s.is_empty()))
+    {
+        let resolver = host_port(server, monitor.port.unwrap_or(53));
+        if server.parse::<std::net::IpAddr>().is_ok() {
+            let _ = writeln!(out, "dns_resolver = {}", toml_string(&resolver));
+        } else {
+            let _ = writeln!(
+                out,
+                "# dns_resolver {resolver:?} not supported: Hora needs the resolver's IP address"
+            );
+        }
+    }
+}
+
+/// `host:port`, with an IPv6 literal bracketed (`[2606:4700::1111]:53`), the
+/// only form Hora's `host:port` fields accept for it.
+fn host_port(host: &str, port: u16) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
     }
 }
 
@@ -284,12 +301,23 @@ fn sanitize_id(name: &str, idx: usize) -> String {
     }
 }
 
-fn escape_toml_string(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+/// `id`, or `id-2`, `id-3`... - the first not already taken.
+fn unique_id(id: &str, taken: &mut HashSet<String>) -> String {
+    let mut candidate = id.to_owned();
+    let mut suffix = 2;
+    while taken.contains(&candidate) {
+        candidate = format!("{id}-{suffix}");
+        suffix += 1;
+    }
+    taken.insert(candidate.clone());
+    candidate
+}
+
+/// A TOML string literal, quotes included, rendered by the `toml` serializer:
+/// every character a hand-rolled escaper could miss (control characters,
+/// lone quotes, backslashes) comes out valid.
+fn toml_string(text: &str) -> String {
+    toml::Value::String(text.to_owned()).to_string()
 }
 
 #[cfg(test)]
@@ -439,6 +467,58 @@ mod tests {
         }"#;
 
         let toml = convert_kuma_to_hora(json).unwrap();
-        assert!(toml.contains(r#"name = "He said \"hi\"""#));
+        let parsed: toml::Table = toml::from_str(&toml).expect("valid TOML");
+        assert_eq!(
+            parsed["monitors"][0]["name"].as_str(),
+            Some("He said \"hi\"")
+        );
+    }
+
+    #[test]
+    fn control_characters_and_duplicate_names_still_load() {
+        // A name with control characters, a duplicated name, and an unsupported
+        // monitor whose name tries to break out of its comment.
+        let json = r#"{
+            "monitorList": [
+                {"name": "Bell\u0007 and\ttab\u001b[0m", "type": "http", "url": "https://a.example"},
+                {"name": "Web", "type": "http", "url": "https://b.example"},
+                {"name": "Web", "type": "http", "url": "https://c.example"},
+                {"name": "x\n[[monitors]]\nid = \"evil\"", "type": "docker"}
+            ]
+        }"#;
+
+        let toml = convert_kuma_to_hora(json).unwrap();
+        let config = crate::config::parse_with_exec_dir(&format!("[page]\n[server]\n{toml}"), None)
+            .expect("generated config loads");
+        let ids: Vec<&str> = config.monitors.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["bell-and-tab-0m", "web", "web-2"]);
+        assert_eq!(config.monitors[0].name, "Bell\u{7} and\ttab\u{1b}[0m");
+    }
+
+    #[test]
+    fn dns_resolvers_are_bracketed_or_commented() {
+        let json = r#"{
+            "monitorList": [
+                {"name": "v6", "type": "dns", "hostname": "example.com",
+                 "dns_resolve_server": "2606:4700:4700::1111"},
+                {"name": "named", "type": "dns", "hostname": "example.com",
+                 "dns_resolve_server": "dns.google"},
+                {"name": "list", "type": "dns", "hostname": "example.com",
+                 "dns_resolve_server": "9.9.9.9, 1.1.1.1"}
+            ]
+        }"#;
+
+        let toml = convert_kuma_to_hora(json).unwrap();
+        assert!(
+            toml.contains(r#"dns_resolver = "[2606:4700:4700::1111]:53""#),
+            "{toml}"
+        );
+        assert!(
+            toml.contains("# dns_resolver \"dns.google:53\" not supported"),
+            "{toml}"
+        );
+        assert!(toml.contains(r#"dns_resolver = "9.9.9.9:53""#), "{toml}");
+        crate::config::parse_with_exec_dir(&format!("[page]\n[server]\n{toml}"), None)
+            .expect("generated config loads");
     }
 }

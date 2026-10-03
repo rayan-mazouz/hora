@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Public API · Pelican status</title>
+<meta name="description" content="Public API: uptime, response time and incidents.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#F2F0EA" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151A21" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/CalSansVF.woff2" as="font" type="font/woff2" crossorigin>
+<script>
+/* theme: system by default; the button cycles auto, light, dark and remembers (per viewer) */
+(function () {
+  var d = document.documentElement, k = 'hora-theme';
+  try { var t = localStorage.getItem(k); if (t) d.dataset.theme = t; } catch (e) {}
+  addEventListener('click', function (e) {
+    var b = e.target.closest('.theme-btn'); if (!b) return;
+    var next = { '': 'light', light: 'dark', dark: '' }[d.dataset.theme || ''];
+    if (next) d.dataset.theme = next; else delete d.dataset.theme;
+    b.setAttribute('aria-label', 'Theme: ' + (next || 'auto') + '. Change theme');
+    try { next ? localStorage.setItem(k, next) : localStorage.removeItem(k); } catch (e) {}
+  });
+})();
+</script>
+<style>
+@font-face { font-family: 'Fraunces Variable'; src: url('fonts/Fraunces-VF.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: 'Cal Sans'; src: url('fonts/CalSansVF.woff2') format('woff2'); font-weight: 400 700; font-display: swap; }
+@font-face { font-family: 'Borel Display'; src: url('fonts/BorelDisplay-Regular.woff2') format('woff2'); font-display: swap; }
+@font-face { font-family: 'Mona Sans Mono'; src: url('fonts/MonaSansMono.woff2') format('woff2'); font-weight: 200 900; font-display: swap; }
+
+:root { color-scheme: light dark; }
+:root[data-theme='light'] { color-scheme: light; }
+:root[data-theme='dark'] { color-scheme: dark; }
+
+:root {
+  /* raw palette: synthe.se (2026-08-17), unchanged */
+  --raw-cloud: #f2f0ea; --raw-cloud-deep: #e7e4db; --raw-ink: #1b222c; --raw-ink-soft: #525a66;
+  --raw-night: #151a21; --raw-night-raised: #1e2530; --raw-paper-dark: #eae7e0; --raw-muted-dark: #a8aeb8;
+  --raw-petrol: #0e5e68; --raw-petrol-soft: #4e8a92; --raw-petrol-wash: #d8e4e2;
+  --raw-petrol-bright: #63c0cb; --raw-petrol-dim: #3e7a84; --raw-petrol-wash-dark: #1d2a31;
+  --raw-warn: #b4633f; --raw-warn-dark: #d89372; --raw-down: #a5372a; --raw-down-dark: #e07a63;
+  --raw-blush: #e6a49a;
+
+  /* semantic (Maison's tokens.css) */
+  --ground: light-dark(var(--raw-cloud), var(--raw-night));
+  --ground-raised: light-dark(var(--raw-cloud-deep), var(--raw-night-raised));
+  --surface: light-dark(#faf9f5, #1a2029);
+  --line: light-dark(#d6d2c6, #2e3744);
+  --ink: light-dark(var(--raw-ink), var(--raw-paper-dark));
+  --ink-muted: light-dark(var(--raw-ink-soft), var(--raw-muted-dark));
+  --accent: light-dark(var(--raw-petrol), var(--raw-petrol-bright));
+  --accent-soft: light-dark(var(--raw-petrol-soft), var(--raw-petrol-dim));
+  --accent-wash: light-dark(var(--raw-petrol-wash), var(--raw-petrol-wash-dark));
+  --on-accent: light-dark(var(--raw-cloud), var(--raw-night));
+  --warn-text: light-dark(#8f4b22, var(--raw-warn-dark));
+  --blocked-wash: light-dark(#f3e2dc, #33211f);
+
+  /* Hora: five states, each colour + shape + word (the colour is the least of the three) */
+  --st-up: light-dark(var(--raw-petrol-soft), var(--raw-petrol-dim));      /* graphics, 3:1+ */
+  --st-up-text: var(--accent);
+  --st-degraded: light-dark(var(--raw-warn), var(--raw-warn-dark));
+  --st-degraded-text: var(--warn-text);
+  --st-down: light-dark(var(--raw-down), var(--raw-down-dark));
+  --st-down-text: var(--st-down);
+  --st-maint: var(--ink-muted);
+  --st-none: light-dark(#87837a, #687180);
+  --wash-up: var(--accent-wash);
+  --wash-degraded: light-dark(#f5e7da, #30261e);
+  --wash-down: var(--blocked-wash);
+  --wash-maint: var(--ground-raised);
+  --blush: light-dark(var(--raw-blush), #b8776e);
+  /* the owl's body: surface, outlined in ink (ArianeFace's recipe) */
+  --owl-fill: var(--surface);
+  --owl-line: var(--ink);
+
+  --shadow-near: light-dark(rgb(27 34 44 / 6%), rgb(0 0 0 / 30%));
+  --shadow-far: light-dark(rgb(27 34 44 / 6%), rgb(0 0 0 / 25%));
+  --shadow: 0 1px 2px var(--shadow-near), 0 4px 14px var(--shadow-far);
+  --shadow-pop: 0 10px 30px rgb(27 34 44 / 18%);
+
+  --focus-ring: 3px solid var(--accent);
+  --focus-offset: 2px;
+
+  --font-display: 'Fraunces Variable', Georgia, serif;
+  --font-text: 'Cal Sans', system-ui, sans-serif;
+  --font-brand: 'Borel Display', var(--font-display);
+  --font-mono: 'Mona Sans Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --t-hero: 500 clamp(1.75rem, 1.35rem + 1.8vw, 2.6rem)/1.15 var(--font-display);
+  --t-page: 500 1.75rem/2.125rem var(--font-display);
+  --t-group: 500 1.1875rem/1.625rem var(--font-display);
+  --t-body: 400 1rem/1.5rem var(--font-text);
+  --t-secondary: 400 0.875rem/1.25rem var(--font-text);
+  --t-label: 500 0.875rem/1.25rem var(--font-text);
+  --t-meta: 500 0.8125rem/1rem var(--font-text);
+  --t-tiny: 500 0.75rem/1rem var(--font-text);
+  --t-brand: 400 1.35rem/1 var(--font-brand);
+
+  --page-max: 2400px; --page-margin: 16px; --measure: 42rem; --measure-wide: 64rem;
+  --s-half: 2px; --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px; --s-7: 48px;
+  --control-h: 44px; --control-h-s: 36px; --control-h-xs: 32px; --control-h-l: 52px;
+  --radius-xs: 2px; --radius-s: 4px; --radius: 6px; --radius-m: 8px; --radius-l: 10px;
+  --radius-xl: 12px; --radius-2xl: 16px; --radius-pill: 999px;
+  --row-min: 48px; --header-h: 56px;
+  --glyph: 16px;          /* a state's shape beside its word */
+  --bar-day-h: 22px;      /* the 90-day bar */
+  --group-col: 26rem;     /* a group's column on wide screens */
+}
+@media (min-width: 600px) { :root { --page-margin: 24px; } }
+@media (min-width: 1600px) { :root { --page-margin: 32px; } }
+@media (max-width: 599px) { :root { --row-min: 56px; } }
+@media (pointer: coarse) { :root { --control-h-s: 44px; --control-h-xs: 44px; } }
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--ground); color: var(--ink); font: var(--t-body); font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+h1, h2, h3, p { margin: 0; }
+a { color: var(--accent); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); border-radius: var(--radius-s); }
+[hidden] { display: none !important; }
+code, pre, kbd { font-family: var(--font-mono); font-size: 0.875em; }
+.skip { position: absolute; left: var(--s-2); top: -100px; z-index: 9; background: var(--ink); color: var(--ground);
+  padding: var(--s-2) var(--s-3); border-radius: var(--radius); font: var(--t-label); }
+.skip:focus { top: var(--s-2); }
+.vh { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.page { width: 100%; max-width: var(--page-max); margin: 0 auto; padding: 0 var(--page-margin); }
+.measure { max-width: var(--measure); }
+.eyebrow { font: var(--t-meta); text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-muted); }
+.muted { color: var(--ink-muted); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* header: the operator's sign on the left, the live pill and the theme on the right */
+.top { border-bottom: 1px solid var(--line); background: var(--ground); }
+.top .page { min-height: var(--header-h); display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding-block: var(--s-2); }
+.sign { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; margin-right: auto; min-width: 0; }
+.sign .op-logo { width: 32px; height: 32px; border-radius: var(--radius-m); display: grid; place-items: center; flex: none;
+  background: var(--ink); color: var(--ground); font: 600 1rem/1 var(--font-display); }
+.sign b { font: 500 1.15rem/1.2 var(--font-display); white-space: nowrap; }
+.sign span { font: var(--t-secondary); color: var(--ink-muted); white-space: nowrap; }
+.sign.hora span.name { font: var(--t-brand); color: var(--ink); transform: translateY(0.16em); }
+.top nav { display: flex; gap: var(--s-1); }
+@media (max-width: 599px) {
+  .top .page { row-gap: 0; }
+  .top nav { order: 3; width: 100%; margin-inline: calc(-1 * var(--s-3)); }
+  .top .pill { display: none; }
+  .theme-btn .lbl { display: none; }
+  .theme-btn { padding: 0; width: var(--control-h-xs); }
+}
+.navlink { display: inline-flex; align-items: center; min-height: var(--control-h-s); padding: 0 var(--s-3); border-radius: var(--radius-pill);
+  color: var(--ink-muted); text-decoration: none; font: var(--t-label); }
+.navlink:hover { background: var(--ground-raised); color: var(--ink); }
+.navlink[aria-current='page'] { background: var(--accent-wash); color: var(--accent); }
+
+.pill { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-h-xs); padding: 0 var(--s-3);
+  border: 1px solid var(--line); border-radius: var(--radius-pill); font: var(--t-meta); color: var(--ink-muted); background: var(--surface); white-space: nowrap; }
+.pill .g { width: 10px; height: 10px; color: var(--st-up); }
+
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2); min-height: var(--control-h-s);
+  padding: 0 var(--s-4); border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font: var(--t-label); text-decoration: none; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--ink-muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--accent); padding: 0 var(--s-2); }
+.btn svg { width: 16px; height: 16px; flex: none; }
+.theme-btn { min-height: var(--control-h-xs); padding: 0 var(--s-3); font: var(--t-meta); border-radius: var(--radius-pill); }
+
+/* the state glyphs: shape + colour, always followed by the word */
+.g { width: var(--glyph); height: var(--glyph); flex: none; display: inline-block; vertical-align: -0.18em; }
+.g.up { color: var(--st-up); } .g.degraded { color: var(--st-degraded); } .g.down { color: var(--st-down); }
+.g.maint { color: var(--st-maint); } .g.none { color: var(--st-none); } .g.info { color: var(--accent); }
+.word { font: var(--t-label); }
+.g + .word { margin-left: 4px; }
+.word.up { color: var(--st-up-text); } .word.degraded { color: var(--st-degraded-text); } .word.down { color: var(--st-down-text); }
+.word.maint, .word.none { color: var(--ink-muted); }
+
+.chips { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.chip { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-h-xs); padding: 0 var(--s-3);
+  border-radius: var(--radius-pill); background: var(--ground-raised); color: var(--ink); font: var(--t-label); text-decoration: none; white-space: nowrap; }
+.chip.degraded { background: var(--wash-degraded); color: var(--st-degraded-text); }
+.chip.down { background: var(--wash-down); color: var(--st-down-text); }
+.chip.up { background: var(--wash-up); color: var(--st-up-text); }
+.chip.up .g { color: var(--accent); } /* 3.0:1 is too close on the wash: the up glyph goes text-grade there */
+.chip.maint { background: var(--wash-maint); color: var(--ink-muted); }
+a.chip:hover { box-shadow: inset 0 0 0 1px currentColor; }
+
+/* the hero: the owl calls the hour, the sentence says it, the line under it proves it */
+.hero { display: grid; grid-template-columns: auto 1fr; gap: var(--s-4) var(--s-5); align-items: center;
+  padding: var(--s-5); border-radius: var(--radius-2xl); background: var(--wash-up); margin-top: var(--s-5); }
+.hero.degraded { background: var(--wash-degraded); }
+.hero.down { background: var(--wash-down); }
+.hero.maint { background: var(--wash-maint); }
+.hero > .owl { width: clamp(64px, 12vw, 96px); height: auto; }
+.hero h1 { font: var(--t-hero); letter-spacing: -0.01em; text-wrap: balance; }
+.hero .sub { margin-top: var(--s-2); color: var(--ink-muted); font: var(--t-body); }
+.hero .sub b { color: var(--ink); font-weight: 500; }
+.hero .chips { grid-column: 1 / -1; }
+@media (min-width: 840px) { .hero { padding: var(--s-6); } .hero .chips { grid-column: 2; } }
+@media (max-width: 420px) { .hero { grid-template-columns: 1fr; } }
+
+.section { margin-top: var(--s-7); }
+.section-head { display: flex; align-items: baseline; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-3); }
+.section-head h2 { font: var(--t-group); }
+.section-head .fact { margin-left: auto; font: var(--t-secondary); color: var(--ink-muted); }
+
+/* callouts: announcements and maintenance; an icon and a word, a wash, never a coloured edge alone */
+.callout { display: grid; grid-template-columns: auto 1fr; gap: var(--s-1) var(--s-3); padding: var(--s-4); border-radius: var(--radius-l);
+  background: var(--accent-wash); margin-top: var(--s-4); }
+.callout > .g { margin-top: 3px; }
+.callout .k { font: var(--t-label); }
+.callout p { color: var(--ink); max-width: var(--measure); }
+.callout .when { font: var(--t-meta); color: var(--ink-muted); margin-top: var(--s-1); }
+.callout.warning { background: var(--wash-degraded); } .callout.warning .k { color: var(--st-degraded-text); }
+.callout.critical { background: var(--wash-down); } .callout.critical .k { color: var(--st-down-text); }
+.callout.maint { background: var(--wash-maint); }
+.callout.info .k { color: var(--accent); }
+
+/* groups as framed lists of rows (Maison); columns of whole groups on wide screens */
+.groups { display: grid; gap: var(--s-6) var(--s-5); grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--group-col)), 1fr)); align-items: start; }
+.group-head { display: flex; align-items: baseline; gap: var(--s-3); margin-bottom: var(--s-3); }
+.group-head h3 { font: var(--t-group); }
+.group-head .fact { margin-left: auto; font: var(--t-secondary); color: var(--ink-muted); white-space: nowrap; }
+.list { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); overflow: hidden; }
+.list > li + li { border-top: 1px solid var(--line); }
+.row { display: grid; grid-template-columns: var(--glyph) 1fr auto; column-gap: var(--s-3); row-gap: var(--s-2); align-items: center;
+  padding: var(--s-3) var(--s-4); min-height: var(--row-min); color: inherit; text-decoration: none; }
+a.row:hover { background: color-mix(in srgb, var(--ground-raised) 55%, transparent); }
+.row .name { font: var(--t-label); font-size: 0.9375rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .name small { font: var(--t-secondary); color: var(--ink-muted); margin-left: 6px; }
+.row .state { font: var(--t-secondary); text-align: right; white-space: nowrap; }
+.row .state .word { font: var(--t-label); }
+.row .bar { grid-column: 1 / -1; }
+.row .why { grid-column: 2 / -1; font: var(--t-secondary); color: var(--ink-muted); margin-top: -4px; }
+.row.down .why, .row.degraded .why { color: var(--ink); }
+.bar-legend { display: flex; justify-content: space-between; font: var(--t-tiny); color: var(--ink-muted); padding: var(--s-2) var(--s-4) var(--s-3); }
+.bar-legend .d30 { display: none; }
+@media (max-width: 599px) { .bar-legend .d90 { display: none; } .bar-legend .d30 { display: inline; } }
+
+/* the 90-day bar: ONE svg, a handful of run-length rects, gaps drawn by a mask (not 90 nodes) */
+.bar { display: block; overflow: hidden; height: calc(var(--bar-day-h) + 7px); }
+.bar svg { display: block; width: 100%; height: 100%; overflow: visible;
+  -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 calc(100% / 90 - 1.5px), transparent calc(100% / 90 - 1.5px) calc(100% / 90));
+  mask-image: repeating-linear-gradient(90deg, #000 0 calc(100% / 90 - 1.5px), transparent calc(100% / 90 - 1.5px) calc(100% / 90)); }
+.bar .u { fill: var(--st-up); } .bar .d { fill: var(--st-degraded); } .bar .x { fill: var(--st-down); }
+.bar .m { fill: var(--st-maint); } .bar .n { fill: var(--st-none); }
+/* a phone shows the last 30 days: the same svg, three times wider, its right end in view */
+@media (max-width: 599px) { .bar svg { width: 300%; margin-left: -200%; } }
+
+/* the legend: what each shape means, once per page */
+.legend { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); font: var(--t-secondary); color: var(--ink-muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend svg.cell { width: 8px; height: 24px; overflow: visible; }
+
+/* the footer: Hora signs the page, quietly */
+.foot { margin-top: var(--s-7); border-top: 1px solid var(--line); }
+.foot .page { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3) var(--s-5); padding-block: var(--s-5) var(--s-6); font: var(--t-secondary); color: var(--ink-muted); }
+.foot nav { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-4); }
+.foot a { color: var(--ink-muted); }
+.foot a:hover { color: var(--ink); }
+.watched { display: inline-flex; align-items: center; gap: var(--s-2); margin-left: auto; color: var(--ink-muted); text-decoration: none; }
+.watched img { width: 22px; height: 22px; border-radius: 5px; }
+.watched .b { font: 400 1.05rem/1 var(--font-brand); color: var(--ink); transform: translateY(0.14em); }
+
+/* the owl: pose = state; it moves only when the state changes, once */
+.owl { overflow: visible; flex: none; }
+.owl .ln { fill: var(--owl-fill); stroke: var(--owl-line); stroke-width: 1.5; stroke-linejoin: round; }
+.owl .tx { fill: none; stroke: var(--owl-line); stroke-width: 1; stroke-linecap: round; opacity: 0.2; }
+.owl .ft { fill: var(--owl-line); }
+.owl .ey path, .owl .ey line { fill: none; stroke: var(--owl-line); stroke-width: 1.8; stroke-linecap: round; }
+.owl .ey ellipse { fill: var(--owl-line); }
+.owl .ey .glint { fill: var(--owl-fill); }
+.owl .bk { fill: var(--accent); stroke: var(--accent); stroke-width: 0.9; stroke-linejoin: round; }
+.owl .ck { fill: var(--blush); opacity: 0.85; transition: opacity 0.3s; }
+.owl .tl, .owl .tr { transform-box: fill-box; transition: transform 0.35s cubic-bezier(.3,1.4,.6,1); }
+.owl .tl { transform-origin: 100% 100%; } .owl .tr { transform-origin: 0% 100%; }
+.owl .ey > g { transition: opacity 0.18s; opacity: 0; }
+.owl .bd { fill: var(--ground); }
+.owl .badge > g { opacity: 0; }
+.owl .badge { opacity: 0; transition: opacity 0.2s; }
+/* up: asleep, the tufts at rest. Nothing is wrong, so nothing moves. */
+.owl[data-state='up'] .shut-l, .owl[data-state='up'] .shut-r { opacity: 1; }
+.owl[data-state='up'] .tl { transform: rotate(-5deg); } .owl[data-state='up'] .tr { transform: rotate(5deg); }
+/* degraded: one eye open, one tuft up: half an eye on it */
+.owl[data-state='degraded'] .shut-l, .owl[data-state='degraded'] .open-r { opacity: 1; }
+.owl[data-state='degraded'] .tl { transform: rotate(-5deg); } .owl[data-state='degraded'] .tr { transform: rotate(-6deg); }
+/* down: awake, both eyes open, tufts up. Attentive, never alarmed, never sad. */
+.owl[data-state='down'] .open-l, .owl[data-state='down'] .open-r { opacity: 1; }
+.owl[data-state='down'] .tl { transform: rotate(3deg); } .owl[data-state='down'] .tr { transform: rotate(-3deg); }
+/* maintenance: a planned nap, tufts folded */
+.owl[data-state='maint'] .shut-l, .owl[data-state='maint'] .shut-r { opacity: 1; }
+.owl[data-state='maint'] .tl { transform: rotate(-22deg); } .owl[data-state='maint'] .tr { transform: rotate(22deg); }
+/* no data: it cannot see yet; two dashes, no blush */
+.owl[data-state='none'] .dash { opacity: 1; }
+.owl[data-state='none'] .ck { opacity: 0; }
+.owl[data-state='degraded'] .badge, .owl[data-state='down'] .badge, .owl[data-state='maint'] .badge, .owl[data-state='none'] .badge { opacity: 1; }
+.owl[data-state='degraded'] .b-degraded, .owl[data-state='down'] .b-down, .owl[data-state='maint'] .b-maint, .owl[data-state='none'] .b-none { opacity: 1; }
+.owl .b-degraded { color: var(--st-degraded); } .owl .b-down { color: var(--st-down); } .owl .b-maint { color: var(--st-maint); } .owl .b-none { color: var(--st-none); }
+/* waking: one perk of the tufts when the state turns to down, then still */
+.owl.woke .tl, .owl.woke .tr { animation: perk 0.6s ease-out 1; }
+@keyframes perk { 40% { translate: 0 -1.2px; } }
+@media (prefers-reduced-motion: reduce) {
+  .owl *, .owl { transition: none !important; animation: none !important; }
+}
+
+/* theme switch (the only script on a page, with the owl demo) */
+.theme-btn .lbl::before { content: 'Auto'; }
+:root[data-theme='light'] .theme-btn .lbl::before { content: 'Light'; }
+:root[data-theme='dark'] .theme-btn .lbl::before { content: 'Dark'; }
+
+.mock-note { margin: var(--s-6) 0 0; padding: var(--s-3) var(--s-4); border: 1px dashed var(--line); border-radius: var(--radius-l);
+  font: var(--t-secondary); color: var(--ink-muted); max-width: var(--measure-wide); }
+.mock-note b { color: var(--ink); font-weight: 500; }
+
+.owls { overflow: visible; display: block; max-width: 100%; height: auto; }
+.owls .branch { fill: none; stroke: var(--ink-muted); stroke-width: 1.4; stroke-linecap: round; opacity: 0.5; }
+.owls .olab { font: 500 5.2px var(--font-text); fill: var(--ink-muted); }
+/* where it is watched from: places, each with its own shape and word */
+.vantages { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: center; }
+.vchip { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 10px; border-radius: var(--radius-pill); background: var(--ground-raised); font: var(--t-meta); color: var(--ink); white-space: nowrap; }
+.vchip .g { width: 12px; height: 12px; }
+.vchip small { font: var(--t-meta); color: var(--ink-muted); }
+.vchip.down { background: var(--wash-down); } .vchip.degraded { background: var(--wash-degraded); }
+.watchers { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); font: var(--t-secondary); color: var(--ink-muted); }
+.watchers .owls { width: 92px; }
+
+.crumbs { display: flex; flex-wrap: wrap; gap: var(--s-2); font: var(--t-secondary); color: var(--ink-muted); margin-top: var(--s-5); }
+.crumbs a { color: var(--ink-muted); }
+.crumbs .sep { opacity: 0.6; }
+.title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3) var(--s-4); margin-top: var(--s-3); }
+.title h1 { font: var(--t-page); font-size: clamp(1.75rem, 1.4rem + 1.4vw, 2.25rem); line-height: 1.15; }
+.title .state-big { display: inline-flex; align-items: center; gap: 6px; padding: 4px var(--s-3) 4px var(--s-2); border-radius: var(--radius-pill); background: var(--wash-up); }
+.title .state-big .word { font: var(--t-label); }
+.target { margin-top: var(--s-2); font: var(--t-secondary); color: var(--ink-muted); }
+.target code { color: var(--ink); }
+.tiles { display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); margin-top: var(--s-5); }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-l); padding: var(--s-4); display: grid; gap: var(--s-1); align-content: start; }
+.tile .k { font: var(--t-secondary); color: var(--ink-muted); }
+.tile .v { font: 500 1.75rem/1.2 var(--font-display); font-variant-numeric: tabular-nums lining-nums; }
+.tile .v small { font: var(--t-secondary); color: var(--ink-muted); margin-left: 4px; }
+.tile .n { font: var(--t-secondary); color: var(--ink-muted); }
+.meter { height: 8px; border-radius: var(--radius-pill); background: var(--ground-raised); overflow: hidden; margin-top: var(--s-2); box-shadow: inset 0 0 0 1px var(--line); }
+.meter > span { display: block; height: 100%; background: var(--accent-soft); border-radius: inherit; }
+.panel { overflow-x: clip; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); padding: var(--s-4) var(--s-5) var(--s-5); }
+.panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); margin-bottom: var(--s-4); }
+.panel-head h2 { font: var(--t-group); }
+.panel-head .tabs { margin-left: auto; }
+.tabs { display: inline-flex; padding: 3px; gap: 2px; border-radius: var(--radius-pill); background: var(--ground-raised); }
+.tabs a { min-height: 30px; padding: 0 var(--s-3); display: inline-flex; align-items: center; border-radius: var(--radius-pill); font: var(--t-meta); color: var(--ink-muted); text-decoration: none; }
+.tabs a[aria-current] { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.chartwrap { position: relative; padding-left: 2.5rem; padding-bottom: 1.5rem; }
+.chart { width: 100%; height: 200px; display: block; overflow: visible; }
+.chart line, .chart path { vector-effect: non-scaling-stroke; }
+.ylab span { position: absolute; left: 0; width: 2rem; text-align: right; translate: 0 -50%; font: var(--t-tiny); color: var(--ink-muted); }
+.ylab { position: absolute; left: 0; top: 0; bottom: 1.5rem; width: 2rem; }
+.ylab span { top: 0; }
+.xlab { position: absolute; left: 2.5rem; right: 0; bottom: 0; display: flex; justify-content: space-between; font: var(--t-tiny); color: var(--ink-muted); }
+.thr-l { position: absolute; right: 0; font: var(--t-tiny); color: var(--st-degraded-text); }
+.unit { position: absolute; left: 0; top: -1.4rem; font: var(--t-tiny); color: var(--ink-muted); }
+@media (max-width: 599px) { .xlab span:nth-child(even) { visibility: hidden; } }
+.chart .grid line { stroke: var(--line); stroke-width: 1; }
+.chart .ax { font: var(--t-tiny); fill: var(--ink-muted); }
+.chart .band { fill: var(--accent-wash); }
+.chart .p50 { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+.chart .p95 { fill: none; stroke: var(--accent-soft); stroke-width: 1.25; stroke-dasharray: 3 3; }
+.chart .thr { stroke: var(--st-degraded); stroke-width: 1.25; stroke-dasharray: 6 4; }
+.chart .thr-l { font: var(--t-tiny); fill: var(--st-degraded-text); }
+.key { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); font: var(--t-secondary); color: var(--ink-muted); margin-top: var(--s-3); }
+.key i { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--accent); vertical-align: middle; margin-right: 6px; }
+.key i.d { border-top: 1.5px dashed var(--accent-soft); }
+.key i.t { border-top: 1.5px dashed var(--st-degraded); }
+/* 90 days, one button per day: this page shows one monitor, so 90 nodes are fine here */
+.days { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(90, 1fr); gap: 2px; height: 36px; align-items: end; }
+.days li { height: 100%; position: relative; }
+.days button { all: unset; display: block; width: 100%; height: 30px; border-radius: 1px; background: var(--st-up); cursor: pointer; position: relative; }
+.days button.d { background: var(--st-degraded); height: 21px; margin-top: 9px; }
+.days button.x { background: var(--st-down); height: 36px; }
+.days button.m { background: var(--st-maint); height: 15px; margin-top: 15px; }
+.days button.n { background: var(--st-none); height: 5px; margin-top: 25px; }
+.days button:hover { filter: brightness(1.15); }
+.days button:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.days button[aria-pressed='true'] { box-shadow: 0 0 0 2px var(--ground), 0 0 0 4px var(--ink); }
+.days button::after { content: attr(data-tip); visibility: hidden; position: absolute; bottom: calc(100% + 10px); left: 50%; translate: -50% 0; background: var(--ink); color: var(--ground);
+  font: var(--t-meta); padding: 6px 10px; border-radius: var(--radius); white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity 0.12s; z-index: 2; }
+.days button:hover::after, .days button:focus-visible::after { opacity: 1; visibility: visible; }
+.days li:nth-child(-n+12) button::after { left: 0; translate: 0 0; }
+.days li:nth-last-child(-n+12) button::after { left: auto; right: 0; translate: 0 0; }
+@media (max-width: 599px) { .days { grid-template-columns: repeat(30, 1fr); gap: 3px; } .days li:nth-child(-n+60) { display: none; } .days li:nth-child(n+61):nth-child(-n+70) button::after { left: 0; translate: 0 0; } }
+.daydetail { margin-top: var(--s-4); display: grid; grid-template-columns: auto 1fr auto; gap: var(--s-1) var(--s-3); align-items: center; padding: var(--s-3) var(--s-4); border-radius: var(--radius-l); background: var(--wash-down); }
+.daydetail .k { font: var(--t-label); }
+.daydetail p { font: var(--t-secondary); grid-column: 2 / -1; }
+.two { display: grid; gap: var(--s-5); grid-template-columns: repeat(auto-fit, minmax(min(100%, 30rem), 1fr)); margin-top: var(--s-5); align-items: start; }
+.heat { display: grid; grid-template-columns: 2.6rem repeat(24, 1fr); gap: 2px; font: var(--t-tiny); color: var(--ink-muted); }
+.heat span.c { aspect-ratio: 1 / 1; border-radius: 2px; min-height: 8px; }
+.heat .t0 { background: var(--accent-wash); } .heat .t1 { background: color-mix(in srgb, var(--st-up) 55%, var(--accent-wash)); }
+.heat .t2 { background: var(--st-up); } .heat .t3 { background: var(--st-degraded); }
+.heat .t4 { background: var(--st-down); position: relative; }
+.heat .t4::after { content: ''; position: absolute; inset: 28%; background: var(--surface); clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); }
+.heat .lbl { align-self: center; }
+.heat .hr { text-align: center; }
+.heatkey { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); margin-top: var(--s-3); font: var(--t-secondary); color: var(--ink-muted); }
+.heatkey span { display: inline-flex; align-items: center; gap: 6px; }
+.heatkey i { width: 14px; height: 14px; border-radius: 2px; display: inline-block; position: relative; }
+.vlist { list-style: none; margin: 0; padding: 0; }
+.vlist li { display: grid; grid-template-columns: var(--glyph) 1fr auto; gap: var(--s-3); align-items: center; padding: var(--s-3) 0; border-bottom: 1px solid var(--line); }
+.vlist li:last-child { border-bottom: 0; }
+.vlist .n { font: var(--t-label); }
+.vlist .n small { display: block; font: var(--t-secondary); color: var(--ink-muted); }
+.vlist .r { font: var(--t-secondary); color: var(--ink-muted); text-align: right; display: inline-flex; align-items: center; gap: var(--s-2); white-space: nowrap; }
+.lat { display: inline-block; width: 64px; height: 6px; border-radius: 999px; background: var(--ground-raised); overflow: hidden; }
+.lat i { display: block; height: 100%; background: var(--accent-soft); border-radius: inherit; }
+.vpwrap { display: grid; grid-template-columns: auto 1fr; gap: var(--s-4); align-items: center; padding-bottom: var(--s-3); border-bottom: 1px solid var(--line); }
+@media (max-width: 599px) { .vpwrap { grid-template-columns: 1fr; } .lat { display: none; } }
+details.ops { margin-top: var(--s-5); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); }
+details.ops summary { cursor: pointer; padding: var(--s-4) var(--s-5); font: var(--t-label); display: flex; gap: var(--s-2); align-items: center; }
+details.ops summary .muted { font: var(--t-secondary); }
+details.ops .in { padding: 0 var(--s-5) var(--s-5); display: grid; gap: var(--s-4); }
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: var(--s-2) var(--s-5); margin: 0; font: var(--t-secondary); }
+dl.kv dt { color: var(--ink-muted); }
+dl.kv dd { margin: 0; color: var(--ink); }
+pre.code { margin: 0; padding: var(--s-4); background: var(--ground-raised); border-radius: var(--radius-l); overflow-x: auto; font: 400 0.8125rem/1.6 var(--font-mono); color: var(--ink); }
+pre.code .c { color: var(--ink-muted); } pre.code .k { color: var(--accent); }
+.incl { list-style: none; margin: 0; padding: 0; }
+.incl li { display: grid; grid-template-columns: var(--glyph) 1fr auto; gap: var(--s-3); padding: var(--s-3) 0; border-bottom: 1px solid var(--line); align-items: baseline; }
+.incl li:last-child { border-bottom: 0; }
+.incl .t { font: var(--t-label); }
+.incl .t small { display: block; font: var(--t-secondary); color: var(--ink-muted); margin-top: 2px; }
+.incl .r { font: var(--t-meta); color: var(--ink-muted); white-space: nowrap; }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+<symbol id="g-up" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="currentColor"/></symbol>
+<symbol id="g-degraded" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 2.6a5.4 5.4 0 0 0 0 10.8z" fill="currentColor"/></symbol>
+<symbol id="g-down" viewBox="0 0 16 16"><path d="M8 1.2 14.8 8 8 14.8 1.2 8Z" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/><path d="M8 4.9v3.6" stroke="var(--surface, #fff)" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="11" r=".95" fill="var(--surface, #fff)"/></symbol>
+<symbol id="g-maint" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 4.9V8l2.2 1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="g-none" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.4 2.0"/></symbol>
+<symbol id="g-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.4" fill="currentColor"/><path d="M8 7.3v4" stroke="var(--surface, #fff)" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="4.9" r=".95" fill="var(--surface, #fff)"/></symbol>
+<symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+<symbol id="i-feed" viewBox="0 0 16 16"><path d="M3 3.5a9.5 9.5 0 0 1 9.5 9.5M3 7.5A5.5 5.5 0 0 1 8.5 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="3.8" cy="12.2" r="1.3" fill="currentColor"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="i-copy" viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 2.8H4.4a1.6 1.6 0 0 0-1.6 1.6v6.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+<symbol id="i-pin" viewBox="0 0 16 16"><path d="M8 14.5s4.8-4.3 4.8-8a4.8 4.8 0 0 0-9.6 0c0 3.7 4.8 8 4.8 8Z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="6.5" r="1.6" fill="currentColor"/></symbol>
+<symbol id="i-lock" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.2 7V5a2.8 2.8 0 0 1 5.6 0v2" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+<symbol id="i-print" viewBox="0 0 16 16"><path d="M4.5 6V2.5h7V6M4.5 11.5H3a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v3.5a1 1 0 0 1-1 1h-1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><rect x="4.5" y="9.5" width="7" height="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+<symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+<symbol id="i-gh" viewBox="0 0 16 16"><path fill="currentColor" d="M8 .6a7.4 7.4 0 0 0-2.34 14.42c.37.07.5-.16.5-.36v-1.3c-2.06.45-2.5-.87-2.5-.87-.33-.86-.82-1.09-.82-1.09-.67-.46.05-.45.05-.45.74.05 1.13.76 1.13.76.66 1.13 1.73.8 2.15.61.07-.48.26-.8.47-.99-1.64-.19-3.37-.82-3.37-3.65 0-.8.29-1.46.76-1.98-.08-.19-.33-.94.07-1.95 0 0 .62-.2 2.03.76a7 7 0 0 1 3.7 0c1.41-.96 2.03-.76 2.03-.76.4 1.01.15 1.76.07 1.95.47.52.76 1.18.76 1.98 0 2.84-1.73 3.46-3.38 3.64.27.23.5.68.5 1.37v2.03c0 .2.13.43.5.36A7.4 7.4 0 0 0 8 .6Z"/></symbol>
+</svg>
+<header class="top"><div class="page"><a class="sign" href="status-ok.html"><span class="op-logo" aria-hidden="true">P</span><b>Pelican</b><span>Status</span></a><nav aria-label="Pages"><a class="navlink" href="status-ok.html">Status</a><a class="navlink" href="monitor.html" aria-current="page">History</a><a class="navlink" href="report.html">Report</a></nav><span class="pill" title="This page updates itself every 30 s"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg>Live · 12 s ago</span><button class="btn theme-btn" type="button" aria-label="Theme: auto. Change theme"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-sun"/></svg><span class="lbl" aria-hidden="true"></span></button></div></header>
+<main id="main" class="page">
+<nav class="crumbs" aria-label="Breadcrumb"><a href="status-ok.html">Status</a><span class="sep" aria-hidden="true">/</span><a href="status-ok.html#g-Peli">Pelican</a><span class="sep" aria-hidden="true">/</span><span aria-current="page">Public API</span></nav>
+<div class="title"><h1>Public API</h1><span class="state-big"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="word up">Up</span><span class="muted" style="font:var(--t-secondary)">for 15 days</span></span></div>
+<p class="target"><code>api.pelican.app/health</code> · checked every 30 s from 3 places</p>
+
+<div class="tiles">
+  <div class="tile"><span class="k">Up over 90 days</span><span class="v">99.97 %</span><span class="n">One outage, 41 min, on 18 Sep</span></div>
+  <div class="tile"><span class="k">Response time, 24 h</span><span class="v">64 ms<small>typical</small></span><span class="n">Slowest 1 in 20: 140 ms</span></div>
+  <div class="tile"><span class="k">Allowed downtime left this month</span><span class="v">31 min<small>of 43</small></span><div class="meter" role="meter" aria-valuemin="0" aria-valuemax="43" aria-valuenow="31" aria-label="31 of 43 minutes left"><span style="width:72%"></span></div><span class="n">Target 99.9 % over 30 days</span></div>
+  <div class="tile"><span class="k">Certificate</span><span class="v">41 days<small>left</small></span><span class="n">Renews by itself (Let's Encrypt)</span></div>
+</div>
+
+<section class="panel" style="margin-top:var(--s-5)" aria-labelledby="rt">
+  <div class="panel-head"><h2 id="rt">Response time</h2><nav class="tabs" aria-label="Period"><a href="#" aria-current="true">24 h</a><a href="#">7 days</a><a href="#">30 days</a></nav></div>
+  <div class="chartwrap"><div class="ylab" aria-hidden="true"><span style="top:100.00%">0</span><span style="top:68.00%">100</span><span style="top:36.00%">200</span><span style="top:4.00%">300</span></div><svg class="chart" viewBox="0 0 1000 200" preserveAspectRatio="none" role="img" aria-label="Response time over the last 24 hours: typically 64 ms, slowest 1 in 20 under 140 ms, never slow."><g class="grid"><line x1="0" x2="1000" y1="200.0" y2="200.0"/><line x1="0" x2="1000" y1="136.0" y2="136.0"/><line x1="0" x2="1000" y1="72.0" y2="72.0"/><line x1="0" x2="1000" y1="8.0" y2="8.0"/></g><path class="band" d="M0.0 115.1 10.5 114.6 21.1 127.4 31.6 111.4 42.1 128.7 52.6 118.8 63.2 116.1 73.7 123.4 84.2 104.0 94.7 107.0 105.3 123.0 115.8 107.6 126.3 123.4 136.8 109.3 147.4 97.2 157.9 94.5 168.4 98.4 178.9 95.4 189.5 113.9 200.0 113.7 210.5 104.5 221.1 107.0 231.6 104.7 242.1 100.8 252.6 92.0 263.2 89.9 273.7 85.6 284.2 105.5 294.7 82.5 305.3 92.6 315.8 101.8 326.3 84.5 336.8 93.4 347.4 65.9 357.9 76.0 368.4 99.2 378.9 92.9 389.5 108.6 400.0 107.7 410.5 98.7 421.1 82.1 431.6 81.6 442.1 106.7 452.6 107.1 463.2 99.8 473.7 105.4 484.2 90.7 494.7 89.8 505.3 101.6 515.8 98.3 526.3 95.2 536.8 94.1 547.4 94.2 557.9 89.3 568.4 102.0 578.9 93.9 589.5 106.9 600.0 93.0 610.5 95.8 621.1 109.0 631.6 97.6 642.1 99.1 652.6 88.3 663.2 109.3 673.7 84.9 684.2 99.7 694.7 102.5 705.3 103.8 715.8 97.5 726.3 104.6 736.8 111.5 747.4 92.9 757.9 107.4 768.4 104.7 778.9 102.1 789.5 109.1 800.0 104.5 810.5 99.3 821.1 103.4 831.6 92.4 842.1 95.7 852.6 106.2 863.2 104.2 873.7 85.7 884.2 102.5 894.7 90.8 905.3 98.4 915.8 102.6 926.3 100.8 936.8 98.3 947.4 99.1 957.9 103.2 968.4 86.9 978.9 82.8 989.5 84.3 1000.0 101.5 L1000.0 139.2 989.5 140.6 978.9 140.1 968.4 143.0 957.9 139.2 947.4 141.6 936.8 141.0 926.3 139.8 915.8 142.0 905.3 139.2 894.7 139.3 884.2 141.6 873.7 139.2 863.2 141.1 852.6 141.3 842.1 139.2 831.6 141.0 821.1 139.8 810.5 142.5 800.0 145.0 789.5 143.7 778.9 145.2 768.4 142.8 757.9 145.1 747.4 143.7 736.8 144.2 726.3 146.3 715.8 144.8 705.3 143.8 694.7 142.7 684.2 143.4 673.7 141.5 663.2 142.9 652.6 139.2 642.1 140.2 631.6 141.5 621.1 142.5 610.5 143.5 600.0 139.9 589.5 139.2 578.9 139.2 568.4 141.7 557.9 139.7 547.4 139.2 536.8 142.0 526.3 142.5 515.8 143.6 505.3 143.3 494.7 146.3 484.2 144.9 473.7 141.4 463.2 142.2 452.6 139.9 442.1 140.7 431.6 139.2 421.1 139.2 410.5 139.2 400.0 140.9 389.5 141.8 378.9 144.6 368.4 135.0 357.9 128.5 347.4 123.2 336.8 127.0 326.3 131.2 315.8 139.2 305.3 139.2 294.7 139.2 284.2 141.7 273.7 143.0 263.2 145.7 252.6 147.1 242.1 147.8 231.6 146.6 221.1 146.7 210.5 147.6 200.0 151.2 189.5 148.4 178.9 151.3 168.4 150.9 157.9 150.1 147.4 151.7 136.8 153.4 126.3 156.2 115.8 154.7 105.3 156.7 94.7 158.0 84.2 158.2 73.7 159.2 63.2 160.3 52.6 162.9 42.1 166.7 31.6 164.8 21.1 161.1 10.5 162.1 0.0 161.1Z"/><path class="p95" d="M0.0 115.1 10.5 114.6 21.1 127.4 31.6 111.4 42.1 128.7 52.6 118.8 63.2 116.1 73.7 123.4 84.2 104.0 94.7 107.0 105.3 123.0 115.8 107.6 126.3 123.4 136.8 109.3 147.4 97.2 157.9 94.5 168.4 98.4 178.9 95.4 189.5 113.9 200.0 113.7 210.5 104.5 221.1 107.0 231.6 104.7 242.1 100.8 252.6 92.0 263.2 89.9 273.7 85.6 284.2 105.5 294.7 82.5 305.3 92.6 315.8 101.8 326.3 84.5 336.8 93.4 347.4 65.9 357.9 76.0 368.4 99.2 378.9 92.9 389.5 108.6 400.0 107.7 410.5 98.7 421.1 82.1 431.6 81.6 442.1 106.7 452.6 107.1 463.2 99.8 473.7 105.4 484.2 90.7 494.7 89.8 505.3 101.6 515.8 98.3 526.3 95.2 536.8 94.1 547.4 94.2 557.9 89.3 568.4 102.0 578.9 93.9 589.5 106.9 600.0 93.0 610.5 95.8 621.1 109.0 631.6 97.6 642.1 99.1 652.6 88.3 663.2 109.3 673.7 84.9 684.2 99.7 694.7 102.5 705.3 103.8 715.8 97.5 726.3 104.6 736.8 111.5 747.4 92.9 757.9 107.4 768.4 104.7 778.9 102.1 789.5 109.1 800.0 104.5 810.5 99.3 821.1 103.4 831.6 92.4 842.1 95.7 852.6 106.2 863.2 104.2 873.7 85.7 884.2 102.5 894.7 90.8 905.3 98.4 915.8 102.6 926.3 100.8 936.8 98.3 947.4 99.1 957.9 103.2 968.4 86.9 978.9 82.8 989.5 84.3 1000.0 101.5"/><path class="p50" d="M0.0 161.1 10.5 162.1 21.1 161.1 31.6 164.8 42.1 166.7 52.6 162.9 63.2 160.3 73.7 159.2 84.2 158.2 94.7 158.0 105.3 156.7 115.8 154.7 126.3 156.2 136.8 153.4 147.4 151.7 157.9 150.1 168.4 150.9 178.9 151.3 189.5 148.4 200.0 151.2 210.5 147.6 221.1 146.7 231.6 146.6 242.1 147.8 252.6 147.1 263.2 145.7 273.7 143.0 284.2 141.7 294.7 139.2 305.3 139.2 315.8 139.2 326.3 131.2 336.8 127.0 347.4 123.2 357.9 128.5 368.4 135.0 378.9 144.6 389.5 141.8 400.0 140.9 410.5 139.2 421.1 139.2 431.6 139.2 442.1 140.7 452.6 139.9 463.2 142.2 473.7 141.4 484.2 144.9 494.7 146.3 505.3 143.3 515.8 143.6 526.3 142.5 536.8 142.0 547.4 139.2 557.9 139.7 568.4 141.7 578.9 139.2 589.5 139.2 600.0 139.9 610.5 143.5 621.1 142.5 631.6 141.5 642.1 140.2 652.6 139.2 663.2 142.9 673.7 141.5 684.2 143.4 694.7 142.7 705.3 143.8 715.8 144.8 726.3 146.3 736.8 144.2 747.4 143.7 757.9 145.1 768.4 142.8 778.9 145.2 789.5 143.7 800.0 145.0 810.5 142.5 821.1 139.8 831.6 141.0 842.1 139.2 852.6 141.3 863.2 141.1 873.7 139.2 884.2 141.6 894.7 139.3 905.3 139.2 915.8 142.0 926.3 139.8 936.8 141.0 947.4 141.6 957.9 139.2 968.4 143.0 978.9 140.1 989.5 140.6 1000.0 139.2"/><line class="thr" x1="0" x2="1000" y1="40.0" y2="40.0"/></svg><span class="thr-l" style="top:11.00%">slow above 250 ms</span><div class="xlab" aria-hidden="true"><span>15:00</span><span>18:00</span><span>21:00</span><span>00:00</span><span>03:00</span><span>06:00</span><span>09:00</span><span>12:00</span><span>now</span></div><span class="unit">ms</span></div>
+  <div class="key"><span><i></i>Typical (median)</span><span><i class="d"></i>Slowest 1 in 20 (p95)</span><span><i class="t"></i>Counted as slow</span></div>
+</section>
+
+<section class="panel" style="margin-top:var(--s-5)" aria-labelledby="ninety">
+  <div class="panel-head"><h2 id="ninety">Last 90 days</h2><span class="muted" style="font:var(--t-secondary);margin-left:auto">Tap or tab to a day</span></div>
+  <div style="padding-top:36px"><ol class="days" aria-label="Last 90 days, one button per day"><li><button type="button" class="" data-tip="6 Jul: up all day" aria-label="6 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="7 Jul: up all day" aria-label="7 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="8 Jul: up all day" aria-label="8 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="9 Jul: up all day" aria-label="9 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="10 Jul: up all day" aria-label="10 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="11 Jul: up all day" aria-label="11 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="12 Jul: up all day" aria-label="12 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="13 Jul: up all day" aria-label="13 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="14 Jul: up all day" aria-label="14 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="15 Jul: up all day" aria-label="15 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="16 Jul: up all day" aria-label="16 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="17 Jul: up all day" aria-label="17 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="18 Jul: up all day" aria-label="18 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="19 Jul: up all day" aria-label="19 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="20 Jul: up all day" aria-label="20 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="21 Jul: up all day" aria-label="21 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="22 Jul: up all day" aria-label="22 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="23 Jul: up all day" aria-label="23 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="24 Jul: up all day" aria-label="24 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="25 Jul: up all day" aria-label="25 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="26 Jul: up all day" aria-label="26 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="27 Jul: up all day" aria-label="27 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="28 Jul: up all day" aria-label="28 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="29 Jul: up all day" aria-label="29 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="30 Jul: up all day" aria-label="30 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="31 Jul: up all day" aria-label="31 Jul: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="1 Aug: up all day" aria-label="1 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="d" data-tip="2 Aug: slow for 12 min" aria-label="2 Aug: slow for 12 min" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="3 Aug: up all day" aria-label="3 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="4 Aug: up all day" aria-label="4 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="5 Aug: up all day" aria-label="5 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="6 Aug: up all day" aria-label="6 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="7 Aug: up all day" aria-label="7 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="8 Aug: up all day" aria-label="8 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="9 Aug: up all day" aria-label="9 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="10 Aug: up all day" aria-label="10 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="11 Aug: up all day" aria-label="11 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="12 Aug: up all day" aria-label="12 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="13 Aug: up all day" aria-label="13 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="14 Aug: up all day" aria-label="14 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="15 Aug: up all day" aria-label="15 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="16 Aug: up all day" aria-label="16 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="17 Aug: up all day" aria-label="17 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="18 Aug: up all day" aria-label="18 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="19 Aug: up all day" aria-label="19 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="20 Aug: up all day" aria-label="20 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="21 Aug: up all day" aria-label="21 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="22 Aug: up all day" aria-label="22 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="23 Aug: up all day" aria-label="23 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="24 Aug: up all day" aria-label="24 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="m" data-tip="25 Aug: maintenance 15 min" aria-label="25 Aug: maintenance 15 min" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="26 Aug: up all day" aria-label="26 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="27 Aug: up all day" aria-label="27 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="28 Aug: up all day" aria-label="28 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="29 Aug: up all day" aria-label="29 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="30 Aug: up all day" aria-label="30 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="31 Aug: up all day" aria-label="31 Aug: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="1 Sep: up all day" aria-label="1 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="2 Sep: up all day" aria-label="2 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="3 Sep: up all day" aria-label="3 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="4 Sep: up all day" aria-label="4 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="5 Sep: up all day" aria-label="5 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="6 Sep: up all day" aria-label="6 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="7 Sep: up all day" aria-label="7 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="8 Sep: up all day" aria-label="8 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="9 Sep: up all day" aria-label="9 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="10 Sep: up all day" aria-label="10 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="11 Sep: up all day" aria-label="11 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="12 Sep: up all day" aria-label="12 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="13 Sep: up all day" aria-label="13 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="14 Sep: up all day" aria-label="14 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="15 Sep: up all day" aria-label="15 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="16 Sep: up all day" aria-label="16 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="17 Sep: up all day" aria-label="17 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="x" data-tip="18 Sep: down 41 min" aria-label="18 Sep: down 41 min" aria-pressed="true"></button></li><li><button type="button" class="" data-tip="19 Sep: up all day" aria-label="19 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="20 Sep: up all day" aria-label="20 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="21 Sep: up all day" aria-label="21 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="22 Sep: up all day" aria-label="22 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="23 Sep: up all day" aria-label="23 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="24 Sep: up all day" aria-label="24 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="25 Sep: up all day" aria-label="25 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="26 Sep: up all day" aria-label="26 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="27 Sep: up all day" aria-label="27 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="28 Sep: up all day" aria-label="28 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="29 Sep: up all day" aria-label="29 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="30 Sep: up all day" aria-label="30 Sep: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="1 Oct: up all day" aria-label="1 Oct: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="2 Oct: up all day" aria-label="2 Oct: up all day" aria-pressed="false"></button></li><li><button type="button" class="" data-tip="3 Oct: up all day" aria-label="3 Oct: up all day" aria-pressed="false"></button></li></ol></div>
+  <div class="bar-legend" style="padding-inline:0" aria-hidden="true"><span class="d90">6 Jul</span><span class="d30">3 Sep</span><span>Today</span></div>
+  <div class="daydetail" aria-live="polite"><svg class="g down" aria-hidden="true"><use href="#g-down"/></svg><span class="k">Thursday 18 September</span><a href="incident.html">Read the post-mortem</a><p>Down for 41 minutes, 19:12 to 19:53 UTC. Cause: the database ran out of connections.</p></div>
+</section>
+
+<div class="two">
+<section class="panel" aria-labelledby="hm">
+  <div class="panel-head"><h2 id="hm">Hour by hour, 7 days</h2></div>
+  <div class="heat" role="img" aria-label="Response time by hour over the last 7 days. Busier mornings on weekdays; Monday 10:00 was slow; Thursday 19:00 failed."><span></span><span class="hr">0</span><span class="hr"></span><span class="hr"></span><span class="hr"></span><span class="hr"></span><span class="hr"></span><span class="hr">6</span><span class="hr"></span><span class="hr"></span><span class="hr"></span><span class="hr"></span><span class="hr"></span><span class="hr">12</span><span class="hr"></span><span class="hr"></span><span class="hr"></span><span class="hr"></span><span class="hr"></span><span class="hr">18</span><span class="hr"></span><span class="hr"></span><span class="hr"></span><span class="hr"></span><span class="hr"></span><span class="lbl">Sun</span><span class="c t0"></span><span class="c t1"></span><span class="c t2"></span><span class="c t0"></span><span class="c t1"></span><span class="c t1"></span><span class="c t0"></span><span class="c t1"></span><span class="c t1"></span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t1"></span><span class="c t1"></span><span class="c t0"></span><span class="c t2"></span><span class="c t2"></span><span class="c t1"></span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="lbl">Mon</span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t1"></span><span class="c t1"></span><span class="c t1"></span><span class="c t0"></span><span class="c t2"></span><span class="c t3"></span><span class="c t2"></span><span class="c t2"></span><span class="c t2"></span><span class="c t1"></span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="lbl">Tue</span><span class="c t2"></span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="c t2"></span><span class="c t0"></span><span class="c t2"></span><span class="c t0"></span><span class="c t0"></span><span class="c t2"></span><span class="c t2"></span><span class="c t2"></span><span class="c t0"></span><span class="c t0"></span><span class="c t2"></span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="lbl">Wed</span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t2"></span><span class="c t2"></span><span class="c t2"></span><span class="c t2"></span><span class="c t0"></span><span class="c t0"></span><span class="c t1"></span><span class="c t1"></span><span class="c t0"></span><span class="c t2"></span><span class="c t0"></span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="lbl">Thu</span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="c t2"></span><span class="c t0"></span><span class="c t1"></span><span class="c t2"></span><span class="c t2"></span><span class="c t2"></span><span class="c t2"></span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="c t1"></span><span class="c t2"></span><span class="c t0"></span><span class="c t4"></span><span class="c t1"></span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="lbl">Fri</span><span class="c t0"></span><span class="c t2"></span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="c t1"></span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="c t2"></span><span class="c t2"></span><span class="c t2"></span><span class="c t1"></span><span class="c t1"></span><span class="c t1"></span><span class="c t0"></span><span class="c t2"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="lbl">Sat</span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="c t1"></span><span class="c t2"></span><span class="c t1"></span><span class="c t1"></span><span class="c t1"></span><span class="c t0"></span><span class="c t0"></span><span class="c t0"></span><span class="c t2"></span><span class="c t1"></span><span class="c t2"></span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="c t1"></span><span class="c t0"></span><span class="c t2"></span><span class="c t0"></span><span class="c t1"></span><span class="c t1"></span><span class="c t2"></span></div>
+  <div class="heatkey"><span><i style="background:var(--accent-wash)"></i>Fast</span><span><i style="background:color-mix(in srgb, var(--st-up) 55%, var(--accent-wash))"></i>Usual</span><span><i style="background:var(--st-up)"></i>Busy</span><span><i style="background:var(--st-degraded)"></i>Slow</span><span><i class="t4" style="background:var(--st-down)"></i><svg class="g down" aria-hidden="true"><use href="#g-down"/></svg> Failed</span></div>
+</section>
+<section class="panel" aria-labelledby="vp">
+  <div class="panel-head"><h2 id="vp">Checked from 3 places</h2><span class="muted" style="font:var(--t-secondary);margin-left:auto"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="word up">Up from 3 of 3</span></span></div>
+  <div class="vpwrap"><svg class="owls " viewBox="0 0 146 62" width="200" role="img" aria-label="Three owls asleep: Paris, Frankfurt and Montréal all see Public API up"><path class="branch" d="M0 45.5C44 43.5 102 47.5 146 44.5" /><svg class="owl" data-state="up" x="4" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="up" x="50" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="up" x="96" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><text class="olab" x="27" y="58" text-anchor="middle">Paris</text><text class="olab" x="73" y="58" text-anchor="middle">Frankfurt</text><text class="olab" x="119" y="58" text-anchor="middle">Montréal</text></svg>
+  <p class="muted" style="font:var(--t-secondary)">Each place checks on its own. An outage is called only when two of them agree, so a hiccup near one place never pages anyone.</p></div>
+  <ul class="vlist">
+    <li><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="n">Paris<small>this Hora · checked 12 s ago</small></span><span class="r"><span class="word up">Up</span><span class="lat"><i style="width:43%"></i></span>61 ms</span></li>
+    <li><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="n">Frankfurt<small>peer · seen 8 s ago</small></span><span class="r"><span class="word up">Up</span><span class="lat"><i style="width:41%"></i></span>58 ms</span></li>
+    <li><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="n">Montréal<small>peer · seen 21 s ago</small></span><span class="r"><span class="word up">Up</span><span class="lat"><i style="width:100%"></i></span>142 ms</span></li>
+  </ul>
+  <p class="muted" style="font:var(--t-secondary);margin-top:var(--s-2)">Typical answer time over 24 h, from each place. Montréal is further away; that is distance, not trouble.</p>
+<div class="panel-head" style="margin:var(--s-5) 0 var(--s-2)"><h2>Incidents</h2><a href="incident.html" style="margin-left:auto;font:var(--t-secondary)">Timeline</a></div>
+  <ul class="incl">
+    <li><svg class="g down" aria-hidden="true"><use href="#g-down"/></svg><span class="t"><a href="incident.html">Down for 41 min</a><small>Database out of connections</small></span><span class="r">18 Sep</span></li>
+    <li><svg class="g degraded" aria-hidden="true"><use href="#g-degraded"/></svg><span class="t">Slow for 12 min<small>Up to 1.9 s during a deploy</small></span><span class="r">2 Aug</span></li>
+  </ul>
+</section>
+</div>
+
+<details class="ops"><summary><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-chev"/></svg>For operators <span class="muted">probe, percentiles, SLO burn</span></summary>
+<div class="in">
+<dl class="kv">
+  <dt>Probe</dt><dd>HTTP GET, expects 200, timeout 10 s, IPv4 and IPv6</dd>
+  <dt>p50 / p95 / p99, 24 h</dt><dd>64 / 140 / 212 ms</dd>
+  <dt>Latency SLO</dt><dd>p95 under 250 ms: <svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="word up">met</span></dd>
+  <dt>Burn rate, 1 h / 6 h</dt><dd>0.0× / 0.2×</dd>
+  <dt>Depends on</dt><dd>Database, File storage</dd>
+  <dt>Confirm with peers</dt><dd>on · last asked 18 Sep 19:12, verdict "confirmed down from 3/3 vantage points"</dd>
+</dl>
+<pre class="code"><span class="k">[[monitors]]</span>
+id = "api"
+name = "Public API"
+target = "https://api.pelican.app/health"
+interval_secs = 30
+group = "pelican"
+depends_on = ["db", "storage"]
+slo_uptime = 99.9            <span class="c"># 43 min a month</span></pre>
+</div></details>
+</main>
+<footer class="foot"><div class="page"><nav aria-label="More"><a href="monitor.html">Incident history</a><a href="incident.html">Timeline</a><a href="report.html">Monthly report</a><a href="#">Atom feed</a><a href="#">JSON</a></nav><a class="watched" href="docs-home.html"><img src="assets/mark.svg" alt="" width="22" height="22"><span>Watched over by</span><span class="b">Hora</span></a></div></footer>
+
+</body>
+</html>

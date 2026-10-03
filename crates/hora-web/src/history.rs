@@ -8,14 +8,18 @@ use std::fmt::Write as _;
 use askama::Template;
 use chrono::DateTime;
 use hora_core::db::{EventMarker, Incident, PushedAlert};
+use hora_core::fmt::{self, xml_escape};
+
+use crate::layout::Chrome;
 
 /// The `/history` page; rows are pre-formatted [`IncidentRow`]s, Askama does
 /// the escaping.
 #[derive(Template)]
 #[template(path = "history.html")]
 pub(crate) struct HistoryTemplate {
-    /// The status page title, linked back to from the footer.
-    pub(crate) title: String,
+    /// The page chrome (its links carry the viewer's `?token=`, so a
+    /// viewer authenticated by query keeps their view from page to page).
+    pub(crate) chrome: Chrome,
     pub(crate) incidents: Vec<IncidentRow>,
     /// Externally-pushed alerts (`POST /api/monitors/{id}/alert`), shown in
     /// their own section below the incidents.
@@ -23,38 +27,6 @@ pub(crate) struct HistoryTemplate {
     /// Operator-recorded event markers (`hora event`), shown in their own
     /// section - authenticated viewers only (deploy titles are operator info).
     pub(crate) events: Vec<EventRow>,
-    /// Monitors whose latency heatmap is offered below the incidents
-    /// (collapsed; each `<img>` loads its SVG lazily from the API).
-    pub(crate) heatmaps: Vec<HeatmapRef>,
-    /// `?token=...` to append to the heatmap image URLs, so a viewer
-    /// authenticated by query token sees private monitors' heatmaps too. An
-    /// `<img>` cannot carry an Authorization header, so Bearer-authenticated
-    /// viewers fall back to the public heatmaps only.
-    pub(crate) token_query: String,
-}
-
-/// One monitor offered in the heatmap section.
-pub(crate) struct HeatmapRef {
-    pub(crate) id: String,
-    pub(crate) name: String,
-}
-
-/// Percent-encode `value` for safe embedding in a query string (RFC 3986
-/// unreserved characters pass through).
-pub(crate) fn url_encode(value: &str) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(value.len());
-    for &byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => {
-                let _ = write!(out, "%{byte:02X}");
-            }
-        }
-    }
-    out
 }
 
 /// One incident, formatted for display.
@@ -62,9 +34,6 @@ pub(crate) struct IncidentRow {
     id: i64,
     monitor: String,
     resolved: bool,
-    started: String,
-    ended: Option<String>,
-    duration: Option<String>,
     error: Option<String>,
     cause: Option<String>,
     impacted: Option<String>,
@@ -75,6 +44,71 @@ pub(crate) struct IncidentRow {
     event: Option<String>,
     /// Multi-vantage verdict recorded once the peers answered.
     vantage: Option<String>,
+    /// The monitor's id, URL-encoded, for its page (`/monitor/{id}`).
+    monitor_href: String,
+    /// The sentence: "Web was down for 41 minutes" / "Web is down".
+    headline: String,
+    /// "Thursday 18 September 2026, 19:12 to 19:53 UTC".
+    span: String,
+    /// "18 Sep 2026".
+    day: String,
+    /// "18 Sep, 19:12 UTC" and the recovery, for the facts.
+    started_short: String,
+    ended_short: Option<String>,
+    /// "41 minutes".
+    length: Option<String>,
+    /// The verdict in the visitor's words, and its state.
+    verdict: Option<(&'static str, String)>,
+}
+
+/// A span at the size a person says it: `45 s`, `41 min`, `3 h 07 min`,
+/// `2 days 4 h` - the pages' one format ([`crate::layout::duration`]).
+pub(crate) fn human_duration(seconds: i64) -> String {
+    crate::layout::duration(seconds)
+}
+
+/// The multi-vantage verdict (as `hora_core::mesh::confirm` writes it) in a
+/// visitor's words, with the state it amounts to. `None` for a shape this
+/// does not know (the raw verdict stays in the operator's details).
+pub(crate) fn humanize_verdict(verdict: &str) -> Option<(&'static str, String)> {
+    let fraction = |text: &str| -> Option<(usize, usize)> {
+        let (_, rest) = text.split_once(" from ")?;
+        let (counts, _) = rest.split_once(" vantage")?;
+        let (part, total) = counts.split_once('/')?;
+        Some((part.trim().parse().ok()?, total.trim().parse().ok()?))
+    };
+    if verdict.starts_with("confirmed down") {
+        let (down, total) = fraction(verdict)?;
+        Some((
+            "down",
+            if down == total {
+                format!("Seen down from all {total} places: a real outage, not a network problem.")
+            } else {
+                format!("Seen down from {down} of {total} places.")
+            },
+        ))
+    } else if verdict.starts_with("seen UP by") {
+        let (down, total) = fraction(verdict)?;
+        Some((
+            "degraded",
+            format!(
+                "Seen down from {down} of {total} places only; the others could reach it. \
+                 Likely a network problem near this checkpoint."
+            ),
+        ))
+    } else if verdict.starts_with("no peer vantage") {
+        Some((
+            "none",
+            "Not confirmed: no other place could be asked.".to_owned(),
+        ))
+    } else if verdict.starts_with("no peer watches") {
+        Some((
+            "none",
+            "Not confirmed: no other place watches this service.".to_owned(),
+        ))
+    } else {
+        None
+    }
 }
 
 /// One operator-recorded event marker, formatted for display.
@@ -89,7 +123,7 @@ pub(crate) fn event_rows(events: &[EventMarker]) -> Vec<EventRow> {
         .iter()
         .map(|event| EventRow {
             title: event.title.clone(),
-            at: format_utc(event.created_at),
+            at: fmt::utc(event.created_at),
         })
         .collect()
 }
@@ -99,31 +133,30 @@ pub(crate) fn event_rows(events: &[EventMarker]) -> Vec<EventRow> {
 #[derive(Template)]
 #[template(path = "incident.html")]
 pub(crate) struct IncidentTemplate {
-    /// The status page title, linked back to from the footer.
-    pub(crate) title: String,
-    /// The monitor's display name.
-    pub(crate) monitor: String,
+    pub(crate) chrome: Chrome,
     pub(crate) row: IncidentRow,
     /// The markdown post-mortem, shown in a copyable block.
     pub(crate) markdown: String,
+    /// The owl: awake while it is down, asleep once it is over.
+    pub(crate) owl: String,
+    /// The raw verdict, for the operator (the visitor reads it humanized).
+    pub(crate) operator: bool,
 }
 
 /// The `/timeline` page: the unified chronology, newest first.
 #[derive(Template)]
 #[template(path = "timeline.html")]
 pub(crate) struct TimelineTemplate {
-    /// The status page title, linked back to from the footer.
-    pub(crate) title: String,
+    pub(crate) chrome: Chrome,
     pub(crate) entries: Vec<TimelineRow>,
-    /// `?token=...` for the post-mortem links, like the heatmap links.
-    pub(crate) token_query: String,
 }
 
 /// One merged timeline entry, formatted for display.
 pub(crate) struct TimelineRow {
     at: String,
-    /// The entry kind (`down`, `recovered`, `event`, ...), also a CSS class.
-    kind: &'static str,
+    /// The entry kind's shape (`down`, `up`, `info`, ...) and word.
+    state: &'static str,
+    word: &'static str,
     title: String,
     detail: Option<String>,
     /// The incident behind a down/recovered entry, for the post-mortem link.
@@ -134,12 +167,26 @@ pub(crate) struct TimelineRow {
 pub(crate) fn timeline_rows(entries: &[hora_core::timeline::Entry]) -> Vec<TimelineRow> {
     entries
         .iter()
-        .map(|entry| TimelineRow {
-            at: format_utc(entry.at),
-            kind: entry.kind.as_str(),
-            title: entry.title.clone(),
-            detail: entry.detail.clone(),
-            incident: entry.incident_id,
+        .map(|entry| {
+            let (state, word) = match entry.kind.as_str() {
+                "down" => ("down", "Down"),
+                "recovered" => ("up", "Up again"),
+                "alert" => ("degraded", "Alert"),
+                "silence" => ("maint", "Silenced"),
+                "announce" => ("info", "Announcement"),
+                _ => ("info", "Change"),
+            };
+            TimelineRow {
+                at: DateTime::from_timestamp(entry.at, 0).map_or_else(
+                    || fmt::utc(entry.at),
+                    |at| at.format("%a %-d %b, %H:%M").to_string(),
+                ),
+                state,
+                word,
+                title: entry.title.clone(),
+                detail: entry.detail.clone(),
+                incident: entry.incident_id,
+            }
         })
         .collect()
 }
@@ -147,8 +194,10 @@ pub(crate) fn timeline_rows(entries: &[hora_core::timeline::Entry]) -> Vec<Timel
 /// One externally-pushed alert, formatted for display.
 pub(crate) struct AlertRow {
     monitor: String,
-    /// `info` | `warning` | `error` | `critical`, used as a CSS class.
+    /// `info` | `warning` | `error` | `critical`.
     severity: String,
+    /// The severity's shape: `info`, `degraded` or `down`.
+    state: &'static str,
     title: String,
     message: Option<String>,
     at: String,
@@ -168,9 +217,14 @@ pub(crate) fn alert_rows(
                 .unwrap_or(&alert.monitor_id)
                 .clone(),
             severity: alert.severity.clone(),
+            state: match alert.severity.as_str() {
+                "error" | "critical" => "down",
+                "warning" => "degraded",
+                _ => "info",
+            },
             title: alert.title.clone(),
             message: (!alert.message.is_empty()).then(|| alert.message.clone()),
-            at: format_utc(alert.created_at),
+            at: fmt::utc(alert.created_at),
         })
         .collect()
 }
@@ -181,31 +235,74 @@ pub(crate) fn incident_rows(
     incidents: &[Incident],
     monitor_names: &HashMap<String, String>,
 ) -> Vec<IncidentRow> {
+    let at = |timestamp: i64, pattern: &str| {
+        DateTime::from_timestamp(timestamp, 0).map_or_else(
+            || timestamp.to_string(),
+            |at| at.format(pattern).to_string(),
+        )
+    };
     incidents
         .iter()
-        .map(|incident| IncidentRow {
-            id: incident.id,
-            monitor: monitor_names
+        .map(|incident| {
+            let monitor = monitor_names
                 .get(&incident.monitor_id)
                 .unwrap_or(&incident.monitor_id)
-                .clone(),
-            resolved: incident.ended_at.is_some(),
-            started: format_utc(incident.started_at),
-            ended: incident.ended_at.map(format_utc),
-            duration: incident.duration_s.map(format_duration),
-            error: incident.error.clone(),
-            cause: incident.cause.clone(),
-            impacted: incident
-                .impacted
-                .as_deref()
-                .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
-                .filter(|impacted| !impacted.is_empty())
-                .map(|impacted| impacted.join(", ")),
-            note: incident.note.clone(),
-            snapshot: incident.snapshot.clone(),
-            event: incident.event.clone(),
-            vantage: incident.vantage.clone(),
+                .clone();
+            let length = incident.duration_s.map(human_duration);
+            let headline = match (&incident.ended_at, &length) {
+                (Some(_), Some(length)) => format!("{monitor} was down for {length}"),
+                (Some(_), None) => format!("{monitor} was down"),
+                (None, _) => format!("{monitor} is down"),
+            };
+            let start_day = at(incident.started_at, "%Y-%m-%d");
+            let span = match incident.ended_at {
+                Some(ended) if at(ended, "%Y-%m-%d") == start_day => format!(
+                    "{} to {}",
+                    at(incident.started_at, "%A %-d %B %Y, %H:%M"),
+                    at(ended, "%H:%M UTC")
+                ),
+                Some(ended) => format!(
+                    "{} to {}",
+                    at(incident.started_at, "%A %-d %B %Y, %H:%M UTC"),
+                    at(ended, "%A %-d %B, %H:%M UTC")
+                ),
+                None => format!(
+                    "Since {}",
+                    at(incident.started_at, "%A %-d %B %Y, %H:%M UTC")
+                ),
+            };
+            (monitor, length, headline, span)
         })
+        .zip(incidents)
+        .map(
+            |((monitor, length, headline, span), incident)| IncidentRow {
+                id: incident.id,
+                monitor,
+                monitor_href: hora_core::fmt::percent_encode(&incident.monitor_id),
+                headline,
+                span,
+                day: at(incident.started_at, "%-d %b %Y"),
+                started_short: at(incident.started_at, "%-d %b, %H:%M UTC"),
+                ended_short: incident
+                    .ended_at
+                    .map(|ended| at(ended, "%-d %b, %H:%M UTC")),
+                length,
+                verdict: incident.vantage.as_deref().and_then(humanize_verdict),
+                resolved: incident.ended_at.is_some(),
+                error: incident.error.clone(),
+                cause: incident.cause.clone(),
+                impacted: incident
+                    .impacted
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+                    .filter(|impacted| !impacted.is_empty())
+                    .map(|impacted| impacted.join(", ")),
+                note: incident.note.clone(),
+                snapshot: incident.snapshot.clone(),
+                event: incident.event.clone(),
+                vantage: incident.vantage.clone(),
+            },
+        )
         .collect()
 }
 
@@ -213,6 +310,7 @@ pub(crate) fn render_atom(
     incidents: &[Incident],
     monitor_names: &HashMap<String, String>,
     base_url: &str,
+    page_title: &str,
 ) -> String {
     // `base_url` is built from the client-supplied Host header, so escape it
     // before it lands in XML attributes/elements - an unescaped `"` or `<` would
@@ -221,12 +319,19 @@ pub(crate) fn render_atom(
     let mut out = String::with_capacity(4096);
     let _ = writeln!(out, "<?xml version=\"1.0\" encoding=\"utf-8\"?>");
     let _ = writeln!(out, "<feed xmlns=\"http://www.w3.org/2005/Atom\">");
-    let _ = writeln!(out, "  <title>Incident History</title>");
+    let _ = writeln!(
+        out,
+        "  <title>{} - incident history</title>",
+        xml_escape(page_title)
+    );
     let _ = writeln!(
         out,
         "  <link href=\"{base_url}/history.atom\" rel=\"self\"/>"
     );
-    let _ = writeln!(out, "  <link href=\"{base_url}/history\"/>");
+    let _ = writeln!(
+        out,
+        "  <link href=\"{base_url}/history\" rel=\"alternate\"/>"
+    );
     let _ = writeln!(out, "  <id>{base_url}/history.atom</id>");
     let _ = writeln!(out, "  <author><name>Hora</name></author>");
 
@@ -253,10 +358,13 @@ pub(crate) fn render_atom(
             "Ongoing"
         };
         let title = format!("{monitor_name} - {status}");
+        // The entry's permalink is its post-mortem page; it doubles as the id.
+        let link = format!("{base_url}/incident/{}", incident.id);
 
         let _ = writeln!(out, "  <entry>");
         let _ = writeln!(out, "    <title>{}</title>", xml_escape(&title));
-        let _ = writeln!(out, "    <id>{base_url}/incidents/{}</id>", incident.id);
+        let _ = writeln!(out, "    <id>{link}</id>");
+        let _ = writeln!(out, "    <link href=\"{link}\" rel=\"alternate\"/>");
 
         if let Some(dt) = DateTime::from_timestamp(incident.started_at, 0) {
             let _ = writeln!(out, "    <published>{}</published>", dt.to_rfc3339());
@@ -268,37 +376,16 @@ pub(crate) fn render_atom(
             let _ = writeln!(out, "    <updated>{}</updated>", dt.to_rfc3339());
         }
 
-        let mut content = String::new();
-        if let Some(error) = &incident.error {
-            let _ = write!(
-                content,
-                "<p><strong>Error:</strong> {}</p>",
-                xml_escape(error)
-            );
-        }
-        if let Some(cause) = &incident.cause {
-            let _ = write!(
-                content,
-                "<p><strong>Caused by:</strong> {}</p>",
-                xml_escape(cause)
-            );
-        }
-        if let Some(duration_s) = incident.duration_s {
-            let _ = write!(
-                content,
-                "<p><strong>Duration:</strong> {}</p>",
-                format_duration(duration_s)
-            );
-        }
-        if let Some(note) = &incident.note {
-            let _ = write!(
-                content,
-                "<p><strong>Note:</strong> {}</p>",
-                xml_escape(note)
-            );
-        }
-
-        let _ = writeln!(out, "    <content type=\"html\">{content}</content>");
+        let _ = writeln!(
+            out,
+            "    <content type=\"html\">{}</content>",
+            // `type="html"` carries *escaped* markup (RFC 4287 4.1.3.3): the
+            // fragment's own text is escaped once as HTML, then the whole
+            // fragment once more as XML. A reader decoding the element text
+            // gets the fragment back with the reason still inert - which
+            // matters, since a failure reason can quote a hostile target.
+            xml_escape(&entry_html(incident))
+        );
         let _ = writeln!(out, "  </entry>");
     }
 
@@ -306,28 +393,38 @@ pub(crate) fn render_atom(
     out
 }
 
-fn format_utc(timestamp: i64) -> String {
-    DateTime::from_timestamp(timestamp, 0).map_or_else(String::new, |dt| {
-        dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
-    })
-}
-
-fn format_duration(seconds: i64) -> String {
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3600 {
-        format!("{}m {}s", seconds / 60, seconds % 60)
-    } else {
-        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+/// The HTML body of one feed entry, its text escaped.
+fn entry_html(incident: &Incident) -> String {
+    let mut content = String::new();
+    if let Some(error) = &incident.error {
+        let _ = write!(
+            content,
+            "<p><strong>Error:</strong> {}</p>",
+            xml_escape(error)
+        );
     }
-}
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+    if let Some(cause) = &incident.cause {
+        let _ = write!(
+            content,
+            "<p><strong>Caused by:</strong> {}</p>",
+            xml_escape(cause)
+        );
+    }
+    if let Some(duration_s) = incident.duration_s {
+        let _ = write!(
+            content,
+            "<p><strong>Duration:</strong> {}</p>",
+            fmt::duration(duration_s)
+        );
+    }
+    if let Some(note) = &incident.note {
+        let _ = write!(
+            content,
+            "<p><strong>Note:</strong> {}</p>",
+            xml_escape(note)
+        );
+    }
+    content
 }
 
 #[cfg(test)]
@@ -335,27 +432,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn durations_format_humanely() {
-        assert_eq!(format_duration(42), "42s");
-        assert_eq!(format_duration(90), "1m 30s");
-        assert_eq!(format_duration(3720), "1h 2m");
-    }
-
-    #[test]
     fn atom_escapes_host_derived_base_url() {
         // base_url comes from the client's Host header; a crafted one must not
         // break out of the href attribute or inject feed elements.
-        let xml = render_atom(&[], &HashMap::new(), "http://x\"><inject");
+        let xml = render_atom(&[], &HashMap::new(), "http://x\"><inject", "Status");
         assert!(!xml.contains("\"><inject"), "{xml}");
         assert!(xml.contains("&quot;&gt;&lt;inject"), "{xml}");
     }
 
     #[test]
-    fn escapes_xml() {
-        assert_eq!(
-            xml_escape("<b>&\"x'\"</b>"),
-            "&lt;b&gt;&amp;&quot;x&apos;&quot;&lt;/b&gt;"
+    fn atom_content_is_escaped_html_with_permalinks() {
+        let incident = Incident {
+            id: 7,
+            monitor_id: "web".to_owned(),
+            started_at: 1000,
+            ended_at: None,
+            duration_s: None,
+            cause: None,
+            impacted: None,
+            error: Some("HTTP 500: <script>alert(1)</script>".to_owned()),
+            reason: None,
+            note: None,
+            snapshot: None,
+            event: None,
+            vantage: None,
+            created_at: 1000,
+        };
+        let names = HashMap::from([("web".to_owned(), "Web".to_owned())]);
+        let xml = render_atom(
+            &[incident],
+            &names,
+            "https://status.example",
+            "Acme <Status>",
         );
+        // The feed title follows the page title (escaped).
+        assert!(
+            xml.contains("<title>Acme &lt;Status&gt; - incident history</title>"),
+            "{xml}"
+        );
+        // No raw child elements inside `type="html"` content: the markup is
+        // escaped once, the reason's own markup twice.
+        assert!(xml.contains("&lt;p&gt;&lt;strong&gt;Error:"), "{xml}");
+        assert!(xml.contains("&amp;lt;script&amp;gt;"), "{xml}");
+        assert!(!xml.contains("<p>") && !xml.contains("<script>"), "{xml}");
+        // Ids and links point at the real post-mortem route.
+        assert!(
+            xml.contains("<id>https://status.example/incident/7</id>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<link href=\"https://status.example/incident/7\" rel=\"alternate\"/>"),
+            "{xml}"
+        );
+        assert!(!xml.contains("/incidents/"), "{xml}");
     }
 
     #[test]
@@ -369,6 +498,7 @@ mod tests {
             cause: None,
             impacted: Some(r#"["API","Web"]"#.to_owned()),
             error: Some("boom".to_owned()),
+            reason: None,
             note: Some("fiber cut".to_owned()),
             snapshot: Some("HTTP/2 503\n\nmaintenance".to_owned()),
             event: Some("deploy api v2.3, 3m before".to_owned()),
@@ -380,7 +510,8 @@ mod tests {
         let rows = incident_rows(&[incident], &names);
         assert_eq!(rows[0].monitor, "Database");
         assert!(rows[0].resolved);
-        assert_eq!(rows[0].duration.as_deref(), Some("1m 30s"));
+        assert_eq!(rows[0].length.as_deref(), Some("1 min"));
+        assert_eq!(rows[0].headline, "Database was down for 1 min");
         assert_eq!(rows[0].impacted.as_deref(), Some("API, Web"));
         assert_eq!(rows[0].note.as_deref(), Some("fiber cut"));
         assert_eq!(rows[0].event.as_deref(), Some("deploy api v2.3, 3m before"));
@@ -399,6 +530,7 @@ mod tests {
             cause: None,
             impacted: None,
             error: None,
+            reason: None,
             note: None,
             snapshot: None,
             event: None,
@@ -408,6 +540,31 @@ mod tests {
         let rows = incident_rows(&[orphan], &HashMap::new());
         assert_eq!(rows[0].monitor, "gone");
         assert!(!rows[0].resolved);
+    }
+
+    #[test]
+    fn verdicts_read_as_calm_sentences() {
+        let (state, text) = humanize_verdict("confirmed down from 3/3 vantage points").unwrap();
+        assert_eq!(state, "down");
+        assert!(text.contains("all 3 places"), "{text}");
+        let (state, text) = humanize_verdict(
+            "seen UP by Frankfurt, Montréal - down from 1/3 vantage points (network issue near this node?)",
+        )
+        .unwrap();
+        assert_eq!(state, "degraded");
+        assert!(
+            text.contains("1 of 3 places only") && !text.contains("vantage"),
+            "{text}"
+        );
+        assert_eq!(
+            humanize_verdict("no peer vantage reachable, unconfirmed").map(|v| v.0),
+            Some("none")
+        );
+        let (_, text) = humanize_verdict("no peer watches this target, unconfirmed").unwrap();
+        assert!(text.contains("no other place watches"), "{text}");
+        assert!(humanize_verdict("something new").is_none());
+        assert_eq!(human_duration(41 * 60), "41 min");
+        assert_eq!(human_duration(1), "1 s");
     }
 
     #[test]

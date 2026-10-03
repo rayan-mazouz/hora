@@ -77,8 +77,10 @@ fn exec_dir(config: &Config) -> Finding {
     let monitors: Vec<&str> = config
         .monitors
         .iter()
-        .filter(|monitor| monitor.kind == Kind::Exec)
-        .filter_map(|monitor| monitor.command.first().map(String::as_str))
+        .filter_map(|monitor| match &monitor.spec {
+            crate::config::MonitorKind::Exec(spec) => Some(spec.program.as_str()),
+            _ => None,
+        })
         .collect();
     let Some(dir) = &config.exec_dir else {
         return if monitors.is_empty() {
@@ -132,30 +134,9 @@ async fn database(config: &Config) -> Finding {
             format!("{path} does not exist yet - created on first start"),
         );
     }
-    let options = sqlx::sqlite::SqliteConnectOptions::new()
-        .filename(path)
-        .busy_timeout(Duration::from_secs(2));
-    let pool = match sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await
-    {
-        Ok(pool) => pool,
-        Err(err) => return Finding::new("database", Status::Fail, format!("{path}: {err}")),
-    };
-    // A write-lock probe without writing anything: BEGIN IMMEDIATE takes the
-    // reserved lock (fails on a read-only mount), ROLLBACK releases it.
-    let writable = sqlx::raw_sql("BEGIN IMMEDIATE; ROLLBACK;")
-        .execute(&pool)
-        .await;
-    pool.close().await;
-    match writable {
-        Ok(_) => Finding::new("database", Status::Ok, format!("{path} is writable")),
-        Err(err) => Finding::new(
-            "database",
-            Status::Fail,
-            format!("{path} not writable: {err}"),
-        ),
+    match crate::db::check_writable(path).await {
+        Ok(()) => Finding::new("database", Status::Ok, format!("{path} is writable")),
+        Err(err) => Finding::new("database", Status::Fail, format!("{path}: {err}")),
     }
 }
 
@@ -215,7 +196,7 @@ fn icmp_socket(config: &Config) -> Finding {
     let needed = config
         .monitors
         .iter()
-        .filter(|monitor| monitor.kind == Kind::Icmp)
+        .filter(|monitor| monitor.kind() == Kind::Icmp)
         .count();
     let ping_config = surge_ping::Config::builder()
         .kind(surge_ping::ICMP::V4)

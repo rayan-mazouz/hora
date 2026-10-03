@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hora · keeps the hours, so you can sleep</title>
+<meta name="description" content="Hora: a tiny self-hosted uptime monitor. One small binary, a calm status page, alerts that never wake you for a blip.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#F2F0EA" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151A21" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/CalSansVF.woff2" as="font" type="font/woff2" crossorigin>
+<script>
+/* theme: system by default; the button cycles auto, light, dark and remembers (per viewer) */
+(function () {
+  var d = document.documentElement, k = 'hora-theme';
+  try { var t = localStorage.getItem(k); if (t) d.dataset.theme = t; } catch (e) {}
+  addEventListener('click', function (e) {
+    var b = e.target.closest('.theme-btn'); if (!b) return;
+    var next = { '': 'light', light: 'dark', dark: '' }[d.dataset.theme || ''];
+    if (next) d.dataset.theme = next; else delete d.dataset.theme;
+    b.setAttribute('aria-label', 'Theme: ' + (next || 'auto') + '. Change theme');
+    try { next ? localStorage.setItem(k, next) : localStorage.removeItem(k); } catch (e) {}
+  });
+})();
+</script>
+<style>
+@font-face { font-family: 'Fraunces Variable'; src: url('fonts/Fraunces-VF.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: 'Cal Sans'; src: url('fonts/CalSansVF.woff2') format('woff2'); font-weight: 400 700; font-display: swap; }
+@font-face { font-family: 'Borel Display'; src: url('fonts/BorelDisplay-Regular.woff2') format('woff2'); font-display: swap; }
+@font-face { font-family: 'Mona Sans Mono'; src: url('fonts/MonaSansMono.woff2') format('woff2'); font-weight: 200 900; font-display: swap; }
+
+:root { color-scheme: light dark; }
+:root[data-theme='light'] { color-scheme: light; }
+:root[data-theme='dark'] { color-scheme: dark; }
+
+:root {
+  /* raw palette: synthe.se (2026-08-17), unchanged */
+  --raw-cloud: #f2f0ea; --raw-cloud-deep: #e7e4db; --raw-ink: #1b222c; --raw-ink-soft: #525a66;
+  --raw-night: #151a21; --raw-night-raised: #1e2530; --raw-paper-dark: #eae7e0; --raw-muted-dark: #a8aeb8;
+  --raw-petrol: #0e5e68; --raw-petrol-soft: #4e8a92; --raw-petrol-wash: #d8e4e2;
+  --raw-petrol-bright: #63c0cb; --raw-petrol-dim: #3e7a84; --raw-petrol-wash-dark: #1d2a31;
+  --raw-warn: #b4633f; --raw-warn-dark: #d89372; --raw-down: #a5372a; --raw-down-dark: #e07a63;
+  --raw-blush: #e6a49a;
+
+  /* semantic (Maison's tokens.css) */
+  --ground: light-dark(var(--raw-cloud), var(--raw-night));
+  --ground-raised: light-dark(var(--raw-cloud-deep), var(--raw-night-raised));
+  --surface: light-dark(#faf9f5, #1a2029);
+  --line: light-dark(#d6d2c6, #2e3744);
+  --ink: light-dark(var(--raw-ink), var(--raw-paper-dark));
+  --ink-muted: light-dark(var(--raw-ink-soft), var(--raw-muted-dark));
+  --accent: light-dark(var(--raw-petrol), var(--raw-petrol-bright));
+  --accent-soft: light-dark(var(--raw-petrol-soft), var(--raw-petrol-dim));
+  --accent-wash: light-dark(var(--raw-petrol-wash), var(--raw-petrol-wash-dark));
+  --on-accent: light-dark(var(--raw-cloud), var(--raw-night));
+  --warn-text: light-dark(#8f4b22, var(--raw-warn-dark));
+  --blocked-wash: light-dark(#f3e2dc, #33211f);
+
+  /* Hora: five states, each colour + shape + word (the colour is the least of the three) */
+  --st-up: light-dark(var(--raw-petrol-soft), var(--raw-petrol-dim));      /* graphics, 3:1+ */
+  --st-up-text: var(--accent);
+  --st-degraded: light-dark(var(--raw-warn), var(--raw-warn-dark));
+  --st-degraded-text: var(--warn-text);
+  --st-down: light-dark(var(--raw-down), var(--raw-down-dark));
+  --st-down-text: var(--st-down);
+  --st-maint: var(--ink-muted);
+  --st-none: light-dark(#87837a, #687180);
+  --wash-up: var(--accent-wash);
+  --wash-degraded: light-dark(#f5e7da, #30261e);
+  --wash-down: var(--blocked-wash);
+  --wash-maint: var(--ground-raised);
+  --blush: light-dark(var(--raw-blush), #b8776e);
+  /* the owl's body: surface, outlined in ink (ArianeFace's recipe) */
+  --owl-fill: var(--surface);
+  --owl-line: var(--ink);
+
+  --shadow-near: light-dark(rgb(27 34 44 / 6%), rgb(0 0 0 / 30%));
+  --shadow-far: light-dark(rgb(27 34 44 / 6%), rgb(0 0 0 / 25%));
+  --shadow: 0 1px 2px var(--shadow-near), 0 4px 14px var(--shadow-far);
+  --shadow-pop: 0 10px 30px rgb(27 34 44 / 18%);
+
+  --focus-ring: 3px solid var(--accent);
+  --focus-offset: 2px;
+
+  --font-display: 'Fraunces Variable', Georgia, serif;
+  --font-text: 'Cal Sans', system-ui, sans-serif;
+  --font-brand: 'Borel Display', var(--font-display);
+  --font-mono: 'Mona Sans Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --t-hero: 500 clamp(1.75rem, 1.35rem + 1.8vw, 2.6rem)/1.15 var(--font-display);
+  --t-page: 500 1.75rem/2.125rem var(--font-display);
+  --t-group: 500 1.1875rem/1.625rem var(--font-display);
+  --t-body: 400 1rem/1.5rem var(--font-text);
+  --t-secondary: 400 0.875rem/1.25rem var(--font-text);
+  --t-label: 500 0.875rem/1.25rem var(--font-text);
+  --t-meta: 500 0.8125rem/1rem var(--font-text);
+  --t-tiny: 500 0.75rem/1rem var(--font-text);
+  --t-brand: 400 1.35rem/1 var(--font-brand);
+
+  --page-max: 2400px; --page-margin: 16px; --measure: 42rem; --measure-wide: 64rem;
+  --s-half: 2px; --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px; --s-7: 48px;
+  --control-h: 44px; --control-h-s: 36px; --control-h-xs: 32px; --control-h-l: 52px;
+  --radius-xs: 2px; --radius-s: 4px; --radius: 6px; --radius-m: 8px; --radius-l: 10px;
+  --radius-xl: 12px; --radius-2xl: 16px; --radius-pill: 999px;
+  --row-min: 48px; --header-h: 56px;
+  --glyph: 16px;          /* a state's shape beside its word */
+  --bar-day-h: 22px;      /* the 90-day bar */
+  --group-col: 26rem;     /* a group's column on wide screens */
+}
+@media (min-width: 600px) { :root { --page-margin: 24px; } }
+@media (min-width: 1600px) { :root { --page-margin: 32px; } }
+@media (max-width: 599px) { :root { --row-min: 56px; } }
+@media (pointer: coarse) { :root { --control-h-s: 44px; --control-h-xs: 44px; } }
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--ground); color: var(--ink); font: var(--t-body); font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+h1, h2, h3, p { margin: 0; }
+a { color: var(--accent); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); border-radius: var(--radius-s); }
+[hidden] { display: none !important; }
+code, pre, kbd { font-family: var(--font-mono); font-size: 0.875em; }
+.skip { position: absolute; left: var(--s-2); top: -100px; z-index: 9; background: var(--ink); color: var(--ground);
+  padding: var(--s-2) var(--s-3); border-radius: var(--radius); font: var(--t-label); }
+.skip:focus { top: var(--s-2); }
+.vh { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.page { width: 100%; max-width: var(--page-max); margin: 0 auto; padding: 0 var(--page-margin); }
+.measure { max-width: var(--measure); }
+.eyebrow { font: var(--t-meta); text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-muted); }
+.muted { color: var(--ink-muted); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* header: the operator's sign on the left, the live pill and the theme on the right */
+.top { border-bottom: 1px solid var(--line); background: var(--ground); }
+.top .page { min-height: var(--header-h); display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding-block: var(--s-2); }
+.sign { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; margin-right: auto; min-width: 0; }
+.sign .op-logo { width: 32px; height: 32px; border-radius: var(--radius-m); display: grid; place-items: center; flex: none;
+  background: var(--ink); color: var(--ground); font: 600 1rem/1 var(--font-display); }
+.sign b { font: 500 1.15rem/1.2 var(--font-display); white-space: nowrap; }
+.sign span { font: var(--t-secondary); color: var(--ink-muted); white-space: nowrap; }
+.sign.hora span.name { font: var(--t-brand); color: var(--ink); transform: translateY(0.16em); }
+.top nav { display: flex; gap: var(--s-1); }
+@media (max-width: 599px) {
+  .top .page { row-gap: 0; }
+  .top nav { order: 3; width: 100%; margin-inline: calc(-1 * var(--s-3)); }
+  .top .pill { display: none; }
+  .theme-btn .lbl { display: none; }
+  .theme-btn { padding: 0; width: var(--control-h-xs); }
+}
+.navlink { display: inline-flex; align-items: center; min-height: var(--control-h-s); padding: 0 var(--s-3); border-radius: var(--radius-pill);
+  color: var(--ink-muted); text-decoration: none; font: var(--t-label); }
+.navlink:hover { background: var(--ground-raised); color: var(--ink); }
+.navlink[aria-current='page'] { background: var(--accent-wash); color: var(--accent); }
+
+.pill { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-h-xs); padding: 0 var(--s-3);
+  border: 1px solid var(--line); border-radius: var(--radius-pill); font: var(--t-meta); color: var(--ink-muted); background: var(--surface); white-space: nowrap; }
+.pill .g { width: 10px; height: 10px; color: var(--st-up); }
+
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2); min-height: var(--control-h-s);
+  padding: 0 var(--s-4); border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font: var(--t-label); text-decoration: none; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--ink-muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--accent); padding: 0 var(--s-2); }
+.btn svg { width: 16px; height: 16px; flex: none; }
+.theme-btn { min-height: var(--control-h-xs); padding: 0 var(--s-3); font: var(--t-meta); border-radius: var(--radius-pill); }
+
+/* the state glyphs: shape + colour, always followed by the word */
+.g { width: var(--glyph); height: var(--glyph); flex: none; display: inline-block; vertical-align: -0.18em; }
+.g.up { color: var(--st-up); } .g.degraded { color: var(--st-degraded); } .g.down { color: var(--st-down); }
+.g.maint { color: var(--st-maint); } .g.none { color: var(--st-none); } .g.info { color: var(--accent); }
+.word { font: var(--t-label); }
+.g + .word { margin-left: 4px; }
+.word.up { color: var(--st-up-text); } .word.degraded { color: var(--st-degraded-text); } .word.down { color: var(--st-down-text); }
+.word.maint, .word.none { color: var(--ink-muted); }
+
+.chips { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.chip { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-h-xs); padding: 0 var(--s-3);
+  border-radius: var(--radius-pill); background: var(--ground-raised); color: var(--ink); font: var(--t-label); text-decoration: none; white-space: nowrap; }
+.chip.degraded { background: var(--wash-degraded); color: var(--st-degraded-text); }
+.chip.down { background: var(--wash-down); color: var(--st-down-text); }
+.chip.up { background: var(--wash-up); color: var(--st-up-text); }
+.chip.up .g { color: var(--accent); } /* 3.0:1 is too close on the wash: the up glyph goes text-grade there */
+.chip.maint { background: var(--wash-maint); color: var(--ink-muted); }
+a.chip:hover { box-shadow: inset 0 0 0 1px currentColor; }
+
+/* the hero: the owl calls the hour, the sentence says it, the line under it proves it */
+.hero { display: grid; grid-template-columns: auto 1fr; gap: var(--s-4) var(--s-5); align-items: center;
+  padding: var(--s-5); border-radius: var(--radius-2xl); background: var(--wash-up); margin-top: var(--s-5); }
+.hero.degraded { background: var(--wash-degraded); }
+.hero.down { background: var(--wash-down); }
+.hero.maint { background: var(--wash-maint); }
+.hero > .owl { width: clamp(64px, 12vw, 96px); height: auto; }
+.hero h1 { font: var(--t-hero); letter-spacing: -0.01em; text-wrap: balance; }
+.hero .sub { margin-top: var(--s-2); color: var(--ink-muted); font: var(--t-body); }
+.hero .sub b { color: var(--ink); font-weight: 500; }
+.hero .chips { grid-column: 1 / -1; }
+@media (min-width: 840px) { .hero { padding: var(--s-6); } .hero .chips { grid-column: 2; } }
+@media (max-width: 420px) { .hero { grid-template-columns: 1fr; } }
+
+.section { margin-top: var(--s-7); }
+.section-head { display: flex; align-items: baseline; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-3); }
+.section-head h2 { font: var(--t-group); }
+.section-head .fact { margin-left: auto; font: var(--t-secondary); color: var(--ink-muted); }
+
+/* callouts: announcements and maintenance; an icon and a word, a wash, never a coloured edge alone */
+.callout { display: grid; grid-template-columns: auto 1fr; gap: var(--s-1) var(--s-3); padding: var(--s-4); border-radius: var(--radius-l);
+  background: var(--accent-wash); margin-top: var(--s-4); }
+.callout > .g { margin-top: 3px; }
+.callout .k { font: var(--t-label); }
+.callout p { color: var(--ink); max-width: var(--measure); }
+.callout .when { font: var(--t-meta); color: var(--ink-muted); margin-top: var(--s-1); }
+.callout.warning { background: var(--wash-degraded); } .callout.warning .k { color: var(--st-degraded-text); }
+.callout.critical { background: var(--wash-down); } .callout.critical .k { color: var(--st-down-text); }
+.callout.maint { background: var(--wash-maint); }
+.callout.info .k { color: var(--accent); }
+
+/* groups as framed lists of rows (Maison); columns of whole groups on wide screens */
+.groups { display: grid; gap: var(--s-6) var(--s-5); grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--group-col)), 1fr)); align-items: start; }
+.group-head { display: flex; align-items: baseline; gap: var(--s-3); margin-bottom: var(--s-3); }
+.group-head h3 { font: var(--t-group); }
+.group-head .fact { margin-left: auto; font: var(--t-secondary); color: var(--ink-muted); white-space: nowrap; }
+.list { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); overflow: hidden; }
+.list > li + li { border-top: 1px solid var(--line); }
+.row { display: grid; grid-template-columns: var(--glyph) 1fr auto; column-gap: var(--s-3); row-gap: var(--s-2); align-items: center;
+  padding: var(--s-3) var(--s-4); min-height: var(--row-min); color: inherit; text-decoration: none; }
+a.row:hover { background: color-mix(in srgb, var(--ground-raised) 55%, transparent); }
+.row .name { font: var(--t-label); font-size: 0.9375rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .name small { font: var(--t-secondary); color: var(--ink-muted); margin-left: 6px; }
+.row .state { font: var(--t-secondary); text-align: right; white-space: nowrap; }
+.row .state .word { font: var(--t-label); }
+.row .bar { grid-column: 1 / -1; }
+.row .why { grid-column: 2 / -1; font: var(--t-secondary); color: var(--ink-muted); margin-top: -4px; }
+.row.down .why, .row.degraded .why { color: var(--ink); }
+.bar-legend { display: flex; justify-content: space-between; font: var(--t-tiny); color: var(--ink-muted); padding: var(--s-2) var(--s-4) var(--s-3); }
+.bar-legend .d30 { display: none; }
+@media (max-width: 599px) { .bar-legend .d90 { display: none; } .bar-legend .d30 { display: inline; } }
+
+/* the 90-day bar: ONE svg, a handful of run-length rects, gaps drawn by a mask (not 90 nodes) */
+.bar { display: block; overflow: hidden; height: calc(var(--bar-day-h) + 7px); }
+.bar svg { display: block; width: 100%; height: 100%; overflow: visible;
+  -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 calc(100% / 90 - 1.5px), transparent calc(100% / 90 - 1.5px) calc(100% / 90));
+  mask-image: repeating-linear-gradient(90deg, #000 0 calc(100% / 90 - 1.5px), transparent calc(100% / 90 - 1.5px) calc(100% / 90)); }
+.bar .u { fill: var(--st-up); } .bar .d { fill: var(--st-degraded); } .bar .x { fill: var(--st-down); }
+.bar .m { fill: var(--st-maint); } .bar .n { fill: var(--st-none); }
+/* a phone shows the last 30 days: the same svg, three times wider, its right end in view */
+@media (max-width: 599px) { .bar svg { width: 300%; margin-left: -200%; } }
+
+/* the legend: what each shape means, once per page */
+.legend { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); font: var(--t-secondary); color: var(--ink-muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend svg.cell { width: 8px; height: 24px; overflow: visible; }
+
+/* the footer: Hora signs the page, quietly */
+.foot { margin-top: var(--s-7); border-top: 1px solid var(--line); }
+.foot .page { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3) var(--s-5); padding-block: var(--s-5) var(--s-6); font: var(--t-secondary); color: var(--ink-muted); }
+.foot nav { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-4); }
+.foot a { color: var(--ink-muted); }
+.foot a:hover { color: var(--ink); }
+.watched { display: inline-flex; align-items: center; gap: var(--s-2); margin-left: auto; color: var(--ink-muted); text-decoration: none; }
+.watched img { width: 22px; height: 22px; border-radius: 5px; }
+.watched .b { font: 400 1.05rem/1 var(--font-brand); color: var(--ink); transform: translateY(0.14em); }
+
+/* the owl: pose = state; it moves only when the state changes, once */
+.owl { overflow: visible; flex: none; }
+.owl .ln { fill: var(--owl-fill); stroke: var(--owl-line); stroke-width: 1.5; stroke-linejoin: round; }
+.owl .tx { fill: none; stroke: var(--owl-line); stroke-width: 1; stroke-linecap: round; opacity: 0.2; }
+.owl .ft { fill: var(--owl-line); }
+.owl .ey path, .owl .ey line { fill: none; stroke: var(--owl-line); stroke-width: 1.8; stroke-linecap: round; }
+.owl .ey ellipse { fill: var(--owl-line); }
+.owl .ey .glint { fill: var(--owl-fill); }
+.owl .bk { fill: var(--accent); stroke: var(--accent); stroke-width: 0.9; stroke-linejoin: round; }
+.owl .ck { fill: var(--blush); opacity: 0.85; transition: opacity 0.3s; }
+.owl .tl, .owl .tr { transform-box: fill-box; transition: transform 0.35s cubic-bezier(.3,1.4,.6,1); }
+.owl .tl { transform-origin: 100% 100%; } .owl .tr { transform-origin: 0% 100%; }
+.owl .ey > g { transition: opacity 0.18s; opacity: 0; }
+.owl .bd { fill: var(--ground); }
+.owl .badge > g { opacity: 0; }
+.owl .badge { opacity: 0; transition: opacity 0.2s; }
+/* up: asleep, the tufts at rest. Nothing is wrong, so nothing moves. */
+.owl[data-state='up'] .shut-l, .owl[data-state='up'] .shut-r { opacity: 1; }
+.owl[data-state='up'] .tl { transform: rotate(-5deg); } .owl[data-state='up'] .tr { transform: rotate(5deg); }
+/* degraded: one eye open, one tuft up: half an eye on it */
+.owl[data-state='degraded'] .shut-l, .owl[data-state='degraded'] .open-r { opacity: 1; }
+.owl[data-state='degraded'] .tl { transform: rotate(-5deg); } .owl[data-state='degraded'] .tr { transform: rotate(-6deg); }
+/* down: awake, both eyes open, tufts up. Attentive, never alarmed, never sad. */
+.owl[data-state='down'] .open-l, .owl[data-state='down'] .open-r { opacity: 1; }
+.owl[data-state='down'] .tl { transform: rotate(3deg); } .owl[data-state='down'] .tr { transform: rotate(-3deg); }
+/* maintenance: a planned nap, tufts folded */
+.owl[data-state='maint'] .shut-l, .owl[data-state='maint'] .shut-r { opacity: 1; }
+.owl[data-state='maint'] .tl { transform: rotate(-22deg); } .owl[data-state='maint'] .tr { transform: rotate(22deg); }
+/* no data: it cannot see yet; two dashes, no blush */
+.owl[data-state='none'] .dash { opacity: 1; }
+.owl[data-state='none'] .ck { opacity: 0; }
+.owl[data-state='degraded'] .badge, .owl[data-state='down'] .badge, .owl[data-state='maint'] .badge, .owl[data-state='none'] .badge { opacity: 1; }
+.owl[data-state='degraded'] .b-degraded, .owl[data-state='down'] .b-down, .owl[data-state='maint'] .b-maint, .owl[data-state='none'] .b-none { opacity: 1; }
+.owl .b-degraded { color: var(--st-degraded); } .owl .b-down { color: var(--st-down); } .owl .b-maint { color: var(--st-maint); } .owl .b-none { color: var(--st-none); }
+/* waking: one perk of the tufts when the state turns to down, then still */
+.owl.woke .tl, .owl.woke .tr { animation: perk 0.6s ease-out 1; }
+@keyframes perk { 40% { translate: 0 -1.2px; } }
+@media (prefers-reduced-motion: reduce) {
+  .owl *, .owl { transition: none !important; animation: none !important; }
+}
+
+/* theme switch (the only script on a page, with the owl demo) */
+.theme-btn .lbl::before { content: 'Auto'; }
+:root[data-theme='light'] .theme-btn .lbl::before { content: 'Light'; }
+:root[data-theme='dark'] .theme-btn .lbl::before { content: 'Dark'; }
+
+.mock-note { margin: var(--s-6) 0 0; padding: var(--s-3) var(--s-4); border: 1px dashed var(--line); border-radius: var(--radius-l);
+  font: var(--t-secondary); color: var(--ink-muted); max-width: var(--measure-wide); }
+.mock-note b { color: var(--ink); font-weight: 500; }
+
+.owls { overflow: visible; display: block; max-width: 100%; height: auto; }
+.owls .branch { fill: none; stroke: var(--ink-muted); stroke-width: 1.4; stroke-linecap: round; opacity: 0.5; }
+.owls .olab { font: 500 5.2px var(--font-text); fill: var(--ink-muted); }
+/* where it is watched from: places, each with its own shape and word */
+.vantages { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: center; }
+.vchip { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 10px; border-radius: var(--radius-pill); background: var(--ground-raised); font: var(--t-meta); color: var(--ink); white-space: nowrap; }
+.vchip .g { width: 12px; height: 12px; }
+.vchip small { font: var(--t-meta); color: var(--ink-muted); }
+.vchip.down { background: var(--wash-down); } .vchip.degraded { background: var(--wash-degraded); }
+.watchers { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); font: var(--t-secondary); color: var(--ink-muted); }
+.watchers .owls { width: 92px; }
+
+.spark, .facts { display: none; }
+.dtop .page { gap: var(--s-4); }
+.dtop .search { display: none; align-items: center; gap: var(--s-2); min-height: var(--control-h-s); padding: 0 var(--s-3); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--ink-muted); font: var(--t-secondary); width: 18rem; }
+.dtop .search kbd { margin-left: auto; font: var(--t-tiny); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 0 6px; }
+@media (min-width: 840px) { .dtop .search { display: flex; } }
+.dtop .links { display: none; gap: var(--s-1); }
+@media (min-width: 700px) { .dtop .links { display: flex; } }
+.splash { display: grid; gap: var(--s-6); align-items: center; padding-block: var(--s-7) var(--s-6); grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 960px) { .splash { grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr); } }
+.splash .eyebrow { color: var(--accent); }
+.splash h1 { font: 500 clamp(2.25rem, 1.5rem + 3.2vw, 4rem)/1.05 var(--font-display); letter-spacing: -0.015em; margin-top: var(--s-3); text-wrap: balance; }
+.splash .lead { font: 400 1.1875rem/1.6 var(--font-text); color: var(--ink-muted); margin-top: var(--s-4); max-width: 36rem; }
+.splash .actions { display: flex; flex-wrap: wrap; gap: var(--s-2); margin-top: var(--s-5); }
+.splash .actions .btn { min-height: var(--control-h); padding: 0 var(--s-5); border-radius: var(--radius-l); }
+.install { margin-top: var(--s-5); max-width: 36rem; position: relative; }
+.install pre { margin: 0; padding: var(--s-4); padding-right: 5.5rem; background: var(--ink); color: var(--ground); border-radius: var(--radius-l); font: 400 0.8125rem/1.7 var(--font-mono); overflow-x: auto; }
+.install pre .c { opacity: 0.6; }
+.install .btn { position: absolute; top: var(--s-2); right: var(--s-2); background: transparent; color: var(--ground); border-color: color-mix(in srgb, var(--ground) 30%, transparent); min-height: 32px; }
+.stage { position: relative; display: grid; place-items: center; min-height: 360px; }
+.stage .dial { position: absolute; inset: 0; margin: auto; width: min(100%, 420px); aspect-ratio: 1; color: var(--accent-soft); opacity: 0.55; }
+.stage > .owl { width: min(60%, 240px); height: auto; position: relative; }
+.stage .say { position: absolute; bottom: 4%; left: 50%; translate: -50% 0; display: inline-flex; gap: 8px; align-items: center; padding: 8px 14px; border-radius: var(--radius-pill); background: var(--surface); box-shadow: var(--shadow); font: var(--t-label); white-space: nowrap; }
+.why { display: grid; gap: var(--s-4); grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); padding: var(--s-5); }
+.card .ic { width: 40px; height: 40px; border-radius: var(--radius-l); background: var(--accent-wash); color: var(--accent); display: grid; place-items: center; margin-bottom: var(--s-3); }
+.card .ic svg { width: 22px; height: 22px; }
+.card h3 { font: var(--t-group); margin-bottom: var(--s-2); }
+.card p { color: var(--ink-muted); font: var(--t-secondary); font-size: 0.9375rem; line-height: 1.5; }
+.h2 { font: 500 clamp(1.5rem, 1.3rem + 0.8vw, 2rem)/1.2 var(--font-display); margin-bottom: var(--s-4); }
+.flow { display: grid; gap: var(--s-2); grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr)); counter-reset: f; }
+.flow li { list-style: none; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-l); padding: var(--s-4); position: relative; }
+.flow li b { display: flex; gap: 8px; align-items: center; font: var(--t-label); margin-bottom: 4px; }
+.flow li b::before { counter-increment: f; content: counter(f); width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; background: var(--accent-wash); color: var(--accent); font: var(--t-tiny); }
+.flow li span { font: var(--t-secondary); color: var(--ink-muted); }
+.flow li.end { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.flow li.end span { color: var(--on-accent); opacity: 0.85; }
+.flow li.end b::before { background: var(--on-accent); color: var(--accent); }
+.flow { padding: 0; margin: 0; }
+.cmp { width: 100%; border-collapse: collapse; font: var(--t-secondary); min-width: 34rem; }
+.cmp th, .cmp td { padding: var(--s-3); border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.cmp thead th { font: var(--t-meta); color: var(--ink-muted); }
+.cmp thead th.us { color: var(--accent); }
+.cmp td.us { background: color-mix(in srgb, var(--accent-wash) 60%, transparent); font-weight: 500; }
+.cmp th[scope='row'] { font: var(--t-label); }
+.tw { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--surface); }
+.y, .n { display: inline-flex; gap: 6px; align-items: center; }
+.y::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: var(--st-up); }
+.n::before { content: ''; width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--st-none); }
+/* README, as GitHub renders it */
+.gh { border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--surface); overflow: hidden; max-width: 56rem; }
+.gh .bar0 { display: flex; align-items: center; gap: var(--s-2); padding: var(--s-3) var(--s-4); border-bottom: 1px solid var(--line); font: var(--t-meta); color: var(--ink-muted); background: var(--ground-raised); }
+.gh .md { padding: var(--s-5) var(--s-5) var(--s-6); font-family: -apple-system, 'Segoe UI', system-ui, sans-serif; }
+.gh h1 { font: 600 2rem/1.25 -apple-system, 'Segoe UI', system-ui, sans-serif; display: flex; align-items: center; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.gh .shields { display: flex; flex-wrap: wrap; gap: 6px; margin: var(--s-3) 0; }
+.sh { display: inline-flex; font: 11px/20px Verdana, sans-serif; border-radius: 3px; overflow: hidden; }
+.sh b { font-weight: 400; background: #555; color: #fff; padding: 0 6px; }
+.sh i { font-style: normal; background: #0E5E68; color: #fff; padding: 0 6px; }
+.sh i.w { background: #B4633F; }
+.gh p { margin: var(--s-3) 0; line-height: 1.6; max-width: 46rem; }
+.gh blockquote { margin: var(--s-3) 0; padding: 0 1em; border-left: 0.25em solid var(--line); color: var(--ink-muted); }
+.gh .shot { border: 1px solid var(--line); border-radius: var(--radius-m); overflow: hidden; margin-top: var(--s-4); }
+.mini-status { background: var(--ground); padding: var(--s-4); display: grid; gap: var(--s-3); }
+.mini-status .hero { margin: 0; padding: var(--s-4); grid-template-columns: auto 1fr; }
+.mini-status .hero h1 { font: 500 1.5rem/1.2 var(--font-display); border: 0; padding: 0; display: block; }
+.mini-status .hero > .owl { width: 52px; }
+.mini-status .groups { --group-col: 16rem; gap: var(--s-3); }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+<symbol id="g-up" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="currentColor"/></symbol>
+<symbol id="g-degraded" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 2.6a5.4 5.4 0 0 0 0 10.8z" fill="currentColor"/></symbol>
+<symbol id="g-down" viewBox="0 0 16 16"><path d="M8 1.2 14.8 8 8 14.8 1.2 8Z" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/><path d="M8 4.9v3.6" stroke="var(--surface, #fff)" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="11" r=".95" fill="var(--surface, #fff)"/></symbol>
+<symbol id="g-maint" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 4.9V8l2.2 1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="g-none" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.4 2.0"/></symbol>
+<symbol id="g-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.4" fill="currentColor"/><path d="M8 7.3v4" stroke="var(--surface, #fff)" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="4.9" r=".95" fill="var(--surface, #fff)"/></symbol>
+<symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+<symbol id="i-feed" viewBox="0 0 16 16"><path d="M3 3.5a9.5 9.5 0 0 1 9.5 9.5M3 7.5A5.5 5.5 0 0 1 8.5 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="3.8" cy="12.2" r="1.3" fill="currentColor"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="i-copy" viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 2.8H4.4a1.6 1.6 0 0 0-1.6 1.6v6.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+<symbol id="i-pin" viewBox="0 0 16 16"><path d="M8 14.5s4.8-4.3 4.8-8a4.8 4.8 0 0 0-9.6 0c0 3.7 4.8 8 4.8 8Z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="6.5" r="1.6" fill="currentColor"/></symbol>
+<symbol id="i-lock" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.2 7V5a2.8 2.8 0 0 1 5.6 0v2" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+<symbol id="i-print" viewBox="0 0 16 16"><path d="M4.5 6V2.5h7V6M4.5 11.5H3a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v3.5a1 1 0 0 1-1 1h-1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><rect x="4.5" y="9.5" width="7" height="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+<symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+<symbol id="i-gh" viewBox="0 0 16 16"><path fill="currentColor" d="M8 .6a7.4 7.4 0 0 0-2.34 14.42c.37.07.5-.16.5-.36v-1.3c-2.06.45-2.5-.87-2.5-.87-.33-.86-.82-1.09-.82-1.09-.67-.46.05-.45.05-.45.74.05 1.13.76 1.13.76.66 1.13 1.73.8 2.15.61.07-.48.26-.8.47-.99-1.64-.19-3.37-.82-3.37-3.65 0-.8.29-1.46.76-1.98-.08-.19-.33-.94.07-1.95 0 0 .62-.2 2.03.76a7 7 0 0 1 3.7 0c1.41-.96 2.03-.76 2.03-.76.4 1.01.15 1.76.07 1.95.47.52.76 1.18.76 1.98 0 2.84-1.73 3.46-3.38 3.64.27.23.5.68.5 1.37v2.03c0 .2.13.43.5.36A7.4 7.4 0 0 0 8 .6Z"/></symbol>
+</svg>
+<header class="top dtop"><div class="page">
+<a class="sign hora" href="index.html"><img src="assets/mark.svg" alt="" width="32" height="32" style="border-radius:8px"><span class="name">Hora</span></a>
+<span class="search"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-search"/></svg>Search the docs<kbd>Ctrl K</kbd></span>
+<nav class="links" aria-label="Docs"><a class="navlink" href="docs-page.html">Guides</a><a class="navlink" href="#">Reference</a><a class="navlink" href="#">Français</a></nav>
+<a class="btn quiet" href="#" aria-label="Hora on GitHub"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-gh"/></svg></a><button class="btn theme-btn" type="button" aria-label="Theme: auto. Change theme"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-sun"/></svg><span class="lbl" aria-hidden="true"></span></button></div></header>
+<main id="main" class="page">
+<section class="splash" aria-labelledby="h">
+  <div>
+    <p class="eyebrow">Self-hosted uptime monitor</p>
+    <h1 id="h">Hora keeps the hours, so you can sleep.</h1>
+    <p class="lead">One small binary checks your services, keeps their history, and serves a calm status page. It wakes you only when something has really broken: never for a blip.</p>
+    <div class="actions"><a class="btn primary" href="docs-page.html">Get started <svg class="" aria-hidden="true" width="16" height="16"><use href="#i-arrow"/></svg></a><a class="btn" href="status-ok.html">See a status page</a></div>
+    <div class="install"><pre><span class="c"># one container, about 15 MB</span>
+docker run -d -p 8787:8787 \
+  -v "$PWD/hora-config:/etc/hora" \
+  -v hora-data:/data ghcr.io/uplg/hora</pre><button class="btn" type="button"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-copy"/></svg>Copy</button></div>
+  </div>
+  <div class="stage"><svg class="dial" viewBox="0 0 200 200" aria-hidden="true"><circle cx="100" cy="100" r="88" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="1.5 6" stroke-linecap="round"/>
+<path d="M100 4v10M100 186v10M4 100h10M186 100h10M148 16.9l-5 8.7M57 174.4l-5 8.7M183.1 52l-8.7 5M25.6 143l-8.7 5M183.1 148l-8.7-5M25.6 57 16.9 52M148 183.1l-5-8.7M57 25.6 52 16.9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><svg class="owl " data-state="up" viewBox="6 6 40 40" width="240" height="240" role="img" aria-label="Hora's owl, asleep: everything is up" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><span class="say"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg>All 14 services are up</span></div>
+</section>
+
+<section class="section" aria-labelledby="why"><h2 class="h2" id="why">Why Hora</h2>
+<div class="why">
+  <article class="card"><div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></div><h3>Flapping never wakes you up</h3><p>A failed check is retried, an outage needs several failures in a row and a second place to agree, and ten services down behind one database send one alert: the cause.</p></article>
+  <article class="card"><div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9Z M4 7.5l8 4.5 8-4.5M12 12v9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></div><h3>One small binary</h3><p>HTTP, TCP, ping, DNS and push checks, SQLite, the status page and ten alert channels in one static binary. No Node, no Redis, no browser running in the background.</p></article>
+  <article class="card"><div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17a8 8 0 1 1 16 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="m12 17 4-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></div><h3>Targets you can keep</h3><p>Set 99.9 % and Hora shows the downtime you have left, warns when it burns too fast, and writes the monthly report for you.</p></article>
+  <article class="card"><div class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 12h17M12 3.5c2.6 2.6 2.6 14.4 0 17M12 3.5c-2.6 2.6-2.6 14.4 0 17" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></div><h3>A page people trust</h3><p>Plain words on every state, light and dark, readable on a phone, fast with 700 services. Also as an Atom feed, JSON and badges.</p></article>
+</div></section>
+
+<section class="section" aria-labelledby="flow"><h2 class="h2" id="flow">From a blip to an alert, or not</h2>
+<ol class="flow">
+  <li><b>A check fails</b><span>Retried at once. A single blip stops here and leaves no trace.</span></li>
+  <li><b>It fails again</b><span>3 failures in a row (you choose) before anything is called down.</span></li>
+  <li><b>Others agree</b><span>Peers in other places check too: a local network hiccup is not an outage.</span></li>
+  <li><b>Find the cause</b><span>Services that depend on a down one are grouped under it.</span></li>
+  <li class="end"><b>One alert</b><span>The cause and what it affects. Then quiet until it recovers.</span></li>
+</ol></section>
+
+<section class="section" aria-labelledby="cmp"><h2 class="h2" id="cmp">How it compares</h2>
+<div class="tw"><table class="cmp">
+<thead><tr><th scope="col"></th><th scope="col" class="us">Hora</th><th scope="col">Uptime Kuma</th><th scope="col">Gatus</th></tr></thead>
+<tbody>
+<tr><th scope="row">Runs as</th><td class="us">One static binary, ~15 MB image</td><td>Node.js app</td><td>Go binary</td></tr>
+<tr><th scope="row">Configured in</th><td class="us">A TOML file, reloaded live</td><td>A web UI</td><td>A YAML file</td></tr>
+<tr><th scope="row">One alert for a cascade</th><td class="us"><span class="y">Yes, by dependencies</span></td><td><span class="n">No</span></td><td><span class="n">No</span></td></tr>
+<tr><th scope="row">Confirmed from other places</th><td class="us"><span class="y">Yes, peers</span></td><td><span class="n">No</span></td><td><span class="n">No</span></td></tr>
+<tr><th scope="row">Error budget, burn-rate alerts</th><td class="us"><span class="y">Yes</span></td><td><span class="n">No</span></td><td><span class="n">No</span></td></tr>
+<tr><th scope="row">Monthly report</th><td class="us"><span class="y">Yes, printable</span></td><td><span class="n">No</span></td><td><span class="n">No</span></td></tr>
+</tbody></table></div>
+<p class="mock-note"><b>To verify before shipping.</b> The rival columns come from memory, not from a fresh read of their docs. Check them, add measured numbers (image size, RAM) and links, as Maison's README does.</p>
+</section>
+
+<section class="section" aria-labelledby="readme"><h2 class="h2" id="readme">The README header</h2>
+<div class="gh"><div class="bar0"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-gh"/></svg>uplg / hora · README.md</div><div class="md">
+<h1><img src="assets/mark.svg" width="36" height="36" alt="" style="border-radius:8px">Hora</h1>
+<div class="shields"><span class="sh"><b>image</b><i>~15 MB</i></span><span class="sh"><b>checks</b><i>HTTP · TCP · ICMP · DNS · push</i></span><span class="sh"><b>alerts</b><i>10 channels</i></span><span class="sh"><b>wakes you for</b><i class="w">real outages only</i></span></div>
+<p><b>Hora keeps the hours, so you can sleep.</b> A tiny self-hosted uptime monitor: one small binary checks your services, keeps their history in SQLite, serves a calm status page and alerts you when something has really broken.</p>
+<blockquote>Named after the Horai, the Greek keepers of the hours. Its owl dozes while all is well.</blockquote>
+<div class="shot"><div class="mini-status">
+  <section class="hero"><svg class="owl " data-state="up" viewBox="6 6 40 40" width="52" height="52" aria-hidden="true" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><div><h1>Everything is running.</h1><p class="sub" style="margin-top:4px;font:var(--t-secondary)">All 14 services are up.</p></div></section>
+  <div class="groups"><section class="grp" aria-labelledby="g-Peli"><div class="group-head"><h3 id="g-Peli">Pelican</h3><span class="fact">4 services</span></div><ul class="list"><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Website<small>pelican.app</small></span><span class="state"><span class="word up">Up</span> <span class="muted">· 100 %</span></span><a class="bar" href="monitor.html" aria-label="100 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="90" height="22"/></svg></a><span class="facts"><span>Paris <b>84 ms</b></span><span>Frankfurt <b>80 ms</b></span><span>Montréal <b>204 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 64.4 2.1 60.2 4.3 57.1 6.4 60.0 8.5 60.0 10.6 60.7 12.8 58.8 14.9 55.4 17.0 60.2 19.1 65.9 21.3 61.9 23.4 62.7 25.5 59.5 27.7 65.5 29.8 66.2 31.9 63.5 34.0 66.8 36.2 61.4 38.3 56.6 40.4 62.2 42.6 67.9 44.7 67.4 46.8 62.2 48.9 63.6 51.1 67.0 53.2 67.9 55.3 73.6 57.4 76.9 59.6 77.7 61.7 77.7 63.8 80.9 66.0 84.1 68.1 87.5 70.2 88.0 72.3 90.0 74.5 90.0 76.6 85.9 78.7 85.3 80.9 83.6 83.0 87.3 85.1 81.4 87.2 77.1 89.4 81.7 91.5 83.7 93.6 81.0 95.7 78.5 97.9 73.2 100.0 74.2 V100 H0Z"/><path class="l" d="M0.0 64.4 2.1 60.2 4.3 57.1 6.4 60.0 8.5 60.0 10.6 60.7 12.8 58.8 14.9 55.4 17.0 60.2 19.1 65.9 21.3 61.9 23.4 62.7 25.5 59.5 27.7 65.5 29.8 66.2 31.9 63.5 34.0 66.8 36.2 61.4 38.3 56.6 40.4 62.2 42.6 67.9 44.7 67.4 46.8 62.2 48.9 63.6 51.1 67.0 53.2 67.9 55.3 73.6 57.4 76.9 59.6 77.7 61.7 77.7 63.8 80.9 66.0 84.1 68.1 87.5 70.2 88.0 72.3 90.0 74.5 90.0 76.6 85.9 78.7 85.3 80.9 83.6 83.0 87.3 85.1 81.4 87.2 77.1 89.4 81.7 91.5 83.7 93.6 81.0 95.7 78.5 97.9 73.2 100.0 74.2"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Web app</span><span class="state"><span class="word up">Up</span> <span class="muted">· 99.99 %</span></span><a class="bar" href="monitor.html" aria-label="99.99 % up over 90 days, 1 slow day. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="61" height="22"/><rect class="d" x="61" y="7" width="1" height="15"/><rect class="u" x="62" y="0" width="28" height="22"/></svg></a><span class="facts"><span>Paris <b>112 ms</b></span><span>Frankfurt <b>105 ms</b></span><span>Montréal <b>249 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 54.5 2.1 49.2 4.3 54.5 6.4 59.5 8.5 55.4 10.6 52.6 12.8 50.6 14.9 52.9 17.0 51.6 19.1 50.3 21.3 49.3 23.4 53.4 25.5 54.3 27.7 55.5 29.8 52.9 31.9 46.9 34.0 41.5 36.2 41.0 38.3 41.7 40.4 44.5 42.6 50.0 44.7 55.7 46.8 56.1 48.9 58.3 51.1 59.7 53.2 55.0 55.3 54.7 57.4 54.0 59.6 57.2 61.7 62.9 63.8 65.0 66.0 69.3 68.1 69.2 70.2 63.2 72.3 61.1 74.5 64.9 76.6 60.2 78.7 56.7 80.9 53.9 83.0 49.0 85.1 45.8 87.2 42.3 89.4 44.1 91.5 38.3 93.6 32.8 95.7 36.8 97.9 33.8 100.0 31.2 V100 H0Z"/><path class="l" d="M0.0 54.5 2.1 49.2 4.3 54.5 6.4 59.5 8.5 55.4 10.6 52.6 12.8 50.6 14.9 52.9 17.0 51.6 19.1 50.3 21.3 49.3 23.4 53.4 25.5 54.3 27.7 55.5 29.8 52.9 31.9 46.9 34.0 41.5 36.2 41.0 38.3 41.7 40.4 44.5 42.6 50.0 44.7 55.7 46.8 56.1 48.9 58.3 51.1 59.7 53.2 55.0 55.3 54.7 57.4 54.0 59.6 57.2 61.7 62.9 63.8 65.0 66.0 69.3 68.1 69.2 70.2 63.2 72.3 61.1 74.5 64.9 76.6 60.2 78.7 56.7 80.9 53.9 83.0 49.0 85.1 45.8 87.2 42.3 89.4 44.1 91.5 38.3 93.6 32.8 95.7 36.8 97.9 33.8 100.0 31.2"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Public API</span><span class="state"><span class="word up">Up</span> <span class="muted">· 99.97 %</span></span><a class="bar" href="monitor.html" aria-label="99.97 % up over 90 days, 1 day with an outage. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="71" height="22"/><rect class="x" x="71" y="0" width="1" height="29"/><rect class="u" x="72" y="0" width="18" height="22"/></svg></a><span class="facts"><span>Paris <b>64 ms</b></span><span>Frankfurt <b>62 ms</b></span><span>Montréal <b>172 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 63.1 2.1 62.6 4.3 64.2 6.4 62.9 8.5 61.4 10.6 66.6 12.8 72.5 14.9 68.4 17.0 71.3 19.1 74.5 21.3 68.6 23.4 68.9 25.5 64.9 27.7 65.2 29.8 63.5 31.9 67.7 34.0 66.1 36.2 61.6 38.3 61.4 40.4 58.5 42.6 56.4 44.7 61.6 46.8 58.5 48.9 57.5 51.1 59.8 53.2 65.5 55.3 61.1 57.4 61.4 59.6 58.8 61.7 54.2 63.8 51.7 66.0 46.6 68.1 47.9 70.2 44.3 72.3 44.9 74.5 39.7 76.6 35.2 78.7 40.0 80.9 44.4 83.0 47.7 85.1 42.2 87.2 42.9 89.4 41.4 91.5 43.8 93.6 43.7 95.7 45.1 97.9 46.9 100.0 45.8 V100 H0Z"/><path class="l" d="M0.0 63.1 2.1 62.6 4.3 64.2 6.4 62.9 8.5 61.4 10.6 66.6 12.8 72.5 14.9 68.4 17.0 71.3 19.1 74.5 21.3 68.6 23.4 68.9 25.5 64.9 27.7 65.2 29.8 63.5 31.9 67.7 34.0 66.1 36.2 61.6 38.3 61.4 40.4 58.5 42.6 56.4 44.7 61.6 46.8 58.5 48.9 57.5 51.1 59.8 53.2 65.5 55.3 61.1 57.4 61.4 59.6 58.8 61.7 54.2 63.8 51.7 66.0 46.6 68.1 47.9 70.2 44.3 72.3 44.9 74.5 39.7 76.6 35.2 78.7 40.0 80.9 44.4 83.0 47.7 85.1 42.2 87.2 42.9 89.4 41.4 91.5 43.8 93.6 43.7 95.7 45.1 97.9 46.9 100.0 45.8"/></svg></div></li></ul><div class="bar-legend" aria-hidden="true"><span class="d90">90 days ago</span><span class="d30">30 days ago</span><span>Today</span></div></section><section class="grp" aria-labelledby="g-Paym"><div class="group-head"><h3 id="g-Paym">Payments and email</h3><span class="fact">4 services</span></div><ul class="list"><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Card payments</span><span class="state"><span class="word up">Up</span> <span class="muted">· 100 %</span></span><a class="bar" href="monitor.html" aria-label="100 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="90" height="22"/></svg></a><span class="facts"><span>Paris <b>240 ms</b></span><span>Frankfurt <b>220 ms</b></span><span>Montréal <b>454 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 58.5 2.1 55.6 4.3 52.1 6.4 46.8 8.5 43.9 10.6 38.8 12.8 44.5 14.9 44.9 17.0 39.6 19.1 37.8 21.3 33.0 23.4 37.6 25.5 38.0 27.7 41.0 29.8 40.5 31.9 39.6 34.0 45.5 36.2 48.9 38.3 51.5 40.4 46.5 42.6 43.3 44.7 47.4 46.8 43.8 48.9 48.2 51.1 46.8 53.2 51.2 55.3 57.2 57.4 52.8 59.6 56.2 61.7 59.7 63.8 53.9 66.0 49.4 68.1 51.9 70.2 46.4 72.3 45.9 74.5 43.8 76.6 47.3 78.7 42.0 80.9 39.8 83.0 34.2 85.1 30.0 87.2 32.4 89.4 34.1 91.5 38.1 93.6 42.3 95.7 47.6 97.9 49.9 100.0 48.7 V100 H0Z"/><path class="l" d="M0.0 58.5 2.1 55.6 4.3 52.1 6.4 46.8 8.5 43.9 10.6 38.8 12.8 44.5 14.9 44.9 17.0 39.6 19.1 37.8 21.3 33.0 23.4 37.6 25.5 38.0 27.7 41.0 29.8 40.5 31.9 39.6 34.0 45.5 36.2 48.9 38.3 51.5 40.4 46.5 42.6 43.3 44.7 47.4 46.8 43.8 48.9 48.2 51.1 46.8 53.2 51.2 55.3 57.2 57.4 52.8 59.6 56.2 61.7 59.7 63.8 53.9 66.0 49.4 68.1 51.9 70.2 46.4 72.3 45.9 74.5 43.8 76.6 47.3 78.7 42.0 80.9 39.8 83.0 34.2 85.1 30.0 87.2 32.4 89.4 34.1 91.5 38.1 93.6 42.3 95.7 47.6 97.9 49.9 100.0 48.7"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Bank transfers (SEPA)</span><span class="state"><span class="word up">Up</span> <span class="muted">· 100 %</span></span><a class="bar" href="monitor.html" aria-label="100 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="90" height="22"/></svg></a><span class="facts"><span>Paris <b>310 ms</b></span><span>Frankfurt <b>283 ms</b></span><span>Montréal <b>566 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 56.5 2.1 52.6 4.3 52.8 6.4 55.7 8.5 61.7 10.6 59.7 12.8 60.1 14.9 56.9 17.0 58.5 19.1 55.2 21.3 57.9 23.4 54.3 25.5 51.6 27.7 52.6 29.8 52.1 31.9 50.0 34.0 53.6 36.2 53.0 38.3 49.3 40.4 52.1 42.6 48.5 44.7 46.3 46.8 42.1 48.9 44.1 51.1 49.0 53.2 45.4 55.3 41.7 57.4 42.4 59.6 47.3 61.7 50.9 63.8 49.3 66.0 51.8 68.1 46.4 70.2 45.3 72.3 48.9 74.5 47.0 76.6 48.7 78.7 43.5 80.9 38.6 83.0 38.4 85.1 36.7 87.2 34.3 89.4 30.7 91.5 30.0 93.6 35.7 95.7 37.3 97.9 36.1 100.0 38.4 V100 H0Z"/><path class="l" d="M0.0 56.5 2.1 52.6 4.3 52.8 6.4 55.7 8.5 61.7 10.6 59.7 12.8 60.1 14.9 56.9 17.0 58.5 19.1 55.2 21.3 57.9 23.4 54.3 25.5 51.6 27.7 52.6 29.8 52.1 31.9 50.0 34.0 53.6 36.2 53.0 38.3 49.3 40.4 52.1 42.6 48.5 44.7 46.3 46.8 42.1 48.9 44.1 51.1 49.0 53.2 45.4 55.3 41.7 57.4 42.4 59.6 47.3 61.7 50.9 63.8 49.3 66.0 51.8 68.1 46.4 70.2 45.3 72.3 48.9 74.5 47.0 76.6 48.7 78.7 43.5 80.9 38.6 83.0 38.4 85.1 36.7 87.2 34.3 89.4 30.7 91.5 30.0 93.6 35.7 95.7 37.3 97.9 36.1 100.0 38.4"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Invoice emails</span><span class="state"><span class="word up">Up</span> <span class="muted">· 99.98 %</span></span><a class="bar" href="monitor.html" aria-label="99.98 % up over 90 days, 1 slow day. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="72" height="22"/><rect class="d" x="72" y="7" width="1" height="15"/><rect class="u" x="73" y="0" width="17" height="22"/></svg></a><span class="facts"><span>Response <b>1.2 s</b></span><span>from 3 places</span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 62.1 2.1 66.3 4.3 64.5 6.4 69.6 8.5 69.2 10.6 70.8 12.8 76.1 14.9 76.0 17.0 81.6 19.1 82.4 21.3 87.5 23.4 90.0 25.5 90.0 27.7 86.1 29.8 90.0 31.9 90.0 34.0 88.5 36.2 83.1 38.3 82.2 40.4 83.4 42.6 77.7 44.7 83.1 46.8 78.8 48.9 81.4 51.1 85.6 53.2 90.0 55.3 90.0 57.4 86.2 59.6 90.0 61.7 89.0 63.8 87.4 66.0 88.9 68.1 88.3 70.2 90.0 72.3 90.0 74.5 90.0 76.6 87.8 78.7 88.7 80.9 90.0 83.0 89.0 85.1 89.5 87.2 90.0 89.4 86.5 91.5 84.1 93.6 87.2 95.7 86.3 97.9 86.0 100.0 81.5 V100 H0Z"/><path class="l" d="M0.0 62.1 2.1 66.3 4.3 64.5 6.4 69.6 8.5 69.2 10.6 70.8 12.8 76.1 14.9 76.0 17.0 81.6 19.1 82.4 21.3 87.5 23.4 90.0 25.5 90.0 27.7 86.1 29.8 90.0 31.9 90.0 34.0 88.5 36.2 83.1 38.3 82.2 40.4 83.4 42.6 77.7 44.7 83.1 46.8 78.8 48.9 81.4 51.1 85.6 53.2 90.0 55.3 90.0 57.4 86.2 59.6 90.0 61.7 89.0 63.8 87.4 66.0 88.9 68.1 88.3 70.2 90.0 72.3 90.0 74.5 90.0 76.6 87.8 78.7 88.7 80.9 90.0 83.0 89.0 85.1 89.5 87.2 90.0 89.4 86.5 91.5 84.1 93.6 87.2 95.7 86.3 97.9 86.0 100.0 81.5"/></svg></div></li></ul><div class="bar-legend" aria-hidden="true"><span class="d90">90 days ago</span><span class="d30">30 days ago</span><span>Today</span></div></section></div>
+</div></div>
+</div></div>
+</section>
+</main>
+<footer class="foot"><div class="page"><nav aria-label="More"><a href="#">Getting started</a><a href="#">Configuration</a><a href="#">Status page</a><a href="#">CLI</a><a href="#">API</a><a href="#">Roadmap</a></nav>
+<span class="watched"><img src="assets/mark.svg" alt="" width="22" height="22"><span>MIT licence ·</span><span class="b">Hora</span></span></div></footer>
+
+</body>
+</html>

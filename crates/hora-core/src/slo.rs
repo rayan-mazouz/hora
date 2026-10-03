@@ -58,6 +58,21 @@ pub fn consumed_minutes(available: i64, total: i64, covered_minutes: i64) -> i64
     down.saturating_mul(covered_minutes) / total
 }
 
+/// Error-budget minutes left over a full `window_days` window, given the
+/// window's check counts: the budget minus the estimated downtime consumed.
+/// Negative once the budget is overspent (by that many minutes).
+#[must_use]
+pub fn remaining_minutes(
+    window_days: u16,
+    slo_basis_points: u32,
+    available: i64,
+    total: i64,
+) -> i64 {
+    let window_minutes = i64::from(window_days) * 24 * 60;
+    budget_minutes(window_days, slo_basis_points)
+        - consumed_minutes(available, total, window_minutes)
+}
+
 /// Estimated seconds until the budget is exhausted at the current burn rate:
 /// downtime accrues at `burn × (1 - slo)` seconds per second, so the remaining
 /// budget divided by that rate. `None` when the burn is not positive (no
@@ -122,6 +137,16 @@ mod tests {
         // 1% of checks down across 30 covered days = 432 minutes down.
         assert_eq!(consumed_minutes(9900, 10_000, 30 * 1440), 432);
         assert_eq!(consumed_minutes(0, 0, 30 * 1440), 0);
+    }
+
+    #[test]
+    fn remaining_budget_goes_negative_when_overspent() {
+        // 99% over 30d: 432 minutes of budget.
+        assert_eq!(remaining_minutes(30, 9900, 0, 0), 432);
+        // 0.5% down consumes 216 of them.
+        assert_eq!(remaining_minutes(30, 9900, 9950, 10_000), 216);
+        // 2% down is 864 minutes: 432 over.
+        assert_eq!(remaining_minutes(30, 9900, 9800, 10_000), -432);
     }
 
     #[test]

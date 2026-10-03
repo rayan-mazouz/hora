@@ -17,34 +17,52 @@ Editor...) at it.
 | `GET /history` | Incident history page (HTML). |
 | `GET /history.atom` | Incident history as an Atom feed. |
 | `GET /status/{group}` | Status page restricted to one display group ([group tokens](../../guides/multi-tenant/) accepted). |
-| `GET /report/{YYYY-MM}` | Printable monthly SLA report; `?group=` scopes it to one group. |
+| `GET /incident/{id}` | One incident as a post-mortem page, with the raw markdown to copy. Visitors get the sanitized view; a private monitor's incident is a 404. |
+| `GET /timeline` | The unified chronology of the last 7 days: downs and recoveries, events, pushed alerts, announcements, silences. Visitors see public incidents and announcements only. |
+| `GET /report/{YYYY-MM}` | Printable monthly SLA report; `?group=` scopes it to one group. Months older than the 12-month aggregate retention answer 400. |
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
-| `POST /api/push/{id}` | Record a heartbeat for a push monitor. |
+| `POST /api/push/{id}` | Record a heartbeat for a push monitor or a watched peer. |
 | `POST /api/monitors/{id}/alert` | Push an ad-hoc alert to a monitor's channels (a producer's own failure); records a timeline line, never changes the monitor's status. |
-| `POST /api/silence` | Mute alerts ad hoc (deploy hook). |
+| `POST /api/silence` | Mute alerts ad hoc (deploy hook). Requires `server.auth_token`. |
+| `POST /api/event` | Record an event marker ("deploy api v2.3"), correlated into incidents. Requires `server.auth_token`. |
 | `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
-| `POST /api/announce` | Pin a public status-page banner (`DELETE` clears); auto-expiry via `until`. Requires `server.auth_token`. |
+| `POST /api/announce` | Pin a public status-page banner (`DELETE` clears); auto-expiry via `until`, a duration (`4h`) or a UTC time of day (`18:00`). Requires `server.auth_token`. |
 | `POST /api/peer/probe` | [Multi-vantage confirmation](../../guides/peers/#multi-vantage-confirmation) between nodes: probe a target *from this node's own config* and answer with the verdict. Requires the requesting peer's `listen_token`. |
+| `GET /api/peer/monitors?from=<peer-id>` | The mesh exchange behind `hora peers diff` and the per-vantage view: this node's probeable monitors with its own view of each. Same peer authentication as `/api/peer/probe`. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge. |
 | `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge. |
 | `GET /api/openapi.json` | The OpenAPI 3.1 spec, generated from the code. |
-| `GET /healthz` | Liveness probe (this node and its view of watched peers). |
+| `GET /healthz` | Health of this node and its view of watched peers, as JSON. Answers **503** when the node is degraded (stalled scheduler, unwritable database), 200 otherwise. |
 
 ## Authentication
 
-With `server.auth_token` set, the page, `/api/summary`,
-`/api/monitors/{id}/latency`, `/metrics`, `/history` and `/history.atom`
-accept the token - as `Authorization: Bearer <token>` (preferred) or
-`?token=` - to include monitors marked `public = false`. Without it they
-serve the public subset only; a private monitor answers exactly like a
-missing one (404), so its existence is not revealed either way.
+Hora knows three kinds of token, each sent in a header:
+
+| Token | Header | Opens |
+| --- | --- | --- |
+| `server.auth_token` (operator) | `Authorization: Bearer <token>` | Private monitors on every read view; announce, silence, event and alert writes. |
+| A monitor's `push_token` | `X-Push-Token: <token>` | `POST /api/push/{id}` and `POST /api/monitors/{id}/alert` for that monitor. |
+| A group token | `Authorization: Bearer <token>` | `/status/{group}` and `/report/{month}?group=` with that group's full detail. |
+
+Without a token, read views serve the public subset only, and a private
+monitor answers exactly like a missing one (404), so its existence is not
+revealed.
+
+**Query-string tokens.** Read-only views (the page, `/history`,
+`/history.atom`, `/timeline`, `/metrics`, `/api/summary`, latency) also
+accept `?token=`, which is handy for a kiosk screen or a feed reader that
+cannot set headers. On **write** endpoints `?token=` is **deprecated**: it
+still works, but the response carries `Deprecation: true` and a `Link` to
+this section, and Hora logs one warning per endpoint. A token in a URL ends
+up in proxy access logs, browser history and shell history - send the
+header instead.
 
 ## `POST /api/push/{id}`
 
 Record a heartbeat for a push monitor (or a watched peer). Send the token as
-an `X-Push-Token` header - preferred, it stays out of proxy access logs - or
-as `?token=`:
+an `X-Push-Token` header (`?token=` still works but is
+[deprecated](#authentication)):
 
 ```sh
 curl -fsS -X POST -H "X-Push-Token: ${TOKEN}" \
@@ -52,8 +70,14 @@ curl -fsS -X POST -H "X-Push-Token: ${TOKEN}" \
 ```
 
 Optional query: `status=up|down|degraded` (default up), `msg=...` (recorded
-with the heartbeat, bounded), `ping=<ms>`. Answers 401 on a wrong token, 404
-if the id is not a push target.
+with the heartbeat, bounded), `ping=<ms>`. Answers 401 on a wrong token -
+and on an id that is not a push target, so push ids cannot be probed from
+outside - and 400 on an unknown `status` or a negative `ping`.
+
+The `status` is the job's verdict and drives alerting: `down` counts as a
+failure with `msg` as the reason (confirmed down after `fail_threshold`),
+`degraded` counts as degraded. Two pushes in the same second: the last one
+wins. See [push monitors](../../guides/monitors/#push-heartbeat).
 
 ## `POST /api/monitors/{id}/alert`
 
@@ -64,8 +88,9 @@ monitor's `notify` channels immediately, adds a line to that monitor's
 timeline (shown on `/history`), and **never** marks the monitor down: status
 stays driven by probes/heartbeats alone.
 
-Authenticate with the monitor's own `push_token` as an `X-Push-Token` header
-(preferred), or with `server.auth_token` as `Authorization: Bearer` / `?token=`.
+Authenticate with the monitor's own `push_token` as an `X-Push-Token` header,
+or with `server.auth_token` as `Authorization: Bearer` (`?token=` is
+[deprecated](#authentication)).
 The endpoint is closed unless one of those is configured and matches.
 
 ```sh
@@ -84,7 +109,8 @@ JSON body: `severity` (`info` default, `warning`, `error`, `critical`),
 `title` (required), `message` (optional), `dedup_key` (optional) and `tags`
 (optional map, folded into the message). Answers **202 Accepted** with
 `{"status":"dispatched","id":…}`; a 400 on an empty title or unknown severity,
-401/404 like the push endpoint.
+401 on a missing or wrong credential (also for an unknown id), and 404 for
+an unknown id only with the operator token.
 
 **Severity → priority.** On backends that have a native priority - ntfy,
 Pushover, Gotify - the severity maps onto it (so `critical` pages louder than
@@ -108,28 +134,80 @@ curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
   "https://status.example.com/api/silence?monitors=api,web&duration=10m&reason=deploy"
 ```
 
-`monitors` is a comma-separated id list or `all`; `duration` looks like
+`monitors` is a comma-separated list of monitor ids or watched peers'
+`listen_id`s, or `all` (silences mute peer-watch alerts too); `duration` looks like
 `10m` / `1h30m` (max 7 days); `reason` is optional. **Strictly requires
 `server.auth_token`** - muting alerts is an operator action, so without a
 configured token the endpoint is closed. Unknown ids answer 404 (a typo'd
 hook fails loudly), an unparseable duration 400. Checks keep recording; only
 alerting is muted.
 
+## `POST /api/announce`
+
+Pin a public banner on the status page; `DELETE /api/announce` clears them
+all. Requires `server.auth_token`.
+
+```sh
+curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
+  "https://status.example.com/api/announce?title=Fibre+incident&body=ETA+6pm&severity=warning&until=18:00"
+```
+
+`severity` is `info` (default), `warning`, `critical` or `resolved`. `until` is a duration
+(`4h`, `90m`, at most `365d`) or a time of day in UTC (`18:00`, the next
+occurrence); without it the banner stays until cleared. See
+[Announcements](../../guides/alerting/#announcements).
+
+## `GET /metrics`
+
+Prometheus text format. Per monitor: `hora_monitor_status{id,name,status}`
+(set for every monitor, including one whose status is still unknown),
+`hora_monitor_up` and `hora_monitor_degraded` (omitted while the status is
+unknown, so a restart never reads as an outage),
+`hora_monitor_uptime_ratio`, `hora_monitor_last_latency_ms`,
+`hora_monitor_latency_ms{quantile}` (a gauge) and `hora_cert_expiry_days`.
+Private monitors need the operator token.
+
 ## Rate limiting & security headers
 
-The `/api/*` endpoints (summary, latency, push, alert, silence) are
-**rate-limited per client IP** (configurable; read once at startup) and send
-`x-ratelimit-*` / `retry-after` headers; the badges and `/api/openapi.json`
-are not. The client IP is taken from `X-Forwarded-For` / `X-Real-IP` by
-default, so run Hora behind a proxy that sets it - a direct client could
-otherwise spoof it. Behind Cloudflare, set
-`server.client_ip_header = "cf-connecting-ip"` and lock the origin down.
+Every route except static assets and `/api/openapi.json` is **rate-limited
+per client IP**, with `x-ratelimit-*` / `retry-after` headers. The `/api/*`
+endpoints use `rate_limit_burst` / `rate_limit_refill_secs`; pages, badges,
+reports, heatmaps, `/metrics` and `/healthz` get four times the burst and
+refill. These settings are read once at startup. An IPv6 client is counted
+by its `/64` (one subscriber usually holds the whole prefix, so a bucket per
+address would be no limit at all), and an IPv4-mapped address as IPv4.
+
+**Client IP behind a proxy.** By default the client is the TCP peer, never a
+forwarded header a direct client could forge. Behind a reverse proxy that
+means every visitor shares the proxy's address - and its bucket - so tell
+Hora which header your proxy sets:
+
+```toml
+[server]
+client_ip_header = "x-real-ip"          # nginx: proxy_set_header X-Real-IP $remote_addr;
+# client_ip_header = "cf-connecting-ip" # behind Cloudflare
+```
+
+Only name a header your proxy overwrites, and block direct access to the
+origin. Hora takes the first address of the header, so `x-forwarded-for`
+is safe only with a proxy that replaces it (Caddy's default) rather than
+appending to what the client sent (nginx's `$proxy_add_x_forwarded_for`).
 
 `allowed_origins` controls CORS (empty = allow any, since the data is
-read-only and public). Responses carry a strict CSP,
-`X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`, plus an
-`x-request-id` (an inbound one is honoured, otherwise minted) echoed on the
-response for log correlation.
+read-only and public). Responses carry a strict CSP (no script,
+`form-action 'self'`), `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY`, `Permissions-Policy` and
+`Cross-Origin-Opener-Policy`, plus an `x-request-id` (a well-formed inbound
+one is honoured, otherwise minted) echoed on the response for log
+correlation. A response to a request that carried a credential
+(`Authorization`, `X-Push-Token` or `?token=`) is marked
+`Cache-Control: no-store`, so no shared cache in front of Hora and no
+browser disk cache keeps an operator or group view.
+
+**HTTPS and HSTS** belong to the reverse proxy that terminates TLS: Hora
+serves plain HTTP. Set `Strict-Transport-Security` there, for example
+`header Strict-Transport-Security "max-age=31536000"` in Caddy or
+`add_header Strict-Transport-Security "max-age=31536000" always;` in nginx.
 
 ## Badges
 

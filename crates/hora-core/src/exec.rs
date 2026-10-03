@@ -12,38 +12,46 @@
 //! scrubbed environment - the daemon's own env carries notification tokens
 //! that no plugin has any business reading.
 
+use crate::status::CheckStatus;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt as _;
 
-use crate::config::Monitor;
-use crate::probe::Outcome;
+use crate::config::{ExecSpec, Monitor};
+use crate::probe::{FailureKind, Outcome};
 
 /// Cap on the output kept from a plugin (the first line becomes the
 /// message). The pipe keeps being drained beyond it, so a chatty but healthy
 /// plugin never blocks on a full pipe and times out.
-const MAX_OUTPUT_BYTES: u64 = 8 * 1024;
+const MAX_OUTPUT_BYTES: usize = 8 * 1024;
 
 /// Cap on the message stored from the plugin's first line.
 const MAX_MESSAGE_CHARS: usize = 300;
 
+/// How long the output is still read once the plugin has exited. A
+/// descendant it left running (daemonized, or backgrounded with `&`) may hold
+/// the pipes open forever; the plugin's verdict is its exit code, so the probe
+/// stops waiting for the pipes to close shortly after it - and kills the
+/// process group still holding them.
+const OUTPUT_GRACE: Duration = Duration::from_millis(500);
+
 /// Run one exec probe. Every failure mode - missing or non-executable file,
 /// an escape attempt, a timeout, a signal - is a down with a clear reason;
 /// the probe itself can never break the scheduler loop.
-pub(crate) async fn run(exec_dir: &Path, monitor: &Monitor) -> Outcome {
-    let Some(name) = monitor.command.first() else {
-        // Config validation rejects this; defensive only.
-        return Outcome::down("exec monitor has no command".to_owned());
-    };
-    let program = match resolve(exec_dir, name) {
+///
+/// `exec_dir` is the canonical `HORA_EXEC_DIR` (resolved once at config load).
+pub(crate) async fn run(exec_dir: &Path, monitor: &Monitor, spec: &ExecSpec) -> Outcome {
+    let name = &spec.program;
+    let program = match resolve(exec_dir, name).await {
         Ok(program) => program,
-        Err(reason) => return Outcome::down(reason),
+        Err(reason) => return Outcome::down(FailureKind::Plugin, reason),
     };
 
     let start = Instant::now();
-    let mut child = match tokio::process::Command::new(&program)
-        .args(&monitor.command[1..])
+    let mut command = tokio::process::Command::new(&program);
+    command
+        .args(&spec.args)
         .current_dir(exec_dir)
         // A scrubbed environment: the daemon's env carries channel tokens
         // (`${VAR}` interpolation); a plugin gets the bare POSIX minimum.
@@ -57,71 +65,141 @@ pub(crate) async fn run(exec_dir: &Path, monitor: &Monitor) -> Outcome {
         .stderr(std::process::Stdio::piped())
         // If this future is dropped (monitor removed mid-probe), the child
         // dies with it instead of leaking.
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+    // Its own process group, so a timeout kills everything the plugin
+    // started - a `sh` wrapper's hung `curl` - not only the direct child.
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(err) => return Outcome::down(format!("could not run {name}: {err}")),
+        Err(err) => {
+            return Outcome::down(FailureKind::Plugin, format!("could not run {name}: {err}"));
+        }
     };
+    // Declared after `child`, so dropped first: the group is killed while
+    // its leader is still unreaped and the id cannot have been reused.
+    let mut group = ProcessGroup(child.id());
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let wait = async {
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let (waited, latency) = {
         // Read both streams concurrently with the wait: a plugin filling a
         // pipe we never drained would deadlock against its own exit.
-        let (status, out, err) =
-            tokio::join!(child.wait(), read_capped(stdout), read_capped(stderr));
-        (status, out, err)
+        let readers = async {
+            tokio::join!(read_capped(stdout, &mut out), read_capped(stderr, &mut err));
+        };
+        tokio::pin!(readers);
+        let mut drained = false;
+        let waited = tokio::time::timeout(monitor.timeout(), async {
+            loop {
+                tokio::select! {
+                    status = child.wait() => break status,
+                    () = &mut readers, if !drained => drained = true,
+                }
+            }
+        })
+        .await;
+        let latency = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
+        if matches!(waited, Ok(Ok(_))) {
+            // Pipes still open after the grace: a descendant the plugin left
+            // behind holds them (`sleep 30 &`), and would outlive every probe
+            // - one more per interval. Kill the group. Its id is still the
+            // group's: a pid stays reserved while it names a process group
+            // with members, and one of them holds our pipes. A descendant
+            // that closed them (a proper daemon) is left alone.
+            if !drained && tokio::time::timeout(OUTPUT_GRACE, readers).await.is_err() {
+                group.kill();
+            }
+            group.disarm();
+        }
+        (waited, latency)
     };
 
-    match tokio::time::timeout(monitor.timeout(), wait).await {
-        Ok((Ok(status), out, err)) => {
-            let latency = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
+    match waited {
+        Ok(Ok(status)) => {
             let message = first_line(&out).or_else(|| first_line(&err));
             outcome_for(status.code(), message, latency)
         }
-        Ok((Err(error), _, _)) => Outcome::down(format!("exec wait failed: {error}")),
+        Ok(Err(error)) => Outcome::down(FailureKind::Plugin, format!("exec wait failed: {error}")),
         Err(_elapsed) => {
             // SIGKILL, not a polite signal: a stuck plugin already had the
             // monitor's whole timeout to finish.
+            group.kill();
             let _ = child.kill().await;
-            Outcome::down(format!(
-                "plugin timed out after {}s",
-                monitor.timeout().as_secs()
-            ))
+            Outcome::down(
+                FailureKind::Plugin,
+                format!("plugin timed out after {}s", monitor.timeout().as_secs()),
+            )
         }
     }
 }
 
-/// Resolve `name` strictly inside `exec_dir`: the joined path is
-/// canonicalized and must still live under the (canonicalized) directory, so
-/// neither `../` (already rejected at config load) nor a symlink planted in
-/// the directory can escape it.
-fn resolve(exec_dir: &Path, name: &str) -> Result<std::path::PathBuf, String> {
-    let dir = exec_dir
-        .canonicalize()
-        .map_err(|err| format!("HORA_EXEC_DIR unusable: {err}"))?;
-    let program = dir
-        .join(name)
-        .canonicalize()
+/// The plugin's process group (its id is the plugin's pid), sent `SIGKILL`
+/// as a whole on timeout - and on drop, should the probe be dropped mid-run -
+/// so no descendant outlives the plugin. Disarmed once the plugin is reaped.
+struct ProcessGroup(Option<u32>);
+
+impl ProcessGroup {
+    fn kill(&mut self) {
+        let Some(id) = self.0.take() else {
+            return;
+        };
+        #[cfg(unix)]
+        if let Ok(id) = i32::try_from(id) {
+            // ESRCH (the group already gone) is the outcome we want anyway.
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(id),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        #[cfg(not(unix))]
+        let _ = id;
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// Resolve `name` strictly inside the canonical `exec_dir`: the joined path
+/// is canonicalized and must still live under the directory, so neither
+/// `../` (already rejected at config load) nor a symlink planted in the
+/// directory can escape it. Off the runtime threads: it touches the disk.
+async fn resolve(exec_dir: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+    let program = tokio::fs::canonicalize(exec_dir.join(name))
+        .await
         .map_err(|err| format!("plugin {name} not found: {err}"))?;
-    if !program.starts_with(&dir) {
+    if !program.starts_with(exec_dir) {
         return Err(format!("plugin {name} escapes HORA_EXEC_DIR, refusing"));
     }
     Ok(program)
 }
 
-/// Read a child stream keeping at most [`MAX_OUTPUT_BYTES`], then drain the
-/// rest to the void so the child never blocks on a full pipe.
-async fn read_capped(stream: Option<impl tokio::io::AsyncRead + Unpin>) -> Vec<u8> {
-    let Some(stream) = stream else {
-        return Vec::new();
+/// Read a child stream into `kept`, keeping at most [`MAX_OUTPUT_BYTES`] and
+/// draining the rest to the void so the child never blocks on a full pipe.
+/// What was read stays in `kept` even if this future is dropped mid-way.
+async fn read_capped(stream: Option<impl tokio::io::AsyncRead + Unpin>, kept: &mut Vec<u8>) {
+    let Some(mut stream) = stream else {
+        return;
     };
-    let mut kept = Vec::new();
-    let mut capped = stream.take(MAX_OUTPUT_BYTES);
-    let _ = capped.read_to_end(&mut kept).await;
-    let _ = tokio::io::copy(&mut capped.into_inner(), &mut tokio::io::sink()).await;
-    kept
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                let room = MAX_OUTPUT_BYTES.saturating_sub(kept.len());
+                kept.extend_from_slice(&chunk[..read.min(room)]);
+            }
+        }
+    }
 }
 
 /// The plugin's message: its first output line, with the `|perfdata` tail
@@ -130,40 +208,38 @@ fn first_line(output: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(output);
     let line = text.lines().next()?.trim();
     let line = line.split('|').next().unwrap_or(line).trim();
-    (!line.is_empty()).then(|| line.chars().take(MAX_MESSAGE_CHARS).collect())
+    (!line.is_empty()).then(|| {
+        crate::fmt::printable(line)
+            .chars()
+            .take(MAX_MESSAGE_CHARS)
+            .collect()
+    })
 }
 
 /// Map an exit code to an outcome, monitoring-plugins style. `None` (killed
 /// by a signal) is down: a crashed check vouches for nothing.
 fn outcome_for(code: Option<i32>, message: Option<String>, latency_ms: i64) -> Outcome {
     match code {
-        Some(0) => Outcome {
-            up: true,
-            degraded: false,
-            latency_ms: Some(latency_ms),
-            status_code: None,
-            error: None,
-            snapshot: None,
-        },
+        Some(0) => Outcome::up(false, Some(latency_ms), None),
         Some(1) => Outcome {
-            up: true,
-            degraded: true,
+            status: CheckStatus::Degraded,
             latency_ms: Some(latency_ms),
             status_code: None,
             error: Some(message.unwrap_or_else(|| "plugin warning (exit 1)".to_owned())),
+            reason: Some(FailureKind::Plugin),
             snapshot: None,
         },
         Some(code) => Outcome {
-            up: false,
-            degraded: false,
+            status: CheckStatus::Down,
             latency_ms: Some(latency_ms),
             status_code: None,
             error: Some(
                 message.unwrap_or_else(|| format!("plugin reported critical (exit {code})")),
             ),
+            reason: Some(FailureKind::Plugin),
             snapshot: None,
         },
-        None => Outcome::down("plugin killed by a signal".to_owned()),
+        None => Outcome::down(FailureKind::Plugin, "plugin killed by a signal".to_owned()),
     }
 }
 
@@ -184,6 +260,9 @@ mod tests {
                 std::env::temp_dir().join(format!("hora-exec-test-{label}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("create fixture dir");
+            // `run` takes the canonical directory, as config load provides it
+            // (on macOS the temp dir lives behind the /var -> /private/var link).
+            let dir = dir.canonicalize().expect("canonical fixture dir");
             Self { dir }
         }
 
@@ -228,6 +307,13 @@ mod tests {
         .remove(0)
     }
 
+    async fn run_exec(dir: &Path, monitor: &Monitor) -> Outcome {
+        let crate::config::MonitorKind::Exec(spec) = &monitor.spec else {
+            panic!("not an exec monitor");
+        };
+        run(dir, monitor, spec).await
+    }
+
     #[tokio::test]
     async fn exit_codes_follow_the_monitoring_plugins_convention() {
         let fixture = Fixture::new("codes");
@@ -236,23 +322,23 @@ mod tests {
         fixture.script("crit", r#"echo "DISK CRITICAL - 99% used"; exit 2"#);
         fixture.script("silent-crit", "exit 3");
 
-        let up = run(&fixture.dir, &exec_monitor(&["ok"], 5)).await;
-        assert!(up.up && !up.degraded);
+        let up = run_exec(&fixture.dir, &exec_monitor(&["ok"], 5)).await;
+        assert!(up.is_up() && !up.is_degraded());
         assert_eq!(up.error, None);
         assert!(up.latency_ms.is_some());
 
         // Exit 1: degraded, message kept, perfdata-free.
-        let warn = run(&fixture.dir, &exec_monitor(&["warn"], 5)).await;
-        assert!(warn.up && warn.degraded);
+        let warn = run_exec(&fixture.dir, &exec_monitor(&["warn"], 5)).await;
+        assert!(warn.is_up() && warn.is_degraded());
         assert_eq!(warn.error.as_deref(), Some("DISK WARNING - 85% used"));
 
-        let crit = run(&fixture.dir, &exec_monitor(&["crit"], 5)).await;
-        assert!(!crit.up);
+        let crit = run_exec(&fixture.dir, &exec_monitor(&["crit"], 5)).await;
+        assert!(!crit.is_up());
         assert_eq!(crit.error.as_deref(), Some("DISK CRITICAL - 99% used"));
 
         // No output: a synthesized reason carries the exit code.
-        let silent = run(&fixture.dir, &exec_monitor(&["silent-crit"], 5)).await;
-        assert!(!silent.up);
+        let silent = run_exec(&fixture.dir, &exec_monitor(&["silent-crit"], 5)).await;
+        assert!(!silent.is_up());
         assert!(silent.error.as_deref().unwrap().contains("exit 3"));
     }
 
@@ -260,7 +346,7 @@ mod tests {
     async fn arguments_reach_the_plugin_and_perfdata_is_stripped() {
         let fixture = Fixture::new("args");
         fixture.script("echoer", r#"echo "got $1 $2 | perf=1"; exit 2"#);
-        let outcome = run(&fixture.dir, &exec_monitor(&["echoer", "-H", "x.org"], 5)).await;
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["echoer", "-H", "x.org"], 5)).await;
         assert_eq!(outcome.error.as_deref(), Some("got -H x.org"));
     }
 
@@ -269,8 +355,8 @@ mod tests {
         let fixture = Fixture::new("stuck");
         fixture.script("hang", "sleep 60");
         let started = std::time::Instant::now();
-        let outcome = run(&fixture.dir, &exec_monitor(&["hang"], 1)).await;
-        assert!(!outcome.up);
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["hang"], 1)).await;
+        assert!(!outcome.is_up());
         assert!(outcome.error.as_deref().unwrap().contains("timed out"));
         assert!(started.elapsed().as_secs() < 5, "killed promptly");
     }
@@ -283,8 +369,8 @@ mod tests {
             "flood",
             r#"echo "still fine"; i=0; while [ $i -lt 4000 ]; do printf '%4096s' x; i=$((i+1)); done; exit 0"#,
         );
-        let outcome = run(&fixture.dir, &exec_monitor(&["flood"], 10)).await;
-        assert!(outcome.up, "{:?}", outcome.error);
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["flood"], 10)).await;
+        assert!(outcome.is_up(), "{:?}", outcome.error);
     }
 
     #[tokio::test]
@@ -293,8 +379,8 @@ mod tests {
         // A symlink inside the dir pointing outside it: refused even though
         // the *name* looks legitimate.
         std::os::unix::fs::symlink("/bin/sh", fixture.dir.join("sneaky")).expect("symlink");
-        let outcome = run(&fixture.dir, &exec_monitor(&["sneaky"], 5)).await;
-        assert!(!outcome.up);
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["sneaky"], 5)).await;
+        assert!(!outcome.is_up());
         assert!(
             outcome.error.as_deref().unwrap().contains("escapes"),
             "{:?}",
@@ -305,14 +391,80 @@ mod tests {
     #[tokio::test]
     async fn missing_plugins_and_missing_dirs_are_clean_downs() {
         let fixture = Fixture::new("missing");
-        let outcome = run(&fixture.dir, &exec_monitor(&["nope"], 5)).await;
-        assert!(!outcome.up);
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["nope"], 5)).await;
+        assert!(!outcome.is_up());
         assert!(outcome.error.as_deref().unwrap().contains("not found"));
 
         let gone = std::path::Path::new("/nonexistent-hora-exec-dir");
-        let outcome = run(gone, &exec_monitor(&["nope"], 5)).await;
-        assert!(!outcome.up);
-        assert!(outcome.error.as_deref().unwrap().contains("unusable"));
+        let outcome = run_exec(gone, &exec_monitor(&["nope"], 5)).await;
+        assert!(!outcome.is_up());
+        assert!(outcome.error.as_deref().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn a_timeout_kills_the_whole_process_group() {
+        let fixture = Fixture::new("group");
+        let pidfile = fixture.dir.join("grandchild.pid");
+        // A wrapper whose own child hangs: killing only the wrapper would
+        // leave the `sleep` orphaned, one per interval.
+        fixture.script(
+            "wrapper",
+            &format!("sleep 60 &\necho $! > {}\nwait", pidfile.display()),
+        );
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["wrapper"], 1)).await;
+        assert!(outcome.error.as_deref().unwrap().contains("timed out"));
+
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("pid written")
+            .trim()
+            .parse()
+            .expect("numeric pid");
+        let pid = nix::unistd::Pid::from_raw(pid);
+        // SIGKILLed, then reaped by init once orphaned: poll for it to vanish.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while nix::sys::signal::kill(pid, None).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild survived the timeout"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lingering_descendant_does_not_turn_a_pass_into_a_timeout() {
+        let fixture = Fixture::new("linger");
+        // Exits 0 at once, but a backgrounded child inherits stdout and keeps
+        // the pipe open far past the timeout.
+        let pidfile = fixture.dir.join("lingering.pid");
+        fixture.script(
+            "daemonizes",
+            &format!(
+                "sleep 30 &\necho $! > {}\necho \"all good\"\nexit 0",
+                pidfile.display()
+            ),
+        );
+        let started = std::time::Instant::now();
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["daemonizes"], 5)).await;
+        assert!(outcome.is_up(), "{:?}", outcome.error);
+        assert!(started.elapsed().as_secs() < 3, "waited for the pipe");
+
+        // And it does not outlive the probe: one leaked `sleep` per interval
+        // adds up.
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("pid written")
+            .trim()
+            .parse()
+            .expect("numeric pid");
+        let pid = nix::unistd::Pid::from_raw(pid);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while nix::sys::signal::kill(pid, None).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lingering descendant survived the probe"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     #[tokio::test]
@@ -325,7 +477,7 @@ mod tests {
             "leak",
             r#"if [ -n "$CARGO_PKG_NAME$CARGO_MANIFEST_DIR$HORA_LOG" ]; then echo "LEAKED"; exit 2; else echo "clean"; exit 0; fi"#,
         );
-        let outcome = run(&fixture.dir, &exec_monitor(&["leak"], 5)).await;
-        assert!(outcome.up, "{:?}", outcome.error);
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["leak"], 5)).await;
+        assert!(outcome.is_up(), "{:?}", outcome.error);
     }
 }

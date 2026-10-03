@@ -8,25 +8,29 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-arc-swap = "1.9.2"
+arc-swap.workspace = true
 askama.workspace = true
 axum.workspace = true
-badgelib = "0.5.0"
+badgelib = "0.5.2"
 chrono.workspace = true
+futures-util.workspace = true
 hora-core.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlx.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tower-http.workspace = true
 tower_governor = { version = "0.8.0", default-features = false, features = ["axum"] }
 tracing.workspace = true
-utoipa = "5.5.0"
+utoipa.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+# Fixtures insert rows through the raw pool (`Store::fixture_pool`).
+hora-core = { workspace = true, features = ["test-support"] }
+sqlx.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 toml = { workspace = true }
 tower = { version = "0.5.3", features = ["util"] }

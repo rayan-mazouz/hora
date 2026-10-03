@@ -19,6 +19,10 @@ impl WebhookNotifier {
         Self { client, url }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat arm per event, each a struct update"
+    )]
     fn payload(event: Event<'_>) -> Payload<'_> {
         match event {
             Event::Down {
@@ -28,8 +32,10 @@ impl WebhookNotifier {
                 impacted,
                 vantage,
                 event,
+                local_only,
             } => Payload {
                 message: error,
+                local_only: Some(local_only),
                 cause,
                 impacted: if impacted.is_empty() {
                     None
@@ -43,22 +49,30 @@ impl WebhookNotifier {
             Event::Degraded {
                 monitor,
                 latency_ms,
+                detail,
             } => Payload {
                 latency_ms,
+                message: detail,
                 ..Payload::new("degraded", monitor)
             },
-            Event::Recovered { monitor } => Payload::new("recovered", monitor),
-            Event::CertExpiring { monitor, days_left } => Payload {
-                days_left: Some(days_left),
+            Event::Recovered {
+                monitor,
+                local_only,
+            } => Payload {
+                local_only: Some(local_only),
+                ..Payload::new("recovered", monitor)
+            },
+            Event::CertExpiring { monitor, secs_left } => Payload {
+                days_left: Some(secs_left / 86_400),
                 ..Payload::new("cert_expiring", monitor)
             },
             Event::DomainExpiring {
                 monitor,
                 domain,
-                days_left,
+                secs_left,
             } => Payload {
                 domain: Some(domain),
-                days_left: Some(days_left),
+                days_left: Some(secs_left / 86_400),
                 ..Payload::new("domain_expiring", monitor)
             },
             Event::ReleaseAvailable(release) => Payload {
@@ -76,6 +90,10 @@ impl WebhookNotifier {
             Event::PeerLinkDegraded { peer, witness } => Payload {
                 witness: Some(witness),
                 ..Payload::new("peer_link_degraded", peer)
+            },
+            Event::CertUnreadable { monitor, error } => Payload {
+                message: Some(error),
+                ..Payload::new("cert_unreadable", monitor)
             },
             Event::CertChanged {
                 monitor,
@@ -128,6 +146,11 @@ struct Payload<'a> {
     cause: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     impacted: Option<&'a [&'a str]>,
+    /// On down and recovered events: the down was seen from this node only
+    /// (every peer that answered sees the target up), so it went to the
+    /// `notify_unconfirmed` channels rather than the usual ones.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_only: Option<bool>,
     /// Multi-vantage verdict, on down events when peers were asked.
     #[serde(skip_serializing_if = "Option::is_none")]
     vantage: Option<&'a str>,
@@ -183,6 +206,7 @@ impl<'a> Payload<'a> {
             message: None,
             cause: None,
             impacted: None,
+            local_only: None,
             vantage: None,
             change: None,
             witness: None,
@@ -215,7 +239,7 @@ impl Notifier for WebhookNotifier {
             &self.client,
             &self.url,
             &payload,
-            "webhook",
+            self.name(),
             &[self.url.as_str()],
         )
         .await
@@ -258,6 +282,7 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert_eq!(down.event, "down");
         assert_eq!(down.monitor, "API");
@@ -272,6 +297,7 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert_eq!(symptom.cause, Some("DB"));
 
@@ -282,12 +308,13 @@ mod tests {
             impacted: &["API", "Web"],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert_eq!(root.impacted, Some(["API", "Web"].as_slice()));
 
         let cert = WebhookNotifier::payload(Event::CertExpiring {
             monitor: "API",
-            days_left: 5,
+            secs_left: 5 * 86_400 + 7,
         });
         assert_eq!(cert.event, "cert_expiring");
         assert_eq!(cert.days_left, Some(5));
@@ -295,7 +322,9 @@ mod tests {
         let degraded = WebhookNotifier::payload(Event::Degraded {
             monitor: "API",
             latency_ms: Some(1234),
+            detail: Some("disk 91% full"),
         });
+        assert_eq!(degraded.message, Some("disk 91% full"));
         assert_eq!(degraded.event, "degraded");
         assert_eq!(degraded.latency_ms, Some(1234));
 

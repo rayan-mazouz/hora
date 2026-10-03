@@ -69,36 +69,14 @@ pub fn validate_dag(monitors: &[Monitor]) -> anyhow::Result<()> {
 /// discovery order. Returns an empty slice when the monitor has no dependencies.
 #[must_use]
 pub fn transitive_upstreams<'a>(monitors: &'a [Monitor], id: &str) -> Vec<&'a str> {
-    let upstreams: HashMap<&str, &[String]> = monitors
+    let upstreams: HashMap<&str, Vec<&str>> = monitors
         .iter()
         .filter_map(|m| {
-            m.depends_on
-                .as_ref()
-                .map(|deps| (m.id.as_str(), deps.as_slice()))
+            let deps = m.depends_on.as_ref()?;
+            Some((m.id.as_str(), deps.iter().map(String::as_str).collect()))
         })
         .collect();
-
-    let mut visited = HashSet::new();
-    let mut result = Vec::new();
-    let mut queue = VecDeque::new();
-
-    if let Some(deps) = upstreams.get(id) {
-        for dep in *deps {
-            queue.push_back(dep.as_str());
-        }
-    }
-
-    while let Some(dep) = queue.pop_front() {
-        if visited.insert(dep) {
-            result.push(dep);
-            if let Some(further) = upstreams.get(dep) {
-                for next in *further {
-                    queue.push_back(next.as_str());
-                }
-            }
-        }
-    }
-    result
+    bfs(&upstreams, id)
 }
 
 /// Collect every transitive dependent of `id` (reverse BFS: who depends on `id`,
@@ -107,34 +85,26 @@ pub fn transitive_upstreams<'a>(monitors: &'a [Monitor], id: &str) -> Vec<&'a st
 pub fn transitive_dependents<'a>(monitors: &'a [Monitor], id: &str) -> Vec<&'a str> {
     let mut downstreams: HashMap<&str, Vec<&str>> = HashMap::new();
     for monitor in monitors {
-        if let Some(deps) = &monitor.depends_on {
-            for dep in deps {
-                downstreams
-                    .entry(dep.as_str())
-                    .or_default()
-                    .push(monitor.id.as_str());
-            }
+        for dep in monitor.depends_on.iter().flatten() {
+            downstreams
+                .entry(dep.as_str())
+                .or_default()
+                .push(monitor.id.as_str());
         }
     }
+    bfs(&downstreams, id)
+}
 
+/// Every node reachable from `start` along `edges` (excluding `start` itself
+/// unless a cycle leads back to it), breadth-first, each once.
+fn bfs<'a>(edges: &HashMap<&str, Vec<&'a str>>, start: &str) -> Vec<&'a str> {
     let mut visited = HashSet::new();
     let mut result = Vec::new();
-    let mut queue = VecDeque::new();
-
-    if let Some(deps) = downstreams.get(id) {
-        for &dep in deps {
-            queue.push_back(dep);
-        }
-    }
-
-    while let Some(dep) = queue.pop_front() {
-        if visited.insert(dep) {
-            result.push(dep);
-            if let Some(further) = downstreams.get(dep) {
-                for &next in further {
-                    queue.push_back(next);
-                }
-            }
+    let mut queue: VecDeque<&'a str> = edges.get(start).into_iter().flatten().copied().collect();
+    while let Some(node) = queue.pop_front() {
+        if visited.insert(node) {
+            result.push(node);
+            queue.extend(edges.get(node).into_iter().flatten().copied());
         }
     }
     result
@@ -154,51 +124,13 @@ mod tests {
     use super::*;
 
     fn monitor(id: &str, depends_on: Option<Vec<&str>>) -> Monitor {
-        Monitor {
-            id: id.to_owned(),
-            name: id.to_uppercase(),
-            kind: crate::config::Kind::Http,
-            target: format!("https://{id}.example"),
-            interval_secs: 60,
-            timeout_secs: 10,
-            expected_status: None,
-            degraded_over_ms: None,
-            slo_latency_ms: None,
-            headers: HashMap::new(),
-            keyword: None,
-            keyword_invert: false,
-            json_query: None,
-            json_expected: None,
-            number_regex: None,
-            number_min: None,
-            number_max: None,
-            max_body_kb: None,
-            probe_retries: None,
-            dual_stack: None,
-            notify: None,
-            proxy: None,
-            push_token: None,
-            check_cert: None,
-            starttls: None,
-            ehlo_name: None,
-            retention_days: None,
-            group: None,
-            depends_on: depends_on.map(|v| v.into_iter().map(String::from).collect()),
-            public: true,
-            public_error_detail: false,
-            dns_record: None,
-            dns_expected: None,
-            dns_resolver: None,
-            cert_pin: None,
-            domain_expiry: None,
-            release: None,
-            confirm_with_peers: None,
-            command: Vec::new(),
-            slo_uptime: None,
-            slo_window_days: None,
-            schedule: None,
-            grace_secs: None,
-        }
+        let mut monitor =
+            Monitor::ad_hoc(crate::config::Kind::Http, format!("https://{id}.example")).unwrap();
+        monitor.id = id.to_owned();
+        monitor.name = id.to_uppercase();
+        monitor.probe_retries = None;
+        monitor.depends_on = depends_on.map(|v| v.into_iter().map(String::from).collect());
+        monitor
     }
 
     #[test]
@@ -247,7 +179,7 @@ mod tests {
     #[test]
     fn upstreams_empty_for_root() {
         let monitors = vec![monitor("db", None)];
-        assert!(transitive_upstreams(&monitors, "db").is_empty());
+        assert_eq!(transitive_upstreams(&monitors, "db"), Vec::<&str>::new());
     }
 
     #[test]
@@ -267,7 +199,7 @@ mod tests {
     #[test]
     fn dependents_empty_for_leaf() {
         let monitors = vec![monitor("db", None), monitor("api", Some(vec!["db"]))];
-        assert!(transitive_dependents(&monitors, "api").is_empty());
+        assert_eq!(transitive_dependents(&monitors, "api"), Vec::<&str>::new());
     }
 
     #[test]

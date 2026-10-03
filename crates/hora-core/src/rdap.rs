@@ -8,13 +8,14 @@
 
 use chrono::DateTime;
 
+use crate::http::get_json_following;
+
 /// The community RDAP bootstrap: redirects `/domain/{name}` to the
 /// authoritative registry's RDAP server.
 const BOOTSTRAP: &str = "https://rdap.org/domain";
 
-/// How many bootstrap redirects to follow by hand. The shared HTTP client
-/// never auto-follows (probe headers must not cross origins), so the 30x from
-/// the bootstrap - occasionally chained by a registry - is followed here.
+/// How many bootstrap redirects to follow: the 30x from the bootstrap is
+/// occasionally chained by a registry.
 const MAX_REDIRECTS: usize = 5;
 
 /// Look up `domain`'s expiration via RDAP: unix epoch seconds (UTC).
@@ -27,31 +28,16 @@ pub(crate) async fn domain_expiration(
     client: &reqwest::Client,
     domain: &str,
 ) -> anyhow::Result<i64> {
-    let mut url = format!("{BOOTSTRAP}/{domain}");
-    for _ in 0..=MAX_REDIRECTS {
-        let response = client
-            .get(&url)
-            .header(reqwest::header::ACCEPT, "application/rdap+json")
-            .send()
-            .await?;
-        if response.status().is_redirection() {
-            let Some(next) = response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|value| value.to_str().ok())
-            else {
-                anyhow::bail!("redirect without a Location header");
-            };
-            url = next.to_owned();
-            continue;
-        }
-        let status = response.status();
-        anyhow::ensure!(status.is_success(), "registry answered HTTP {status}");
-        let body: serde_json::Value = response.json().await?;
-        return expiration_event(&body)
-            .ok_or_else(|| anyhow::anyhow!("no expiration event in the RDAP answer"));
-    }
-    anyhow::bail!("too many redirects")
+    expiration_at(client, &format!("{BOOTSTRAP}/{domain}")).await
+}
+
+async fn expiration_at(client: &reqwest::Client, url: &str) -> anyhow::Result<i64> {
+    let accept = [(reqwest::header::ACCEPT.as_str(), "application/rdap+json")];
+    let body = match get_json_following(client, url, &accept, MAX_REDIRECTS).await? {
+        Ok(body) => body,
+        Err(status) => anyhow::bail!("registry answered HTTP {status}"),
+    };
+    expiration_event(&body).ok_or_else(|| anyhow::anyhow!("no expiration event in the RDAP answer"))
 }
 
 /// The `expiration` event's date from an RDAP domain object, as unix epoch
@@ -92,6 +78,85 @@ mod tests {
             .unwrap()
             .timestamp();
         assert_eq!(expiration_event(&body), Some(expected));
+    }
+
+    /// A tiny HTTP/1.1 server answering each request path from `routes`
+    /// (`path -> raw response`), one connection per request.
+    async fn serve(routes: Vec<(&'static str, String)>) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => request.extend_from_slice(&buf[..read]),
+                    }
+                }
+                let line = String::from_utf8_lossy(&request).into_owned();
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
+                let response = routes.iter().find(|(route, _)| *route == path).map_or_else(
+                    || "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n".to_owned(),
+                    |(_, response)| response.clone(),
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        base
+    }
+
+    fn json_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/rdap+json\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn follows_a_relative_redirect_whatever_the_client_policy() {
+        let body =
+            r#"{"events":[{"eventAction":"expiration","eventDate":"2030-01-01T00:00:00Z"}]}"#;
+        let base = serve(vec![
+            (
+                "/domain/example.org",
+                "HTTP/1.1 302 Found\r\nlocation: ../registry/example.org\r\n\
+                 content-length: 0\r\nconnection: close\r\n\r\n"
+                    .to_owned(),
+            ),
+            ("/registry/example.org", json_response(body)),
+        ])
+        .await;
+        let expected = DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let url = format!("{base}/domain/example.org");
+        // A client that never follows (the loop does) and one that does.
+        for client in [
+            crate::http::probe_client(None).unwrap(),
+            crate::http::client(None).unwrap(),
+        ] {
+            assert_eq!(expiration_at(&client, &url).await.unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_answers_and_errors_are_refused() {
+        let huge = format!(r#"{{"pad":"{}"}}"#, "x".repeat(crate::http::MAX_JSON_BYTES));
+        let base = serve(vec![("/big", json_response(&huge))]).await;
+        let client = crate::http::probe_client(None).unwrap();
+        let err = expiration_at(&client, &format!("{base}/big"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("larger than"), "{err}");
+        let err = expiration_at(&client, &format!("{base}/missing"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTP 404"), "{err}");
     }
 
     #[test]

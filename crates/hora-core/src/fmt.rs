@@ -1,0 +1,253 @@
+//! Shared human-facing formatting: durations, timestamps, percentages and the
+//! two escapings the pages need. One implementation each, so the history page,
+//! the post-mortem, the monthly report and the CLI word the same incident the
+//! same way.
+//!
+//! Durations use a single format everywhere: the two largest units, without
+//! padding (`"42s"`, `"3m 10s"`, `"2h 5m"`). [`elapsed`] is the deliberately
+//! coarser variant for estimates and "failing for ..." lines, where seconds
+//! would be noise.
+
+use std::fmt::Write as _;
+
+use chrono::DateTime;
+
+/// `"42s"`, `"3m 10s"`, `"2h 5m"`: an exact span (incident duration, downtime,
+/// MTTR, silence length). Negative spans clamp to zero.
+#[must_use]
+pub fn duration(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
+/// `"2d 3h"`, `"6h"`, `"45m"`, `"30s"`: a coarse span, for estimates and
+/// "failing for ..." phrasing where the exact seconds are noise.
+#[must_use]
+pub fn elapsed(seconds: u64) -> String {
+    if seconds >= 2 * 86_400 {
+        format!("{}d {}h", seconds / 86_400, (seconds % 86_400) / 3600)
+    } else if seconds >= 3600 {
+        format!("{}h", seconds / 3600)
+    } else if seconds >= 60 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// `"2026-05-14 08:03:12 UTC"`. An out-of-range timestamp prints as the raw
+/// number rather than vanishing.
+#[must_use]
+pub fn utc(timestamp: i64) -> String {
+    format_timestamp(timestamp, "%Y-%m-%d %H:%M:%S UTC")
+}
+
+/// `"2026-05-14"` (UTC).
+#[must_use]
+pub fn date(timestamp: i64) -> String {
+    format_timestamp(timestamp, "%Y-%m-%d")
+}
+
+/// `"May 14"` (UTC): the short form for a period that never spans years.
+#[must_use]
+pub fn short_date(timestamp: i64) -> String {
+    format_timestamp(timestamp, "%b %d")
+}
+
+fn format_timestamp(timestamp: i64, pattern: &str) -> String {
+    DateTime::from_timestamp(timestamp, 0).map_or_else(
+        || timestamp.to_string(),
+        |at| at.format(pattern).to_string(),
+    )
+}
+
+/// The share `part / total` in basis points (9 997 = 99.97%), rounded to the
+/// nearest one, in integer math so the result is exact. `None` without data.
+#[must_use]
+pub fn basis_points(part: i64, total: i64) -> Option<i64> {
+    (total > 0).then(|| (part * 10_000 + total / 2) / total)
+}
+
+/// `"99.97%"` from basis points.
+#[must_use]
+pub fn pct_bp(basis_points: i64) -> String {
+    let sign = if basis_points < 0 { "-" } else { "" };
+    let magnitude = basis_points.unsigned_abs();
+    format!("{sign}{}.{:02}%", magnitude / 100, magnitude % 100)
+}
+
+/// `"99.9%"` from permille (0..=1000, clamped): the one-decimal uptime the
+/// status page, the badges and `hora top` show.
+#[must_use]
+pub fn permille(permille: i64) -> String {
+    let permille = permille.clamp(0, 1000);
+    format!("{}.{}%", permille / 10, permille % 10)
+}
+
+/// `"99.97%"` for `part / total`, or `"no checks"` when there is no data.
+#[must_use]
+pub fn pct(part: i64, total: i64) -> String {
+    basis_points(part, total).map_or_else(|| "no checks".to_owned(), pct_bp)
+}
+
+/// `"62.1 GiB"`: a size in binary units, one decimal from KiB up, for
+/// `hora compact` and `hora top`.
+#[must_use]
+pub fn bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut unit = 0;
+    let mut scaled = bytes;
+    // Tenths of the unit, computed in integers (no float cast).
+    let mut tenths = 0;
+    while scaled >= 1024 && unit + 1 < UNITS.len() {
+        tenths = (scaled % 1024) * 10 / 1024;
+        scaled /= 1024;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{scaled}.{tenths} {}", UNITS[unit])
+    }
+}
+
+/// Escape the five XML metacharacters, for text embedded in SVG, Atom or HTML.
+#[must_use]
+pub fn xml_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// `text` with every control character other than a newline or a tab
+/// replaced by U+FFFD, so remote-controlled text (a probed server's body, a
+/// push `msg`, a plugin's output) cannot carry terminal escape sequences
+/// (`ESC ]0;...`, `ESC [2J`, OSC 52 clipboard writes) into a terminal that
+/// prints it - `hora incidents`, `hora postmortem`, `hora probe`.
+#[must_use]
+pub fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.chars().any(is_unprintable) {
+        std::borrow::Cow::Owned(
+            text.chars()
+                .map(|c| if is_unprintable(c) { '\u{FFFD}' } else { c })
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+fn is_unprintable(c: char) -> bool {
+    c.is_control() && c != '\n' && c != '\t'
+}
+
+/// Percent-encode `value` for a URL component (RFC 3986): every byte outside
+/// the unreserved set becomes `%XX`, uppercase hex.
+#[must_use]
+pub fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(char::from(byte));
+            }
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn printable_neutralises_terminal_escapes() {
+        assert_eq!(printable("HTTP 500: ok"), "HTTP 500: ok");
+        assert_eq!(
+            printable("\u{1b}]0;title\u{7}\u{1b}[2Jx\nline\ttab"),
+            "\u{FFFD}]0;title\u{FFFD}\u{FFFD}[2Jx\nline\ttab"
+        );
+        // C1 controls (a single-byte CSI) too.
+        assert_eq!(printable("a\u{9b}31mb"), "a\u{FFFD}31mb");
+    }
+
+    #[test]
+    fn sizes_read_in_binary_units() {
+        assert_eq!(bytes(512), "512 B");
+        assert_eq!(bytes(1536), "1.5 KiB");
+        assert_eq!(bytes(66_643 * 1024 * 1024), "65.0 GiB");
+        assert_eq!(bytes(u64::MAX), "16777215.9 TiB");
+    }
+
+    #[test]
+    fn durations_keep_the_two_largest_units() {
+        assert_eq!(duration(-5), "0s");
+        assert_eq!(duration(42), "42s");
+        assert_eq!(duration(60), "1m 0s");
+        assert_eq!(duration(190), "3m 10s");
+        assert_eq!(duration(7500), "2h 5m");
+        assert_eq!(duration(50 * 3600), "50h 0m");
+    }
+
+    #[test]
+    fn elapsed_is_coarse() {
+        assert_eq!(elapsed(30), "30s");
+        assert_eq!(elapsed(45 * 60 + 59), "45m");
+        assert_eq!(elapsed(6 * 3600 + 1800), "6h");
+        assert_eq!(elapsed(86_400 + 3600), "25h");
+        assert_eq!(elapsed(2 * 86_400 + 3 * 3600), "2d 3h");
+    }
+
+    #[test]
+    fn timestamps_are_utc() {
+        assert_eq!(utc(1_700_000_540), "2023-11-14 22:22:20 UTC");
+        assert_eq!(date(1_700_000_540), "2023-11-14");
+        assert_eq!(short_date(1_700_000_540), "Nov 14");
+        // Out of chrono's range: the raw number, not an empty string.
+        assert_eq!(utc(i64::MAX), i64::MAX.to_string());
+    }
+
+    #[test]
+    fn percentages_use_integer_math() {
+        assert_eq!(basis_points(0, 0), None);
+        assert_eq!(basis_points(1, 3), Some(3333));
+        assert_eq!(basis_points(2, 3), Some(6667));
+        assert_eq!(pct_bp(10_000), "100.00%");
+        assert_eq!(pct_bp(9_997), "99.97%");
+        assert_eq!(pct_bp(5), "0.05%");
+        assert_eq!(pct_bp(-150), "-1.50%");
+        assert_eq!(pct(0, 0), "no checks");
+        assert_eq!(pct(9997, 10_000), "99.97%");
+        assert_eq!(permille(1000), "100.0%");
+        assert_eq!(permille(999), "99.9%");
+        assert_eq!(permille(0), "0.0%");
+        assert_eq!(permille(1200), "100.0%");
+    }
+
+    #[test]
+    fn escaping_and_encoding() {
+        assert_eq!(
+            xml_escape(r#"<a href="x">Tom & 'Jerry'</a>"#),
+            "&lt;a href=&quot;x&quot;&gt;Tom &amp; &apos;Jerry&apos;&lt;/a&gt;"
+        );
+        assert_eq!(percent_encode("a b/c~d-é"), "a%20b%2Fc~d-%C3%A9");
+    }
+}

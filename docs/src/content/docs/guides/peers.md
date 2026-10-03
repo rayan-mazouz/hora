@@ -40,14 +40,28 @@ ping_token = "${PEER_B_TOKEN}"                   # sent as X-Push-Token
 # IN - I watch the peer and alert if it goes silent:
 expect_every_secs = 90
 listen_token = "${PEER_B_IN}"                    # required from the peer's pings
+# listen_id = "hora-b"                           # the push id it pings: /api/push/{listen_id} (default: id)
 # witness_url = "https://b.example/healthz"      # default: origin(ping_url)/healthz
 # notify = ["ops-telegram"]                      # route this peer's alerts
 ```
 
 Watched peers appear in their own section on the status page (their state
-does not roll into the overall badge - it tracks your services, not the
+does not roll into the overall badge: it tracks your services, not the
 surveillance mesh). `[health]` and `[[peers]]` reload live like everything
 else.
+
+A watched peer follows the same rules as a monitor:
+
+- It is down after `alerts.fail_threshold` missed heartbeats in a row.
+- A peer that has **never** sent a heartbeat alerts too ("no heartbeat
+  received yet") once `expect_every_secs` has passed since this node started
+  watching it. That start is stored, so restarts do not reset it. For
+  `grace_secs` after this node starts, peer alerts are held, so two nodes
+  rebooting together do not page each other.
+- It can be muted: a `[[maintenance]]` window or a silence that names its
+  `listen_id` (`hora silence hora-b 30m "rebooting"`).
+- Its alert state survives a config edit or a restart: no repeated down,
+  no lost recovery.
 
 ## Quorum: outage or partition?
 
@@ -73,10 +87,40 @@ verdict:
 
 - *"confirmed down from 3/3 vantage points"* - a real outage;
 - *"seen UP by hora-b - down from 1/3 vantage points (network issue near
-  this node?)"* - probably your fibre, not the service. The alert is
-  **softened, never silenced**: geo-partial outages are real outages.
+  this node?)"* - probably your fibre, not the service.
 
 Two Raspberry Pi at two homes become a distributed Pingdom.
+
+### Local-only downs
+
+When **every peer that answered sees the target up** (and at least one
+answered), the down is *local-only*: a problem on the road from this node,
+not an outage. It does **not** go to the monitor's channels. It goes to the
+channels listed in `alerts.notify_unconfirmed`, or, without that key, it is
+only recorded - the incident, the timeline, and the status page's
+*Not an outage* notice.
+
+```toml
+[alerts]
+notify_unconfirmed = ["ntfy-low"]   # optional: a quiet channel for local-only downs
+```
+
+Only an explicit contradiction quiets a down. No peer configured, no peer
+reachable, peers that do not watch this target, or **any** peer seeing it
+down too: the alert goes out normally - geo-partial outages are real
+outages.
+
+While a local-only down lasts, the node asks its peers again every 5
+minutes. As soon as they no longer all see the target up (they see it down
+too, or stop answering), the real down alert goes out, once, to the usual
+channels. A recovery goes to whoever received a down: the quiet channels
+for a down that stayed local-only, both after a late confirmation. The
+[webhook](../alerting/#channels) payload carries `local_only: true` on the
+`down` and `recovered` events of a local-only down.
+
+Confirmation only applies to network probes (http, tcp, icmp, dns). Exec
+and push monitors have no remote point of view, so they are never sent to
+peers, and a peer asked to probe one answers 400.
 
 The same round is available on demand from the terminal with
 [`hora probe <id> --confirm`](../../reference/cli/#hora-probe): it prints the
@@ -105,6 +149,24 @@ past a hard 10-second deadline (probes run concurrently), and never suppress
 it. The worst possible outcome is an alert *without* the vantage annotation -
 exactly what Hora sent before the feature. The incident record is written
 before the peers are even consulted.
+
+## Seeing from elsewhere
+
+Every peer with a `ping_url` is also asked, once a minute, how it sees the
+targets both nodes monitor. The status page then shows each shared monitor
+from the other places ("Hora B: 220ms"). The exchange is
+authenticated like a probe request, read-only and fail-open.
+
+Confirmation only works for monitors both nodes have. To check that the
+mesh agrees, run:
+
+```sh
+hora peers diff
+```
+
+It lists, per peer, the monitors (kind and target) that only one side has,
+and exits non-zero on any difference or an unreachable peer, so it can gate
+a config deploy in CI.
 
 ## External receivers
 

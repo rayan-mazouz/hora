@@ -5,6 +5,353 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.11.0] - 2026-10-03
+
+A new face and a hardening release. Hora gets its brand (the night watch,
+a little owl that dozes while all is well) and a status page redesigned
+around it; the findings of a full audit are fixed; and the page stays
+instant on huge databases: measured on 575 million checks across 700
+monitors, the status page answers in 1.5 ms at p99 (it took 13 s in
+0.10.0), weighs 71 KB instead of 6.5 MB, and the daemon peaks at 353 MB of
+RAM instead of 887 MB. See [UPGRADES.md](UPGRADES.md#0100--0110) for what to
+check before upgrading.
+
+### Added
+
+- **A redesigned status page.** The hour and one sentence ("Everything is
+  running."), count chips, then what needs attention first; groups that are
+  all well fold away, large groups show compact rows, and each monitor's
+  daily bar is one image instead of ninety elements. Every state reads as a
+  colour, a shape and a word, never colour alone. Light and dark follow the
+  system, `?theme=light|dark` forces one (handy for embeds and kiosks).
+  Down monitors say since when ("Down · 38 min"), rows show uptime over the
+  bar's days, maintenance days are marked, and recent incidents and a
+  "No incident in N days" chip sit under the groups.
+- **`/monitor/{id}`**: a page per monitor with its figures, the 24-hour
+  chart, a day-by-day bar whose details open by keyboard or tap, the
+  hour-by-day latency heatmap (moved here from `/history`), what each
+  vantage point sees, and its incidents.
+- **`/watchers`** (operator only): the mesh from this node, its peers'
+  heartbeats, how often outages were confirmed, and each shared service as
+  seen from each place.
+- **"Not an outage."** A down seen from this node only, while every peer
+  reaches the target, shows as up with a notice explaining why nobody was
+  paged. The JSON API is unchanged.
+- **`alerts.notify_unconfirmed`**: the channels that receive a local-only
+  down (see Changed), validated like any `notify` route. The webhook payload
+  gains `local_only` (bool) on `down` and `recovered` events.
+- **A certificate that cannot be read alerts** (`cert_unreadable`: *TLS
+  certificate could not be read*, with the error), once per streak and not
+  while the monitor is down. It used to be a log line, and the expiry of a
+  server whose STARTTLS dialogue or TLS versions changed silently stopped
+  being watched.
+- **The HTTP probe decodes `gzip`, `br`, `deflate` and `zstd` bodies**
+  before the assertions run (a CDN that always compresses failed every
+  keyword check). `max_body_kb` caps the decoded size.
+- **Kiosk refresh is opt-in**: `?refresh=<secs>` (10 to 3600) reloads the
+  page; without it the page no longer reloads itself every 30 seconds,
+  which closed open groups and disturbed screen readers.
+- **`hora compact`** gives the file's free pages back to the disk: applies
+  the retention now (`--purge-removed` skips the 7-day grace), rewrites the
+  file with `VACUUM INTO` and swaps it in atomically. `--dry-run` measures
+  every table and index and the gain. It needs the daemon stopped: the
+  daemon now holds `<db>.lock`, and CLI commands hold `<db>.writers.lock`
+  so none of them writes into a file being replaced. `hora top` shows the
+  database size and suggests a compaction past a fifth of free pages; the
+  operator `/api/summary` reports `storage { db_bytes, reclaimable_bytes }`.
+- **Add to home screen**: a web app manifest and icons, so a phone can keep
+  the status page as an app (no service worker: always the live page).
+- The monthly report gets a day strip per service and shorter headings, and
+  is cached per month and audience.
+- History, timeline, post-mortem, the empty and private-page states and the
+  plain-text (curl) output share the new design and wording.
+- The documentation site wears the brand, with new pages: When Hora fits,
+  Concepts (how a failed check becomes one alert, or none), The status page,
+  Brand, Development, and the changelog.
+
+- **`/api/announce` takes `until` as a time of day** (`18:00`, UTC, the next
+  occurrence) as well as a duration (`4h`), like `hora announce`; the hint
+  in `hora top` is now true.
+- **Silence a watched peer**: `POST /api/silence` and `hora silence` accept a
+  peer's `listen_id`, and ad-hoc silences now mute peer-watch alerts too.
+- **Degraded alerts say why**: a push with `status=degraded&msg=...` or an
+  exec plugin's WARNING output is carried into the alert (and into the
+  webhook's `message` field, now set on `degraded` events).
+- **`hora_monitor_status{id,name,status}`** Prometheus gauge, set for every
+  monitor including the ones whose status is still unknown.
+- `Permissions-Policy` and `Cross-Origin-Opener-Policy` response headers.
+- `hora event -- <title>` and `hora announce -- <title>` record a title that
+  starts with a subcommand word (`hora announce clear skies` used to clear
+  every banner).
+- `just deps`: a report-only freshness check across crates, docs packages,
+  pinned Actions and base images.
+
+### Changed
+
+- **Local-only downs no longer page.** With `confirm_with_peers`, a down
+  that every peer that answered sees up used to be sent to the monitor's
+  channels anyway, softened. It now goes to `alerts.notify_unconfirmed` (or
+  is only recorded: incident, timeline, *Not an outage*). Only that explicit
+  contradiction quiets a down: no peer, no answer, or any peer seeing it
+  down alert as before. The peers are asked again every 5 minutes while it
+  lasts; once they no longer all see it up, the real down goes out, once.
+  A recovery goes to whoever received a down, across a daemon restart too
+  (the routing is kept on the incident, migration `0022`, instant). The
+  operator panel *Why nobody was woken* says what the config does with such
+  a down.
+- **Probe failures name their cause.** *connection failed: connection
+  refused*, *connection failed: TLS invalid peer certificate: Expired*
+  instead of a bare *connection failed*; *proxy failed: tunnel error: proxy
+  authorization required (HTTP 407)* or *proxy failed: SOCKS error:
+  credentials not accepted* instead of blaming the target; *domain does not
+  exist (NXDOMAIN)* apart from *no A records found*, and *server answered
+  Server Failure (rcode 2)* instead of hickory's debug text; an assertion
+  judged on a body cut at `max_body_kb` says *(body cut at 256 KiB)*. A
+  push to an unknown id, a cron grace of 20 seconds (*+ 20s grace*, was
+  *+ 0m grace*) and an ICMP error (*icmp destination unreachable (code 1)
+  from 192.0.2.1*) read as what they are.
+- **An https monitor redirected to plain http is down** (*redirected to
+  plain http*, public reason of the same words): following it carried the
+  session in clear text without a word.
+- **TCP and certificate connects try the next address after 250 ms**
+  (happy-eyeballs): a dual-stack name whose IPv6 address blackholes no
+  longer times out while IPv4 answers.
+- **A custom `dns_resolver` falls back to TCP** for answers too large for a
+  datagram (long TXT, SPF, DKIM records), which used to fail as truncated.
+- **A proxied monitor's certificate is read through its proxy** (HTTP
+  `CONNECT`, `socks5`, `socks5h`), like its probe; `hora probe` does the
+  same. It was read by a direct dial around the proxy.
+- **Certificate warnings count hours under a day** (*expires in 10 hours*;
+  `hora probe` prints *10 hours left*): with less than a day left they said
+  *has expired*.
+- **`POST /api/push/{id}` answers 401 for an unknown id**, like a wrong
+  token (it answered 404, which listed the push ids).
+- **An announcement's `until` is at most a year** (`365d`); a longer one is
+  refused (400, CLI error).
+- A confirmation peer that does not watch the target (it answers 404) is no
+  longer counted as unreachable: the verdict reads *no peer watches this
+  target, unconfirmed*, and `/watchers` no longer counts it under *No
+  answer*.
+- A peer that misses a vantage poll keeps its last view for three rounds:
+  one lost poll no longer makes its column (and the *Not an outage* notice)
+  vanish for a minute.
+- **The status summary is never built on a request.** A background task
+  rebuilds it continuously (about 150 ms on 575M checks, was 13-20 s) and
+  every page, `/api/summary`, `/metrics`, group page and peer exchange is
+  served from the latest snapshot, at most a few seconds old. It is built
+  once for the operator and cut in memory for the public and each group;
+  pages are rendered once per snapshot and audience. Only the first request
+  after start waits for the first build (logged as "status page ready").
+  Announcing, clearing banners or recording an event returns once the page
+  shows it.
+- **24-hour figures read the hourly roll-ups** plus the current hour, not
+  millions of raw checks, and hourly roll-ups now run every 5 minutes
+  instead of every 6 hours. p50/p95/p99 come from per-hour latency
+  histograms: exact below 64 ms, within 1.6% above.
+- **Push heartbeats drive alerting with their own verdict.** A push with
+  `status=down` makes the monitor down on the next tick (confirmed after
+  `fail_threshold`), with the job's `msg` as the reason; `status=degraded`
+  counts as degraded, so `alert_on_degraded` works for push monitors. It
+  used to be read as a heartbeat like any other, so the alert came one
+  interval late, as a missed heartbeat, without the message.
+- **A push monitor or watched peer that never sent a heartbeat alerts**
+  ("no heartbeat received yet") once its interval (or its first scheduled
+  run plus grace) has passed since Hora first watched it - across restarts.
+  It used to stay grey forever.
+- **Alert state survives edits and restarts.** Editing a monitor or peer no
+  longer re-sends a down for an ongoing outage, nor loses its recovery; a
+  daemon restart mid-outage does not announce the down again (it is seeded
+  from the open incident) and still sends the recovery. Monitor tasks that
+  die are restarted and logged.
+- **Notifications are worded once for every channel.** The ten channels
+  render from one neutral message and only add their own markup and
+  priority, so wording no longer drifts between them. Visible changes: ntfy,
+  Gotify and Pushover bodies read `API is DOWN` / `API is slow (812ms)` /
+  `API recovered` instead of `DOWN: API` / `DEGRADED:` / `RECOVERED:`; Free
+  Mobile SMS use the same text (no emoji), now with fingerprints; email
+  subjects are `[TAG] <headline>` (`[DOWN] API is DOWN`); Slack uses Unicode
+  emoji; a certificate change carries the MITM / renewal hint everywhere.
+- **Oversized notifications are cut to each API's limits** (Discord 256/4096,
+  Telegram 4096, Pushover 1024, ntfy 4 KB...) with an ellipsis, instead of
+  being refused with a 400 that then counted against the channel. A 413 no
+  longer counts toward the failing-channel watchdog.
+- **Removed monitors keep their history for 7 days.** Taking an id out of
+  the config (a rename, a monitor commented out for an afternoon) used to
+  delete its checks, aggregates and incidents at the next 6-hourly prune. A
+  warning now names the ids and the deletion date; restoring the id within
+  the week keeps everything.
+- **One duration format everywhere** (`2h 5m`, `3m 10s`): the monthly report
+  used to print `2h 05m` and incident phrases `1h13m`.
+- **Page rate limit.** Every non-static route (pages, history, timeline,
+  feed, reports, badges, heatmaps, `/metrics`, `/healthz`) is now limited per
+  client IP, at four times the API burst and refill. `/report/{month}` and
+  the heatmap SVG are cached for 60 seconds, and reports older than the
+  12-month aggregate retention answer 400.
+- **`/healthz` answers 503 when the node is degraded** (stalled scheduler,
+  broken database), body unchanged - so the image's `HEALTHCHECK`, and any
+  orchestrator probing it, now sees an unhealthy node. While the node is
+  still starting (before the scheduler's first tick) that 503 is logged at
+  debug, not as an ERROR line per health check.
+- **Less memory per monitor.** Monitors share their probe client (one per
+  proxy, instead of one per monitor at about 45 KB each), and the daily
+  bars keep numbers instead of a formatted title per day: a node with
+  10,000 monitors idles at 433 MB instead of 679 MB.
+- The WAL file (`<db>-wal`) is truncated back to 64 MiB after a
+  checkpoint; a burst of writes used to leave it at its high-water mark.
+- **Prometheus**: `hora_monitor_up` / `hora_monitor_degraded` are omitted
+  while a monitor's status is unknown (they read as down after every
+  deploy); `hora_monitor_latency_ms` is typed `gauge`.
+- **Atom feed** content is escaped HTML as RFC 4287 requires, entry ids point
+  at `/incident/{id}` (they said `/incidents/`), each entry links to its
+  post-mortem, and the feed is titled after `page.title`.
+- **`POST /api/push/{id}`** answers 400 on an unknown `status` (`dwon` was
+  recorded as up) or a negative `ping`. Two pushes in the same second: the
+  last one wins, and a push replaces a recorded miss of the same second.
+- **A second daemon on the same database refuses to start** ("locking the
+  database: ... held by another Hora process") instead of racing the first.
+- **Failure reasons are stored as a code** next to their text (migration
+  `0021`, instant), so the public page no longer guesses them from the
+  wording. An exec plugin's failure now always reads "plugin check failed"
+  publicly, and a push monitor that never pinged reads "no heartbeat
+  received yet".
+- Settings that belong to another kind of monitor (`expected_status`,
+  `headers` or `max_body_kb` on a non-http monitor, `keyword_invert`
+  without `keyword`, `json_expected` without `json_query`) were silently
+  ignored; they still load, now with a warning. `hora probe --kind` checks
+  its target against the kind up front.
+- Hora logs one warning when requests arrive through a proxy (forwarding
+  headers) while `server.client_ip_header` is unset, since every visitor
+  then shares the proxy's rate-limit bucket.
+- OpenAPI: status fields are string enums; the JSON is unchanged.
+- **Config bounds**: `interval_secs`, `timeout_secs`, `expect_every_secs`
+  and `health.interval_secs` are capped at 30 days, `expected_status` must be
+  100-599, an IPv6 tcp target must be bracketed (`[::1]:80`) and
+  `dns_resolver` must be an IP and port. A warning flags `timeout_secs`
+  above `interval_secs`.
+- `hora top` never blocks on the network: requests run in the background,
+  `q` and Ctrl-C always answer, and the header colour follows the API's
+  `overall` state.
+- Multi-vantage confirmation is never attempted for exec monitors; a peer
+  asked to probe an exec or push monitor answers 400.
+- Cert checks run eight at a time under a 5-minute deadline and stop on
+  shutdown; monitor stagger phases shift once (a stable hash replaces
+  `DefaultHasher`).
+- Image: the build context is an allowlist, the cargo registry and target
+  directory are BuildKit cache mounts, and the published image carries
+  build provenance and an SBOM. CI Actions are pinned to commit SHAs.
+- Dependencies: utoipa 6, nix 0.31 (process-group kill), docs on Astro 7.3
+  and Starlight 0.42.
+- Fonts: Cal Sans, Fraunces, Borel and Mona Sans Mono, served from
+  `/assets/` with a content hash; the old `/assets/CalSans-SemiBold.woff2`
+  route is gone. Badges and the heatmap use the brand palette.
+
+### Deprecated
+
+- **`?token=` on write endpoints** (push, alert, announce, silence, event).
+  It still works, but the response carries `Deprecation: true` and a `Link`
+  to the [authentication docs](https://uplg.github.io/hora/reference/api/#authentication),
+  and Hora logs one warning per endpoint. Send `Authorization: Bearer` (or
+  `X-Push-Token` for push and alert) instead. Read-only views keep
+  `?token=`.
+
+### Fixed
+
+- **Checks were lost at every 6-hourly prune on large databases.** Once
+  the history reached its retention, the prune deleted six hours of checks
+  in one statement that held the write lock for 5 to 10 seconds, so the
+  scheduler's inserts failed with "database is locked". Retention (and the
+  sweep of a removed monitor's history) now deletes five minutes of checks
+  at a time, oldest first, pausing in between; a tick spends at most two
+  minutes deleting and comes back five minutes later for any backlog, so a
+  much lowered retention never blocks the roll-ups or a shutdown.
+- **Group pages leaked operator data**: a group token saw every group's
+  deploy markers in the sparklines and the names of other groups' private
+  monitors in "caused by" / "impacts". A group audience now names only
+  public monitors and its own.
+- **Monthly report and digest under-counted older months**: they looked at
+  the 1000 (500) most recent incidents only; they now query the incidents
+  that overlap the period, and the report stops at the month's end.
+- **Exec monitors were "confirmed down from N/N vantage points"** when
+  `[health].confirm_with_peers` was on: peers answered "not a network probe"
+  as down.
+- **Certificate pin mismatch accepted for good** when first seen during
+  maintenance, or when the alert failed to deliver. It now alerts after the
+  window and retries every check, and changing `cert_pin` to another value
+  that still does not match alerts again.
+- **`expected_status = 301`** (or any 3xx) could never pass: redirects were
+  always followed.
+- **`dns_resolver = "[2620:fe::fe]:53"`** passed validation but failed every
+  probe; a hostname resolver now fails validation instead of every probe.
+- **Exec timeouts left grandchildren running**: the plugin now runs in its
+  own process group, killed as a whole; a plugin that exits while a
+  background child holds stdout reports its real result, not "timed out",
+  and that child is killed instead of piling up, one per interval.
+- **ICMP monitors were up when a router answered "destination
+  unreachable"**: surge-ping hands back the ICMP errors that quote the
+  request as a reply, so the router's round-trip passed for the host's.
+  Only an echo reply counts now.
+- A cron push heartbeat that arrived slightly before its run counted as
+  missed.
+- A body cut mid-read was reported as a failed assertion ("keyword missing")
+  instead of an invalid response body.
+- Sparkline buckets jittered on every refresh.
+- Cert checks did not work for HTTP monitors on an IPv6 literal.
+- RDAP and release lookups: relative redirects work, an https-to-http hop is
+  refused, and answers are capped at 1 MiB.
+- The alert endpoint told unknown ids (404) from private ones (401).
+- History and timeline pages showed fewer entries than they should when
+  private monitors filled the limit.
+- The plain-text page's columns were not aligned, and `/status/{group}` now
+  serves it to curl too. The empty sparkline text is no longer stretched.
+- `hora import kuma`: valid TOML for any name, unique ids, bracketed IPv6.
+- The CLI no longer exits from deep inside a command, so the database pool
+  closes cleanly; the silence reason is capped at 500 characters like the API.
+
+### Security
+
+- **Remote text cannot drive the operator's terminal.** A probed body, a
+  push `msg`, a pushed alert or a plugin's output could carry escape
+  sequences (retitle or clear the terminal, write the clipboard with OSC 52)
+  into `hora incidents`, `hora postmortem` and `hora probe`. Control
+  characters other than newline and tab are replaced with U+FFFD where the
+  text is stored and again where the CLI prints it.
+- **`/monitor/{id}` showed the raw target** (`https://user:pass@...`,
+  `?api_key=...`) to group viewers; credentials are now redacted on the
+  page.
+- **IPv6 clients are rate-limited by their `/64`** (one subscriber holds a
+  whole prefix, so a bucket per address was no limit), IPv4-mapped
+  addresses as IPv4.
+- **Responses to credentialed requests** (`Authorization`, `X-Push-Token`,
+  `?token=`) carry `Cache-Control: no-store`; the CSP adds
+  `form-action 'self'`.
+- `/report/{month}` accepts digits only (`2026-+5` was a second spelling,
+  and cache entry, of `2026-05`) and rendered report pages are evicted with
+  their report.
+- Post-mortems put the remote text of the *First failure* and timeline
+  lines in a code span, so markdown in a response body (a tracking image, a
+  link) stays text in the ticket it is pasted into.
+- **Secrets stay on their origin.** Notifier, webhook and mesh requests
+  follow a redirect only within the same origin (or an http-to-https upgrade
+  on the same host): reqwest strips `Authorization` across hosts but not
+  `X-Push-Token`, the Gotify key, or a Pushover body re-sent on 307/308.
+  A webhook URL that redirects to another host now fails delivery.
+- **Failure snapshots redact credential headers** (`Set-Cookie`,
+  `Authorization`, `WWW-Authenticate`, API-key headers...) before they reach
+  incidents, `/history` and post-mortems.
+- Monitor and release-watch `Debug` output masks URL query values;
+  `peers.witness_url` is a secret.
+- `hora backup` creates the file `0600` atomically instead of tightening it
+  after the copy.
+- A malformed inbound `x-request-id` is replaced instead of echoed; CSP
+  `img-src` no longer allows `data:`, and `style-src` no longer needs
+  `'unsafe-inline'`: pages carry no inline style, and still run no script.
+- The token in a query string is spliced into each response, never into
+  the pages cached and shared between viewers.
+- CI checkouts no longer persist the token, and the Pages write permission
+  is scoped to the deploy job.
+
 ## [0.10.0] - 2026-09-21
 
 ### Added
@@ -951,7 +1298,25 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/uplg/hora/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/uplg/hora/compare/v0.9.6...v0.10.0
+[0.9.6]: https://github.com/uplg/hora/compare/v0.9.5...v0.9.6
+[0.9.5]: https://github.com/uplg/hora/compare/v0.9.4...v0.9.5
+[0.9.4]: https://github.com/uplg/hora/compare/v0.9.3...v0.9.4
+[0.9.3]: https://github.com/uplg/hora/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/uplg/hora/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/uplg/hora/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/uplg/hora/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/uplg/hora/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/uplg/hora/compare/v0.7.2...v0.8.0
+[0.7.2]: https://github.com/uplg/hora/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/uplg/hora/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/uplg/hora/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/uplg/hora/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/uplg/hora/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/uplg/hora/compare/v0.4.2...v0.5.0
+[0.4.2]: https://github.com/uplg/hora/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/uplg/hora/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/uplg/hora/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/uplg/hora/compare/v0.2.4...v0.3.0

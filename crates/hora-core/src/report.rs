@@ -8,12 +8,12 @@
 //! (`hora report 2026-05`) - the "here is your May report, 99.95%" feature
 //! for operators hosting other people's services.
 
+use crate::db::Store;
 use chrono::Datelike as _;
-use sqlx::SqlitePool;
 
 use crate::SECONDS_PER_DAY;
 use crate::config::{Config, Monitor};
-use crate::{db, slo};
+use crate::{db, fmt, slo};
 
 /// One monitor's month.
 #[derive(Debug)]
@@ -46,6 +46,17 @@ pub struct MonitorMonth {
     /// Minutes of that budget consumed (conservative: the covered part of the
     /// month is assumed fully monitored).
     pub budget_consumed_minutes: Option<i64>,
+    /// Each day of the month so far, first day first: its check counts (all
+    /// zero for a day without data), for the report's day strip.
+    pub days: Vec<DayTally>,
+}
+
+/// One monitor-day's check counts in a [`MonitorMonth`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DayTally {
+    pub up: i64,
+    pub down: i64,
+    pub degraded: i64,
 }
 
 /// A calendar month's report, monitors in configuration order.
@@ -63,7 +74,12 @@ pub struct MonthReport {
 #[must_use]
 pub fn month_bounds(month: &str) -> Option<(i64, i64)> {
     let (year, month_no) = month.split_once('-')?;
-    if year.len() != 4 || month_no.len() != 2 {
+    // Digits only: `parse` also takes a sign, and `2026-+5` would be a
+    // second spelling (a second cache entry) of `2026-05`.
+    let digits = |part: &str, len: usize| {
+        part.len() == len && part.bytes().all(|byte| byte.is_ascii_digit())
+    };
+    if !digits(year, 4) || !digits(month_no, 2) {
         return None;
     }
     let year: i32 = year.parse().ok()?;
@@ -94,31 +110,49 @@ pub fn previous_month(now: i64) -> String {
 /// # Errors
 ///
 /// Returns an error if the month is malformed or a database read fails.
-pub async fn build(pool: &SqlitePool, config: &Config, month: &str) -> anyhow::Result<MonthReport> {
+pub async fn build(store: &Store, config: &Config, month: &str) -> anyhow::Result<MonthReport> {
     let (start, end) = month_bounds(month)
         .ok_or_else(|| anyhow::anyhow!("month must be YYYY-MM and not in the future"))?;
     let now = chrono::Utc::now().timestamp();
     // For the running month, judge against what has elapsed, not the future.
     let covered_end = end.min(now);
 
-    // Daily counts from raw checks and the downsampled buckets, keyed by day
-    // string - the month is a prefix match away.
-    let daily = db::daily_all(pool, start, now).await?;
-    let incidents = db::recent_incidents(pool, 1000).await?;
+    // Daily counts from raw checks and the downsampled buckets over the
+    // covered part of the month only, keyed by day string - the month prefix
+    // filter below drops a bucket straddling the end.
+    let daily = db::daily_all(store, start, covered_end).await?;
+    // Every incident overlapping the month, however many came after it.
+    let incidents = db::incidents_between(store, start, covered_end).await?;
+
+    // The days elapsed so far (all of them for a past month).
+    let day_count =
+        usize::try_from((covered_end - start + SECONDS_PER_DAY - 1) / SECONDS_PER_DAY).unwrap_or(0);
 
     let mut rows = Vec::with_capacity(config.monitors.len());
     for monitor in &config.monitors {
         let (mut up, mut down, mut degraded) = (0_i64, 0_i64, 0_i64);
+        let mut tallies = vec![DayTally::default(); day_count];
         if let Some(days) = daily.get(&monitor.id) {
             for day in days.iter().filter(|day| day.day.starts_with(month)) {
                 up += day.up;
                 down += day.down;
                 degraded += day.degraded;
+                // "2026-05-07" is the 7th: index 6.
+                let index = day
+                    .day
+                    .get(8..10)
+                    .and_then(|dd| dd.parse::<usize>().ok())
+                    .and_then(|dd| dd.checked_sub(1));
+                if let Some(tally) = index.and_then(|index| tallies.get_mut(index)) {
+                    tally.up += day.up;
+                    tally.down += day.down;
+                    tally.degraded += day.degraded;
+                }
             }
         }
         let total = up + down + degraded;
         let available = up + degraded;
-        let uptime_bp = (total > 0).then(|| (available * 10_000 + total / 2) / total);
+        let uptime_bp = fmt::basis_points(available, total);
 
         let mut count = 0_usize;
         let mut downtime_secs = 0_i64;
@@ -129,7 +163,7 @@ pub async fn build(pool: &SqlitePool, config: &Config, month: &str) -> anyhow::R
         {
             let incident_end = incident.ended_at.unwrap_or(now);
             let overlap = incident_end.min(covered_end) - incident.started_at.max(start);
-            if incident.started_at >= covered_end || overlap <= 0 {
+            if overlap <= 0 {
                 continue;
             }
             count += 1;
@@ -163,6 +197,7 @@ pub async fn build(pool: &SqlitePool, config: &Config, month: &str) -> anyhow::R
             slo_met,
             budget_minutes,
             budget_consumed_minutes,
+            days: tallies,
         });
     }
 
@@ -202,24 +237,6 @@ fn month_label(start: i64) -> String {
         .map_or_else(String::new, |dt| dt.format("%B %Y").to_string())
 }
 
-/// `"99.97%"` from basis points.
-#[must_use]
-pub fn format_bp(basis_points: i64) -> String {
-    format!("{}.{:02}%", basis_points / 100, basis_points % 100)
-}
-
-/// `"2h 05m"`, `"12m"`, `"45s"` - downtime and MTTR formatting.
-#[must_use]
-pub fn format_secs(seconds: i64) -> String {
-    if seconds >= 3600 {
-        format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60)
-    } else if seconds >= 60 {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{seconds}s")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,7 +249,15 @@ mod tests {
         let (start, end) = month_bounds("2024-02").expect("leap month");
         assert_eq!(end - start, 29 * SECONDS_PER_DAY);
 
-        for bad in ["2026-13", "2026-5", "may", "2026-05-01", "9999-01"] {
+        for bad in [
+            "2026-13",
+            "2026-5",
+            "2026-+5",
+            "+026-05",
+            "may",
+            "2026-05-01",
+            "9999-01",
+        ] {
             assert!(month_bounds(bad).is_none(), "{bad}");
         }
     }
@@ -249,26 +274,9 @@ mod tests {
         assert_eq!(previous_month(mid_june), "2026-05");
     }
 
-    #[test]
-    fn formatting_helpers() {
-        assert_eq!(format_bp(10_000), "100.00%");
-        assert_eq!(format_bp(9_997), "99.97%");
-        assert_eq!(format_secs(45), "45s");
-        assert_eq!(format_secs(720), "12m");
-        assert_eq!(format_secs(7500), "2h 05m");
-    }
-
     #[tokio::test]
     async fn report_counts_checks_incidents_and_budget() {
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(":memory:")
-            .create_if_missing(true);
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .expect("pool");
-        db::migrator().run(&pool).await.expect("migrate");
+        let store = crate::db::Store::in_memory().await;
 
         let (start, _end) = month_bounds("2021-01").unwrap();
         // Nine up checks and one down inside January; one up check in February
@@ -276,23 +284,23 @@ mod tests {
         for i in 0..9_i64 {
             sqlx::query("INSERT INTO checks (time, monitor_id, status) VALUES (?, 'm', 1)")
                 .bind(start + i * 3600)
-                .execute(&pool)
+                .execute(store.sqlx())
                 .await
                 .unwrap();
         }
         sqlx::query("INSERT INTO checks (time, monitor_id, status) VALUES (?, 'm', 0)")
             .bind(start + 10 * 3600)
-            .execute(&pool)
+            .execute(store.sqlx())
             .await
             .unwrap();
         sqlx::query("INSERT INTO checks (time, monitor_id, status) VALUES (?, 'm', 1)")
             .bind(start + 35 * SECONDS_PER_DAY)
-            .execute(&pool)
+            .execute(store.sqlx())
             .await
             .unwrap();
         // A live database would long since have rolled 2021 checks into hourly
         // buckets (daily_all only scans raw over the recent window); mirror it.
-        db::downsample_hourly(&pool, start + 40 * SECONDS_PER_DAY)
+        db::downsample_hourly(&store, start + 40 * SECONDS_PER_DAY)
             .await
             .unwrap();
         // One resolved incident fully inside the month (10 minutes).
@@ -303,7 +311,7 @@ mod tests {
         .bind(start + 10 * 3600)
         .bind(start + 10 * 3600 + 600)
         .bind(start)
-        .execute(&pool)
+        .execute(store.sqlx())
         .await
         .unwrap();
 
@@ -321,7 +329,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = build(&pool, &config, "2021-01").await.expect("report");
+        let report = build(&store, &config, "2021-01").await.expect("report");
         assert_eq!(report.label, "January 2021");
         let row = &report.rows[0];
         assert_eq!((row.up, row.down), (9, 1));
@@ -334,9 +342,35 @@ mod tests {
         // is far past it.
         assert_eq!(row.budget_minutes, Some(44));
         assert!(row.budget_consumed_minutes.unwrap() > 44);
+        // The day strip: every January day, all of the checks on the 1st.
+        assert_eq!(row.days.len(), 31);
+        assert_eq!(
+            row.days[0],
+            DayTally {
+                up: 9,
+                down: 1,
+                degraded: 0
+            }
+        );
+        assert!(row.days[1..].iter().all(|day| *day == DayTally::default()));
+
+        // A busy February (more incidents than any "latest N" read would
+        // fetch) must not push January's incident out of its own report.
+        sqlx::query(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 1500) \
+             INSERT INTO incidents (monitor_id, started_at, ended_at, duration_s, created_at) \
+             SELECT 'm', ?1 + i * 60, ?1 + i * 60 + 30, 30, ?1 FROM n",
+        )
+        .bind(start + 35 * SECONDS_PER_DAY)
+        .execute(store.sqlx())
+        .await
+        .unwrap();
+        let report = build(&store, &config, "2021-01").await.expect("report");
+        assert_eq!(report.rows[0].incidents, 1);
+        assert_eq!(report.rows[0].downtime_secs, 600);
 
         // A malformed or future month is rejected.
-        assert!(build(&pool, &config, "garbage").await.is_err());
-        assert!(build(&pool, &config, "2999-01").await.is_err());
+        assert!(build(&store, &config, "garbage").await.is_err());
+        assert!(build(&store, &config, "2999-01").await.is_err());
     }
 }

@@ -1,25 +1,30 @@
-//! Plain-text status rendering for curl and other text-based clients.
+//! Plain-text status rendering for curl and other text-based clients: the
+//! same sentence as the page's hero, then every service with its state's
+//! shape and word (never a symbol alone).
 
 use std::fmt::Write as _;
 
 use crate::summary::Summary;
 
-pub(crate) fn render(summary: &Summary) -> String {
+/// Render the summary as text. `operator` adds the watched peers (node names
+/// stay off public pages).
+pub(crate) fn render(summary: &Summary, operator: bool) -> String {
     let mut out = String::with_capacity(2048);
     let _ = writeln!(out, "{}", summary.title);
     // Bytes would over-shoot on accented titles; chars is close enough.
     let _ = writeln!(out, "{}", "=".repeat(summary.title.chars().count()));
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "Overall: {} ({})",
-        summary.overall, summary.overall_label
-    );
-    let _ = writeln!(out, "Updated: {}", summary.updated_utc);
+    if summary.monitors.is_empty() {
+        let _ = writeln!(out, "Nothing to watch yet.");
+        let _ = writeln!(out, "{}", summary.when());
+        return out;
+    }
+    let _ = writeln!(out, "{}", crate::status_page::summary_sentence(summary));
+    let _ = writeln!(out, "{}", summary.when());
     let _ = writeln!(out);
 
     if !summary.incidents.is_empty() {
-        let _ = writeln!(out, "Incidents:");
+        let _ = writeln!(out, "Announcements:");
         for incident in &summary.incidents {
             let _ = writeln!(
                 out,
@@ -35,66 +40,83 @@ pub(crate) fn render(summary: &Summary) -> String {
     }
 
     if !summary.maintenances.is_empty() {
-        let _ = writeln!(out, "Maintenance:");
+        let _ = writeln!(out, "Planned maintenance:");
         for m in &summary.maintenances {
             let _ = writeln!(out, "  {} ({})", m.reason, m.monitors);
         }
         let _ = writeln!(out);
     }
 
-    if summary.monitors.is_empty() {
-        let _ = writeln!(out, "No monitors configured yet.");
-    } else {
-        for group in &summary.groups {
-            if !group.name.is_empty() {
-                let _ = writeln!(out, "{}", group.name);
-                let _ = writeln!(out, "{}", "-".repeat(group.name.chars().count()));
-            }
+    for group in &summary.groups {
+        if !group.name.is_empty() {
+            let _ = writeln!(out, "{}", group.name);
+            let _ = writeln!(out, "{}", "-".repeat(group.name.chars().count()));
+        }
 
-            for monitor in &group.monitors {
-                let status_symbol = match monitor.status {
-                    "up" => "●",
-                    "degraded" => "◐",
-                    "down" => "○",
-                    _ => "?",
-                };
-                let uptime = monitor
-                    .uptime_permille
-                    .map_or_else(|| "-".to_owned(), crate::summary::format_permille);
-                let latency = monitor
-                    .last_latency_ms
-                    .map_or_else(|| "-".to_owned(), |ms| format!("{ms}ms"));
+        // Pad names to the group's longest so the figures line up
+        // (chars, not bytes: names may be accented).
+        let width = group
+            .monitors
+            .iter()
+            .map(|monitor| monitor.name.chars().count())
+            .max()
+            .unwrap_or(0);
+        for monitor in &group.monitors {
+            let uptime = monitor
+                .uptime_label
+                .clone()
+                .unwrap_or_else(|| "-".to_owned());
+            let latency = monitor
+                .last_latency_ms
+                .map_or_else(|| "-".to_owned(), |ms| format!("{ms}ms"));
+            let state = monitor.display_state();
 
+            let _ = writeln!(
+                out,
+                "  {} {:<width$}  {:<11}  {:>8}  {:>8}",
+                status_symbol(state),
+                monitor.name,
+                monitor.word(),
+                uptime,
+                latency
+            );
+
+            if monitor.local_only() {
                 let _ = writeln!(
                     out,
-                    "  {} {}  {:>8}  {:>8}",
-                    status_symbol, monitor.name, uptime, latency
+                    "      one checkpoint can't reach it; the others can (not an outage)"
                 );
-
-                if let Some(cause) = &monitor.cause {
-                    let _ = writeln!(out, "      caused by {cause}");
-                }
-                if !monitor.impacted.is_empty() {
-                    let _ = writeln!(out, "      impacts: {}", monitor.impacted.join(", "));
-                }
             }
-            let _ = writeln!(out);
+            if let Some(cause) = &monitor.cause {
+                let _ = writeln!(out, "      probably caused by {cause}");
+            }
+            if !monitor.impacted.is_empty() {
+                let _ = writeln!(out, "      {} depend on it", monitor.impacted.join(", "));
+            }
         }
+        let _ = writeln!(out);
     }
 
-    if !summary.peers.is_empty() {
-        let _ = writeln!(out, "Peers");
-        let _ = writeln!(out, "-----");
+    if operator && !summary.peers.is_empty() {
+        let _ = writeln!(out, "Watchers");
+        let _ = writeln!(out, "--------");
         for peer in &summary.peers {
-            let status_symbol = match peer.status {
-                "up" => "●",
-                "degraded" => "◐",
-                "down" => "○",
-                _ => "?",
-            };
-            let _ = writeln!(out, "  {} {}", status_symbol, peer.name);
+            let state = crate::layout::display_state(peer.status.as_str());
+            let _ = writeln!(out, "  {} {}", status_symbol(state), peer.name);
         }
     }
 
     out
+}
+
+/// The one-glyph shape of a state, the same shapes as the page's: a disc,
+/// a half disc, a diamond, a clock, a dashed ring. Always beside its word.
+fn status_symbol(state: &str) -> &'static str {
+    match state {
+        "up" => "●",
+        "degraded" => "◐",
+        "down" => "◆",
+        "maint" => "◷",
+        _ => "◌",
+    }
 }

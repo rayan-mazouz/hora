@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- Variant C: the night watchman's lantern, its flame a sleepy face. Calls the hours, lights the way. -->
+  <rect width="48" height="48" rx="11" fill="#0E5E68"/>
+  <path d="M19.4 12.4a4.6 4.6 0 0 1 9.2 0" fill="none" stroke="#F2F0EA" stroke-width="2" stroke-linecap="round"/>
+  <path d="M15.6 17.4h16.8l-2.2-3.4H17.8Z" fill="#F2F0EA" stroke="#F2F0EA" stroke-width="1.6" stroke-linejoin="round"/>
+  <rect x="14.6" y="18.6" width="18.8" height="19.6" rx="5" fill="#F2F0EA"/>
+  <path d="M17 40.4h14" stroke="#F2F0EA" stroke-width="2.6" stroke-linecap="round"/>
+  <g stroke="#0E5E68" stroke-width="1" opacity=".28"><path d="M19.6 19v18.8M28.4 19v18.8"/></g>
+  <path d="M18.3 27.6a2.2 2.2 0 0 0 4.4 0M25.3 27.6a2.2 2.2 0 0 0 4.4 0" fill="none" stroke="#0E5E68" stroke-width="1.7" stroke-linecap="round"/>
+  <ellipse cx="17.6" cy="31.8" rx="1.8" ry="1.1" fill="#E6A49A" opacity=".85"/>
+  <ellipse cx="30.4" cy="31.8" rx="1.8" ry="1.1" fill="#E6A49A" opacity=".85"/>
+</svg>

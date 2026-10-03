@@ -51,6 +51,9 @@ skip = [
     # async-trait 0.1.92 jumped to syn 3 while the rest of the proc-macro
     # ecosystem (serde_derive, askama, darling) is still on syn 2.
     { crate = "syn" },
+    # Same split one layer up: yoke-derive (icu, via idna) moved to synstructure
+    # 0.14 while x509-parser's asn1-rs-derive is still on 0.13.
+    { crate = "synstructure" },
     # lettre's email-encoding moved to base64 0.23; hyper-util, lettre itself
     # and x509-parser still pull 0.22.
     { crate = "base64" },

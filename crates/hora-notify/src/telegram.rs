@@ -4,11 +4,23 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, escape, event_suffix,
-    latency_suffix, post_json, topology_suffix, vantage_suffix,
-};
+use crate::message::{Markup, Message};
+use crate::util::{Unit, escape, post_json};
 use crate::{Event, Notifier};
+
+/// Telegram HTML: `<b>`, `<code>`, everything else escaped.
+const HTML: Markup = Markup {
+    text: escape,
+    code: escape,
+    bold: ("<b>", "</b>"),
+    block: ("<code>", "</code>"),
+    inline: ("<code>", "</code>"),
+};
+
+/// `sendMessage` accepts 4096 characters *after* entity parsing, so the
+/// markup does not count; the margin covers the icon.
+const HEAD_MAX: usize = 512;
+const BODY_MAX: usize = 3500;
 
 /// Sends alerts to a Telegram chat via the Bot API.
 pub struct TelegramNotifier {
@@ -28,100 +40,9 @@ impl TelegramNotifier {
     }
 
     fn render(event: Event<'_>) -> String {
-        match event {
-            Event::Down {
-                monitor,
-                error,
-                cause,
-                impacted,
-                vantage,
-                event,
-            } => format!(
-                "\u{1F534} <b>{}</b> is DOWN\n<code>{}</code>{}{}{}",
-                escape(monitor),
-                escape(error.unwrap_or("no response")),
-                escape(&topology_suffix(cause, impacted)),
-                escape(&vantage_suffix(vantage)),
-                escape(&event_suffix(event)),
-            ),
-            Event::Degraded {
-                monitor,
-                latency_ms,
-            } => format!(
-                "\u{1F7E0} <b>{}</b> is slow{}",
-                escape(monitor),
-                latency_suffix(latency_ms)
-            ),
-            Event::Recovered { monitor } => {
-                format!("\u{1F7E2} <b>{}</b> recovered", escape(monitor))
-            }
-            Event::CertExpiring { monitor, days_left } => format!(
-                "\u{1F510} <b>{}</b> TLS certificate {}",
-                escape(monitor),
-                cert_expiry_phrase(days_left)
-            ),
-            Event::DomainExpiring {
-                monitor,
-                domain,
-                days_left,
-            } => format!(
-                "\u{1F310} <b>{}</b> {}",
-                escape(monitor),
-                escape(&domain_expiry_phrase(domain, days_left)),
-            ),
-            Event::ReleaseAvailable(release) => format!(
-                "\u{1F4E6} <b>{}</b>: {}\n{}",
-                escape(release.monitor),
-                escape(&crate::util::release_phrase(&release)),
-                escape(release.url),
-            ),
-            Event::Digest { period, summary } => format!(
-                "\u{1F4CA} <b>Hora digest</b> ({})\n{}",
-                escape(period),
-                escape(summary)
-            ),
-            Event::PeerLinkDegraded { peer, witness } => format!(
-                "\u{1F7E1} <b>{}</b> link degraded\nunreachable from here, but seen up by {}",
-                escape(peer),
-                escape(witness),
-            ),
-            Event::CertChanged {
-                monitor,
-                old_fingerprint,
-                new_fingerprint,
-            } => format!(
-                "\u{26A0}\u{FE0F} <b>{}</b> TLS certificate changed unexpectedly\nold: <code>{}</code>\nnew: <code>{}</code>",
-                escape(monitor),
-                escape(old_fingerprint),
-                escape(new_fingerprint),
-            ),
-            Event::BudgetBurn {
-                monitor,
-                burn_rate_x10,
-                window,
-                exhausted_in_secs,
-            } => format!(
-                "\u{1F525} <b>{}</b> {}",
-                escape(monitor),
-                budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs),
-            ),
-            Event::Alert {
-                monitor,
-                severity,
-                title,
-                message,
-            } => format!(
-                "\u{1F514} <b>[{}] {}</b>: {}{}",
-                severity.as_str().to_ascii_uppercase(),
-                escape(monitor),
-                escape(title),
-                if message.is_empty() {
-                    String::new()
-                } else {
-                    format!("\n{}", escape(message))
-                },
-            ),
-        }
+        Message::render(event)
+            .fit(HEAD_MAX, BODY_MAX, Unit::Chars)
+            .text_with(&HTML)
     }
 }
 
@@ -151,7 +72,7 @@ impl Notifier for TelegramNotifier {
             &self.client,
             &url,
             &body,
-            "telegram",
+            self.name(),
             &[self.token.as_str()],
         )
         .await
@@ -161,6 +82,7 @@ impl Notifier for TelegramNotifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AlertSeverity;
 
     #[test]
     fn renders_each_event() {
@@ -171,8 +93,9 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
-        assert!(down.contains("is DOWN") && down.contains("boom"));
+        assert_eq!(down, "\u{1F534} <b>API</b> is DOWN\n<code>boom</code>");
 
         let symptom = TelegramNotifier::render(Event::Down {
             monitor: "API",
@@ -181,6 +104,7 @@ mod tests {
             impacted: &[],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert!(symptom.contains("caused by DB"));
 
@@ -191,21 +115,27 @@ mod tests {
             impacted: &["API", "Web"],
             vantage: None,
             event: None,
+            local_only: false,
         });
         assert!(root.contains("impacts 2") && root.contains("API"));
 
-        let recovered = TelegramNotifier::render(Event::Recovered { monitor: "API" });
+        let recovered = TelegramNotifier::render(Event::Recovered {
+            monitor: "API",
+            local_only: false,
+        });
         assert!(recovered.contains("recovered"));
 
         let degraded = TelegramNotifier::render(Event::Degraded {
             monitor: "API",
             latency_ms: Some(1234),
+            detail: Some("disk 91% full"),
         });
         assert!(degraded.contains("slow") && degraded.contains("1234ms"));
+        assert!(degraded.contains("disk 91% full"), "{degraded}");
 
         let cert = TelegramNotifier::render(Event::CertExpiring {
             monitor: "API",
-            days_left: 3,
+            secs_left: 3 * 86_400,
         });
         assert!(cert.contains("expires in 3 days"));
 
@@ -214,5 +144,49 @@ mod tests {
             witness: "Hora C",
         });
         assert!(partition.contains("link degraded") && partition.contains("Hora C"));
+
+        let changed = TelegramNotifier::render(Event::CertChanged {
+            monitor: "API",
+            old_fingerprint: "aa",
+            new_fingerprint: "bb",
+        });
+        assert!(changed.contains("old: <code>aa</code>\nnew: <code>bb</code>"));
+    }
+
+    #[test]
+    fn escapes_every_interpolation() {
+        let down = TelegramNotifier::render(Event::Down {
+            monitor: "<API>",
+            error: Some("a<b"),
+            cause: Some("D&B"),
+            impacted: &[],
+            vantage: None,
+            event: None,
+            local_only: false,
+        });
+        assert!(down.contains("<b>&lt;API&gt;</b>"));
+        assert!(down.contains("<code>a&lt;b</code>"));
+        assert!(down.contains("caused by D&amp;B"));
+    }
+
+    #[test]
+    fn long_alerts_fit_the_message_limit() {
+        // Title and detail at the API caps, plus a pile of tags: over 4096.
+        let title = "t".repeat(200);
+        let message = "m".repeat(5000);
+        let text = TelegramNotifier::render(Event::Alert {
+            monitor: "API",
+            severity: AlertSeverity::Critical,
+            title: &title,
+            message: &message,
+        });
+        // Measured without the markup, as Telegram counts it.
+        let visible = text.replace("<b>", "").replace("</b>", "");
+        assert!(
+            visible.chars().count() <= 4096,
+            "{}",
+            visible.chars().count()
+        );
+        assert!(text.ends_with('…'));
     }
 }

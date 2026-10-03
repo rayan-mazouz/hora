@@ -3,26 +3,19 @@
 use async_trait::async_trait;
 use reqwest::Client;
 
-use crate::util::{
-    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, event_suffix,
-    latency_suffix, send_retrying, topology_suffix, vantage_suffix,
-};
+use crate::message::{Kind, Message, Urgency};
+use crate::util::{Unit, send_retrying};
 use crate::{AlertSeverity, Event, Notifier};
+
+/// ntfy turns a body over 4096 *bytes* into an attachment (or refuses it when
+/// attachments are off), so the text is measured in bytes.
+const HEAD_MAX: usize = 256;
+const BODY_MAX: usize = 3800;
 
 pub struct NtfyNotifier {
     client: Client,
     url: String,
     token: Option<String>,
-}
-
-/// A release event as one text: what is out, what runs, where the notes are.
-fn release_text(release: &crate::Release<'_>) -> String {
-    format!(
-        "RELEASE: {}: {}\n{}",
-        release.monitor,
-        crate::util::release_phrase(release),
-        release.url
-    )
 }
 
 impl NtfyNotifier {
@@ -31,105 +24,41 @@ impl NtfyNotifier {
         Self { client, url, token }
     }
 
+    /// The body, the `Tags` header (an emoji shortcode) and the priority.
     fn message(event: Event<'_>) -> (String, &'static str, u8) {
-        match event {
-            Event::Down {
-                monitor,
-                error,
-                cause,
-                impacted,
-                vantage,
-                event,
-            } => {
-                let suffix = topology_suffix(cause, impacted);
-                let vantage = vantage_suffix(vantage);
-                let event = event_suffix(event);
-                let detail = error.map_or_else(String::new, |e| format!("\n{e}"));
-                (
-                    format!("DOWN: {monitor}{detail}{suffix}{vantage}{event}"),
-                    "rotating_light",
-                    4,
-                )
-            }
-            Event::Degraded {
-                monitor,
-                latency_ms,
-            } => (
-                format!("DEGRADED: {monitor}{}", latency_suffix(latency_ms)),
-                "warning",
-                3,
-            ),
-            Event::Recovered { monitor } => {
-                (format!("RECOVERED: {monitor}"), "white_check_mark", 2)
-            }
-            Event::CertExpiring { monitor, days_left } => (
-                format!("CERT: {monitor} {}", cert_expiry_phrase(days_left)),
-                "lock",
-                3,
-            ),
-            Event::DomainExpiring {
-                monitor,
-                domain,
-                days_left,
-            } => (
-                format!(
-                    "DOMAIN: {monitor} {}",
-                    domain_expiry_phrase(domain, days_left)
-                ),
-                "globe_with_meridians",
-                3,
-            ),
-            Event::ReleaseAvailable(release) => (release_text(&release), "package", 3),
-            Event::Digest { period, summary } => {
-                (format!("DIGEST ({period}):\n{summary}"), "bar_chart", 2)
-            }
-            Event::PeerLinkDegraded { peer, witness } => (
-                format!("PEER: {peer} unreachable, but {witness} sees it up (partition)"),
-                "warning",
-                3,
-            ),
-            Event::CertChanged {
-                monitor,
-                old_fingerprint,
-                new_fingerprint,
-            } => (
-                format!("CERT CHANGED: {monitor}\nold: {old_fingerprint}\nnew: {new_fingerprint}"),
-                "lock",
-                4,
-            ),
-            Event::BudgetBurn {
-                monitor,
-                burn_rate_x10,
-                window,
-                exhausted_in_secs,
-            } => (
-                format!(
-                    "BUDGET: {monitor} {}",
-                    budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)
-                ),
-                "fire",
-                4,
-            ),
-            Event::Alert {
-                monitor,
-                severity,
-                title,
-                message,
-            } => {
-                // ntfy priority runs 1 (min) to 5 (max): map the severity onto it.
-                let (tag, priority) = match severity {
-                    AlertSeverity::Info => ("information_source", 2),
-                    AlertSeverity::Warning => ("warning", 3),
-                    AlertSeverity::Error => ("rotating_light", 4),
-                    AlertSeverity::Critical => ("rotating_light", 5),
-                };
-                (
-                    alert_phrase(monitor, severity, title, message),
-                    tag,
-                    priority,
-                )
-            }
+        let message = Message::render(event).fit(HEAD_MAX, BODY_MAX, Unit::Bytes);
+        (
+            message.plain(),
+            tag(message.kind),
+            priority(message.urgency()),
+        )
+    }
+}
+
+/// ntfy shows the tag as an emoji in front of the title.
+fn tag(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Down | Kind::Alert(AlertSeverity::Error | AlertSeverity::Critical) => {
+            "rotating_light"
         }
+        Kind::Degraded | Kind::PeerLinkDegraded | Kind::Alert(AlertSeverity::Warning) => "warning",
+        Kind::Recovered => "white_check_mark",
+        Kind::CertExpiring | Kind::CertChanged | Kind::CertUnreadable => "lock",
+        Kind::DomainExpiring => "globe_with_meridians",
+        Kind::Release => "package",
+        Kind::Digest => "bar_chart",
+        Kind::BudgetBurn => "fire",
+        Kind::Alert(AlertSeverity::Info) => "information_source",
+    }
+}
+
+/// ntfy priority runs 1 (min) to 5 (max).
+fn priority(urgency: Urgency) -> u8 {
+    match urgency {
+        Urgency::Quiet => 2,
+        Urgency::Notice | Urgency::Warning => 3,
+        Urgency::High => 4,
+        Urgency::Critical => 5,
     }
 }
 
@@ -157,6 +86,51 @@ impl Notifier for NtfyNotifier {
         if let Some(token) = &self.token {
             secrets.push(token.as_str());
         }
-        send_retrying(build, "ntfy", &secrets).await
+        send_retrying(build, self.name(), &secrets).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_events_to_text_tags_and_priority() {
+        let (text, tags, priority) = NtfyNotifier::message(Event::Down {
+            monitor: "API",
+            error: Some("boom"),
+            cause: Some("DB"),
+            impacted: &[],
+            vantage: None,
+            event: None,
+            local_only: false,
+        });
+        assert_eq!(text, "API is DOWN\nboom\ncaused by DB");
+        assert_eq!((tags, priority), ("rotating_light", 4));
+
+        let (_, tags, priority) = NtfyNotifier::message(Event::Recovered {
+            monitor: "API",
+            local_only: false,
+        });
+        assert_eq!((tags, priority), ("white_check_mark", 2));
+
+        let (text, tags, priority) = NtfyNotifier::message(Event::Alert {
+            monitor: "API",
+            severity: AlertSeverity::Critical,
+            title: "disk full",
+            message: "",
+        });
+        assert_eq!(text, "[CRITICAL] API: disk full");
+        assert_eq!((tags, priority), ("rotating_light", 5));
+    }
+
+    #[test]
+    fn long_bodies_stay_under_the_byte_limit() {
+        let summary = "€".repeat(4000); // 12 000 bytes
+        let (text, _, _) = NtfyNotifier::message(Event::Digest {
+            period: "week",
+            summary: &summary,
+        });
+        assert!(text.len() <= 4096, "{} bytes", text.len());
     }
 }

@@ -24,7 +24,7 @@ each monitor to specific ones. Ten backends are built in:
 | `pushover` | application `token` + `user` key |
 | `email` | SMTP: `host`, `port` (587 STARTTLS default, `implicit_tls` for 465), `from`, `to` |
 | `freemobile` | Free Mobile SMS: `user` + `pass` |
-| `webhook` | POSTs a structured JSON event (`{ event, monitor, … }`) to `url` |
+| `webhook` | POSTs a structured JSON event (`{ event, monitor, … }`) to `url` (see below) |
 
 ```toml
 [[channels]]
@@ -43,8 +43,34 @@ An empty secret (an unset `${VAR}`) simply disables that channel. Delivery
 retries transient failures, and down alerts include a snippet of the failing
 response body.
 
+Every channel renders the same neutral message (`API is DOWN`,
+`API is slow (812ms)`, `API recovered`) and only adds its own markup and
+priority, so the wording never drifts between channels. Email subjects read
+`[DOWN] API is DOWN`. A message longer than a service accepts (Discord,
+Telegram, Pushover, ntfy...) is cut to its limit with an ellipsis rather
+than refused. A degraded alert says why when it knows: the `msg` of a push
+with `status=degraded`, or the WARNING line of an exec plugin.
+
+Requests to notification services, webhooks and peers follow a redirect
+only within the same origin (or from http to https on the same host), so a
+token is never carried to another host. A webhook URL that redirects
+elsewhere fails delivery.
+
 **Routing**: a monitor (or a peer) selects channels with
 `notify = ["ops-telegram"]`; without it, every configured channel is used.
+A down seen from this node only, while the peers see the target up, goes to
+`alerts.notify_unconfirmed` instead (or nowhere): see
+[local-only downs](../peers/#local-only-downs).
+
+**The webhook payload** is a JSON object with `event` (`down`, `degraded`,
+`recovered`, `cert_expiring`, `cert_changed`, `cert_unreadable`,
+`domain_expiring`, `release_available`, `peer_link_degraded`,
+`budget_burn`, `digest`, `alert`) and `monitor`, plus the fields that event
+carries: `message`, `cause`, `impacted`, `vantage` and `change` on a down;
+`local_only` (bool) on `down` and `recovered`; `days_left` on expiry
+events; the fingerprints on `cert_changed`; the read error as `message` on
+`cert_unreadable`. Fields are only ever added: ignore the ones you do not
+know.
 
 **Test the chain before you need it**:
 
@@ -128,7 +154,8 @@ group_window_secs = 30   # 0 restores one-alert-per-monitor
 ## Maintenance windows
 
 Scheduled windows mute alerts for the affected monitors; checks keep being
-recorded and the card shows a "maintenance" badge:
+recorded, and the status page shows them in maintenance (and the day in
+their daily bar):
 
 ```toml
 [[maintenance]]
@@ -137,6 +164,9 @@ start = "2026-06-08T00:00:00Z"   # RFC 3339
 end   = "2026-06-08T02:00:00Z"
 monitors = ["database"]          # empty = all monitors
 ```
+
+`monitors` takes monitor ids and the `listen_id` of watched
+[peers](../peers/), so a planned reboot of another node stays quiet too.
 
 ## Ad-hoc silences (deploy hooks)
 
@@ -156,12 +186,15 @@ curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
   "https://status.example.com/api/silence?monitors=api,web&duration=10m&reason=deploy"
 ```
 
-Durations look like `10m`, `90s`, `1h30m` (max 7 days - anything longer
+Durations look like `10m`, `90s`, `1h30m` (max 7 days: anything longer
 belongs in a visible maintenance window). Checks keep recording; only alert
-transitions are muted, picked up on the next tick. The HTTP endpoint
-**strictly requires** `server.auth_token`; unknown monitor ids are rejected
-so a typo'd hook fails loudly instead of silencing nothing. Expired silences
-are swept automatically.
+transitions are muted, picked up on the next tick. The ids are monitor ids
+or the `listen_id` of a watched [peer](../peers/) (by default its `id`), so
+`hora silence hora-b 30m "rebooting hora-b"` mutes that peer's dead-man
+alert. The HTTP endpoint **strictly requires** `server.auth_token`, sent as
+`Authorization: Bearer`; unknown ids are rejected so a typo'd hook fails
+loudly instead of silencing nothing. Expired silences are swept
+automatically.
 
 ## Pushed alerts (from your own jobs)
 
@@ -245,10 +278,16 @@ curl -X POST -H "Authorization: Bearer $TOK" \
 curl -X DELETE -H "Authorization: Bearer $TOK" "https://status.example.com/api/announce"
 ```
 
-`--until` (a duration like `4h`, or `18:00` UTC) auto-expires the banner, so
-the classic stale "incident ongoing" banner three days later cannot happen
-by default. The API requires `server.auth_token` and the banner shows
-immediately (the summary cache is busted on write).
+`--until` (a duration like `4h`, or a time of day like `18:00`, UTC, the
+next occurrence) auto-expires the banner, so the classic stale "incident
+ongoing" banner three days later cannot happen by default. The API's
+`until` takes the same two forms (`until=4h` or `until=18:00`). The API
+requires `server.auth_token` and the banner shows immediately (the summary
+cache is busted on write).
+
+A title that starts with `list` or `clear` needs `--` before it:
+`hora announce -- "clear skies tonight"`. Without it, `hora announce clear`
+removes every banner.
 
 **Declared in the config** - for planned, longer-lived notices, or a GitOps
 workflow where announcements go through git:
@@ -265,3 +304,9 @@ at = "2026-06-07T12:00:00Z"
 
 `https://` monitors are warned `alerts.cert_expiry_days` before their
 certificate expires (default 14), through the same channels and routing.
+Under a day the warning counts hours (*expires in 10 hours*). A proxied
+monitor's certificate is read through its proxy (HTTP `CONNECT`, `socks5`,
+`socks5h`), like its probe. A certificate that cannot be read at all (the
+STARTTLS dialogue changed, a server down to TLS 1.0, a firewall) alerts
+once, *TLS certificate could not be read*, with the error - not while the
+monitor is down, and not again until it has been read successfully.

@@ -60,16 +60,37 @@ container. Validate with `hora check` (non-zero exit on error, CI-friendly),
 and verify your notification chain with `hora test-alert` *before* the first
 real incident.
 
-## ICMP monitors in Docker
+## ICMP monitors in Docker and Kubernetes
 
 `kind = "icmp"` monitors use an unprivileged datagram socket, so they need no
 extra capability as long as the container's group id is within the kernel's
 `net.ipv4.ping_group_range` - Docker's default (`0 2147483647`) already covers
-the image's `10001` user, **including rootless Docker**. If your host narrows
+the image's `10001` user, **including rootless Docker**, and it keeps working
+with `--cap-drop ALL` and a read-only root filesystem. If your host narrows
 that range, either widen it
 (`--sysctl net.ipv4.ping_group_range="0 2147483647"`) or grant
 `--cap-add NET_RAW`; otherwise `icmp` monitors simply report down with a clear
 reason.
+
+On **Kubernetes** the range comes from the node's default, often `1 0`
+(nobody): set it on the pod. `net.ipv4.ping_group_range` is a namespaced,
+*safe* sysctl since Kubernetes 1.18, so no kubelet flag is needed:
+
+```yaml
+spec:
+  securityContext:
+    runAsUser: 10001
+    runAsGroup: 10001
+    sysctls:
+      - name: net.ipv4.ping_group_range
+        value: "0 2147483647"
+  containers:
+    - name: hora
+      securityContext:
+        capabilities: { drop: ["ALL"] }
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+```
 
 ## From source
 
@@ -85,7 +106,7 @@ cargo-audit, tests) - the exact checks CI runs.
 
 ## Environment variables
 
-Only three are read directly (everything else lives in the config file):
+Four are read directly (everything else lives in the config file):
 
 | Variable | Meaning |
 | --- | --- |

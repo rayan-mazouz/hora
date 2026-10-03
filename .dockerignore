@@ -1,8 +1,9 @@
-/target
-/.git
-/.github
-*.db
-*.db-shm
-*.db-wal
-config.toml
-README.md
+# Allowlist: the image only needs the workspace manifests and the crates
+# (migrations, templates and assets are embedded at compile time). Anything
+# else - docs/node_modules, local databases, editor state - would bloat the
+# context and invalidate the build cache on unrelated changes.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+**/.DS_Store

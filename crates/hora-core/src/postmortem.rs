@@ -5,9 +5,8 @@
 //! ready to paste into a ticket. The chore nobody writes, written by the
 //! tool that saw everything.
 
-use chrono::DateTime;
-
 use crate::db::Incident;
+use crate::fmt;
 
 /// Render one incident as a markdown post-mortem. `monitor_name` is the
 /// display name resolved by the caller (falling back to the stored id for
@@ -17,7 +16,7 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::with_capacity(1024);
-    let day = format_date(incident.started_at);
+    let day = fmt::date(incident.started_at);
     let _ = writeln!(out, "# Post-mortem: {monitor_name} - {day}");
     let _ = writeln!(out);
 
@@ -28,15 +27,17 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
     };
     let _ = writeln!(out, "- **Incident:** #{} ({status})", incident.id);
     let _ = writeln!(out, "- **Monitor:** {monitor_name}");
-    let _ = writeln!(out, "- **Started:** {}", format_utc(incident.started_at));
+    let _ = writeln!(out, "- **Started:** {}", fmt::utc(incident.started_at));
     if let Some(ended) = incident.ended_at {
-        let _ = writeln!(out, "- **Ended:** {}", format_utc(ended));
+        let _ = writeln!(out, "- **Ended:** {}", fmt::utc(ended));
     }
     if let Some(duration) = incident.duration_s {
-        let _ = writeln!(out, "- **Duration:** {}", format_duration(duration));
+        let _ = writeln!(out, "- **Duration:** {}", fmt::duration(duration));
     }
     if let Some(error) = &incident.error {
-        let _ = writeln!(out, "- **First failure:** {error}");
+        // Remote-controlled (a body snippet, a push msg): a code span, so a
+        // `![](https://tracker)` or a link in it stays text in the ticket.
+        let _ = writeln!(out, "- **First failure:** {}", inline_code(error));
     }
     if let Some(vantage) = &incident.vantage {
         let _ = writeln!(out, "- **Multi-vantage:** {vantage}");
@@ -76,15 +77,15 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
     let _ = writeln!(
         out,
         "- {} - down confirmed{}",
-        format_utc(incident.started_at),
+        fmt::utc(incident.started_at),
         incident
             .error
             .as_deref()
-            .map(|error| format!(" ({error})"))
+            .map(|error| format!(" ({})", inline_code(error)))
             .unwrap_or_default()
     );
     if let Some(ended) = incident.ended_at {
-        let _ = writeln!(out, "- {} - recovered", format_utc(ended));
+        let _ = writeln!(out, "- {} - recovered", fmt::utc(ended));
     } else {
         let _ = writeln!(out, "- ongoing at generation time");
     }
@@ -96,6 +97,20 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
 fn impacted_names(impacted: Option<&str>) -> Option<String> {
     let names: Vec<String> = serde_json::from_str(impacted?).ok()?;
     (!names.is_empty()).then(|| names.join(", "))
+}
+
+/// `text` as one markdown code span: delimited by a backtick run longer than
+/// any inside it (padded with a space when it starts or ends with a
+/// backtick), on one line.
+fn inline_code(text: &str) -> String {
+    let text = text.replace(['\r', '\n'], " ");
+    let fence = "`".repeat(longest_backtick_run(&text) + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{text}{pad}{fence}")
 }
 
 /// The longest run of consecutive backticks in `text` (to size the fence).
@@ -113,30 +128,6 @@ fn longest_backtick_run(text: &str) -> usize {
     longest
 }
 
-fn format_utc(timestamp: i64) -> String {
-    DateTime::from_timestamp(timestamp, 0).map_or_else(
-        || timestamp.to_string(),
-        |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-    )
-}
-
-fn format_date(timestamp: i64) -> String {
-    DateTime::from_timestamp(timestamp, 0).map_or_else(
-        || timestamp.to_string(),
-        |dt| dt.format("%Y-%m-%d").to_string(),
-    )
-}
-
-fn format_duration(seconds: i64) -> String {
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3600 {
-        format!("{}m {}s", seconds / 60, seconds % 60)
-    } else {
-        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +142,7 @@ mod tests {
             cause: Some("Database".to_owned()),
             impacted: Some(r#"["Web","Worker"]"#.to_owned()),
             error: Some("HTTP 503: upstream connect error".to_owned()),
+            reason: None,
             note: Some("fiber cut at the DC".to_owned()),
             snapshot: Some("HTTP/2 503\n\n<html>maintenance</html>".to_owned()),
             event: Some("deploy api v2.3, 3m before".to_owned()),
@@ -165,7 +157,7 @@ mod tests {
         assert!(md.starts_with("# Post-mortem: API - 2023-11-14"), "{md}");
         assert!(md.contains("- **Incident:** #7 (resolved)"));
         assert!(md.contains("- **Duration:** 9m 0s"));
-        assert!(md.contains("- **First failure:** HTTP 503: upstream connect error"));
+        assert!(md.contains("- **First failure:** `HTTP 503: upstream connect error`"));
         assert!(md.contains("- **Multi-vantage:** confirmed down from 2/2 vantage points"));
         assert!(md.contains("- **Probable cause (topology):** Database"));
         assert!(md.contains("- **Impacted:** Web, Worker"));
@@ -185,6 +177,7 @@ mod tests {
             cause: None,
             impacted: Some("[]".to_owned()),
             error: None,
+            reason: None,
             note: None,
             snapshot: None,
             event: None,
@@ -207,6 +200,25 @@ mod tests {
         ] {
             assert!(!md.contains(absent), "{absent} should be omitted:\n{md}");
         }
+    }
+
+    #[test]
+    fn remote_text_in_lines_stays_text() {
+        let hostile = Incident {
+            error: Some(
+                "HTTP 500: ![x](https://t.example/p.gif) `a` [ok](https://evil)".to_owned(),
+            ),
+            ..incident()
+        };
+        let md = render(&hostile, "API");
+        let spanned = "``HTTP 500: ![x](https://t.example/p.gif) `a` [ok](https://evil)``";
+        assert!(
+            md.contains(&format!("- **First failure:** {spanned}")),
+            "{md}"
+        );
+        assert!(md.contains(&format!("down confirmed ({spanned})")), "{md}");
+        assert_eq!(inline_code("`tick"), "`` `tick ``");
+        assert_eq!(inline_code("two\nlines"), "`two lines`");
     }
 
     #[test]

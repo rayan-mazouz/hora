@@ -7,19 +7,31 @@
 //! an hour per address, so the watcher gates on the stored `checked_at`
 //! rather than asking on each tick.
 
-use crate::config::ReleaseWatch;
+use crate::db::Store;
+use hora_notify::Event;
+use serde_json_path::JsonPath;
+use tracing::{info, warn};
+
+use crate::config::{Config, Parsed, ReleaseWatch};
+use crate::db;
+use crate::http::{MAX_JSON_BYTES, get_json_following, read_all_capped};
+use crate::notifications::Notifiers;
 
 /// GitHub's REST API, repositories.
 const API: &str = "https://api.github.com/repos";
 
-/// How many redirects to follow by hand. The shared HTTP client never
-/// auto-follows (probe headers must not cross origins), and GitHub answers a
-/// renamed or transferred repository with a 301.
+/// How many redirects to follow: GitHub answers a renamed or transferred
+/// repository with a 301 (followed by hand, whatever the client's policy).
 const MAX_REDIRECTS: usize = 3;
 
 /// The longest text taken for a version: an answer that is not a version (an
 /// HTML error page) must not end up whole in an alert.
 const MAX_VERSION_LEN: usize = 64;
+
+/// Ask GitHub for a project's latest release at most this often. Under the
+/// watcher's 12-hour tick, so every tick asks; over a restart loop, so a
+/// crashing daemon does not spend the anonymous API's 60 requests an hour.
+const RELEASE_CHECK_SECS: i64 = 6 * 3600;
 
 /// A published release: its tag, and the page that carries its notes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,35 +48,22 @@ pub(crate) struct Release {
 /// repository) or the project has published no release: tags alone are not
 /// releases.
 pub(crate) async fn latest(client: &reqwest::Client, project: &str) -> anyhow::Result<Release> {
-    let mut url = format!("{API}/{project}/releases/latest");
-    for _ in 0..=MAX_REDIRECTS {
-        let response = client
-            .get(&url)
-            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await?;
-        let status = response.status();
-        if status.is_redirection() {
-            let Some(next) = response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|value| value.to_str().ok())
-            else {
-                anyhow::bail!("redirect without a Location header");
-            };
-            url = next.to_owned();
-            continue;
-        }
-        anyhow::ensure!(
-            status != reqwest::StatusCode::NOT_FOUND,
+    let url = format!("{API}/{project}/releases/latest");
+    let headers = [
+        (
+            reqwest::header::ACCEPT.as_str(),
+            "application/vnd.github+json",
+        ),
+        ("X-GitHub-Api-Version", "2022-11-28"),
+    ];
+    let body = match get_json_following(client, &url, &headers, MAX_REDIRECTS).await? {
+        Ok(body) => body,
+        Err(reqwest::StatusCode::NOT_FOUND) => anyhow::bail!(
             "no such repository, or no published release (tags alone are not releases)"
-        );
-        anyhow::ensure!(status.is_success(), "GitHub answered HTTP {status}");
-        let body: serde_json::Value = response.json().await?;
-        return release_of(&body).ok_or_else(|| anyhow::anyhow!("no tag_name in GitHub's answer"));
-    }
-    anyhow::bail!("too many redirects")
+        ),
+        Err(status) => anyhow::bail!("GitHub answered HTTP {status}"),
+    };
+    release_of(&body).ok_or_else(|| anyhow::anyhow!("no tag_name in GitHub's answer"))
 }
 
 /// The tag and page of a release object of GitHub's API.
@@ -97,19 +96,19 @@ pub(crate) async fn running(
     let response = client.get(url).send().await?;
     let status = response.status();
     anyhow::ensure!(status.is_success(), "{url} answered HTTP {status}");
-    let body = response.text().await?;
-    version_in(&body, watch.current_query.as_deref())
+    let body = read_all_capped(response, MAX_JSON_BYTES).await?;
+    // A malformed query never gets here: validation refuses it at load.
+    let query = watch.current_query.as_ref().and_then(Parsed::get);
+    version_in(&String::from_utf8_lossy(&body), query)
         .ok_or_else(|| anyhow::anyhow!("no version in the answer of {url}"))
 }
 
 /// The version inside a service's answer: the first node `query` matches in a
 /// JSON document, or without a query the first line of the text.
-fn version_in(body: &str, query: Option<&str>) -> Option<String> {
+fn version_in(body: &str, query: Option<&JsonPath>) -> Option<String> {
     let version = match query {
-        Some(query) => {
+        Some(path) => {
             let value: serde_json::Value = serde_json::from_str(body).ok()?;
-            // The query is validated at config load.
-            let path = serde_json_path::JsonPath::parse(query).ok()?;
             match path.query(&value).first()? {
                 serde_json::Value::String(text) => text.trim().to_owned(),
                 serde_json::Value::Number(number) => number.to_string(),
@@ -155,6 +154,91 @@ fn numbers(version: &str) -> Option<Vec<u64>> {
         .map(|part| part.parse().ok())
         .collect();
     parts.filter(|parts| !parts.is_empty())
+}
+
+/// One pass of the release watches: for each monitor with a `release`, refresh
+/// the project's latest release (gated on the stored `checked_at`), learn the
+/// version that runs, and alert when the first is newer - once per release,
+/// the release alerted for being stored, so a restart does not repeat it.
+/// Muted during maintenance without being recorded, like the certificate and
+/// domain expiries.
+pub(crate) async fn check_releases(
+    store: &Store,
+    snapshot: &Config,
+    notifier: &Notifiers,
+    client: &reqwest::Client,
+    now: i64,
+) {
+    for monitor in &snapshot.monitors {
+        let Some(watch) = &monitor.release else {
+            continue;
+        };
+        let stored = match db::release_watch(store, &monitor.id).await {
+            Ok(stored) => stored,
+            Err(err) => {
+                warn!(monitor = %monitor.id, "failed to read release watch: {err:#}");
+                continue;
+            }
+        };
+        // A changed `release.github` in the config asks again immediately.
+        let stored = stored.filter(|stored| stored.project == watch.github);
+        let (latest, url, alerted) = match stored {
+            Some(stored) if now - stored.checked_at < RELEASE_CHECK_SECS => {
+                (stored.latest, stored.url, stored.notified)
+            }
+            stored => match crate::release::latest(client, &watch.github).await {
+                Ok(release) => {
+                    if let Err(err) = db::upsert_release_watch(
+                        store,
+                        &monitor.id,
+                        &watch.github,
+                        &release.tag,
+                        &release.url,
+                        now,
+                    )
+                    .await
+                    {
+                        warn!(monitor = %monitor.id, "failed to store release watch: {err:#}");
+                    }
+                    info!(monitor = %monitor.id, project = %watch.github, latest = %release.tag, "checked latest release");
+                    (release.tag, release.url, stored.and_then(|s| s.notified))
+                }
+                Err(err) => {
+                    warn!(monitor = %monitor.id, project = %watch.github, "release check failed: {err:#}");
+                    continue;
+                }
+            },
+        };
+        let current = match crate::release::running(client, watch).await {
+            Ok(current) => current,
+            Err(err) => {
+                warn!(monitor = %monitor.id, "could not learn the running version: {err:#}");
+                continue;
+            }
+        };
+        if !crate::release::is_newer(&latest, &current)
+            || alerted.as_deref() == Some(latest.as_str())
+            || snapshot.in_maintenance(&monitor.id, chrono::Utc::now())
+        {
+            continue;
+        }
+        notifier
+            .load_full()
+            .dispatch(
+                Event::ReleaseAvailable(hora_notify::Release {
+                    monitor: &monitor.name,
+                    project: &watch.github,
+                    current: &current,
+                    latest: &latest,
+                    url: &url,
+                }),
+                monitor.notify.as_deref(),
+            )
+            .await;
+        if let Err(err) = db::mark_release_notified(store, &monitor.id, &latest).await {
+            warn!(monitor = %monitor.id, "failed to record the release alert: {err:#}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -213,26 +297,27 @@ mod tests {
 
     #[test]
     fn finds_the_version_a_service_answers() {
+        let path = |query: &str| JsonPath::parse(query).expect("valid query");
         let json = r#"{"server":{"name":"Tuwunel","version":"1.9.1"}}"#;
         assert_eq!(
-            version_in(json, Some("$.server.version")).as_deref(),
+            version_in(json, Some(&path("$.server.version"))).as_deref(),
             Some("1.9.1")
         );
         assert_eq!(
-            version_in(r#"{"v": 42}"#, Some("$.v")).as_deref(),
+            version_in(r#"{"v": 42}"#, Some(&path("$.v"))).as_deref(),
             Some("42")
         );
         // What a Matrix homeserver answers on /_matrix/client/versions (MSC4383).
         let matrix = r#"{"versions":["v1.19"],"net.zemos.msc4383.server":{"name":"Tuwunel","version":"1.9.1"}}"#;
         assert_eq!(
-            version_in(matrix, Some("$['net.zemos.msc4383.server'].version")).as_deref(),
+            version_in(matrix, Some(&path("$['net.zemos.msc4383.server'].version"))).as_deref(),
             Some("1.9.1")
         );
         assert_eq!(version_in("1.12.27\n", None).as_deref(), Some("1.12.27"));
         // Not a version: nothing matched, not JSON, an object, an HTML page.
-        assert_eq!(version_in(json, Some("$.nope")), None);
-        assert_eq!(version_in("<html>", Some("$.v")), None);
-        assert_eq!(version_in(json, Some("$.server")), None);
+        assert_eq!(version_in(json, Some(&path("$.nope"))), None);
+        assert_eq!(version_in("<html>", Some(&path("$.v"))), None);
+        assert_eq!(version_in(json, Some(&path("$.server"))), None);
         assert_eq!(version_in(&"x".repeat(MAX_VERSION_LEN + 1), None), None);
         assert_eq!(version_in("", None), None);
     }

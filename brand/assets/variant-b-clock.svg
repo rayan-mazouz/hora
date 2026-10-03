@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- Variant B: the alarm clock that does not ring. Its bells lean like Maison's ears. -->
+  <rect width="48" height="48" rx="11" fill="#0E5E68"/>
+  <g fill="#F2F0EA">
+    <path d="M10.6 17.4a6.4 6.4 0 0 1 9.4-6.8Z" transform="rotate(-6 15 14)"/>
+    <path d="M28 10.6a6.4 6.4 0 0 1 9.4 6.8Z" transform="rotate(10 33 14)"/>
+  </g>
+  <path d="M15.6 39.6l-2.2 2.8M32.4 39.6l2.2 2.8M24 11.6v2.6" stroke="#F2F0EA" stroke-width="2.4" stroke-linecap="round"/>
+  <circle cx="24" cy="27" r="13" fill="#F2F0EA"/>
+  <g stroke="#0E5E68" stroke-width="1.2" stroke-linecap="round" opacity=".28"><path d="M24 16v2M24 36v2M13 27h2M33 27h2"/></g>
+  <path d="M17.4 27.2a2.3 2.3 0 0 0 4.4 0M26.2 27.2a2.3 2.3 0 0 0 4.4 0" fill="none" stroke="#0E5E68" stroke-width="1.7" stroke-linecap="round"/>
+  <ellipse cx="16.2" cy="31.4" rx="2" ry="1.2" fill="#E6A49A" opacity=".85"/>
+  <ellipse cx="31.8" cy="31.4" rx="2" ry="1.2" fill="#E6A49A" opacity=".85"/>
+</svg>

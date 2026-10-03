@@ -2,7 +2,97 @@
 
 Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
-`hora-data` volume) is in the [README](README.md#upgrade).
+`hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
+
+## 0.10.0 → 0.11.0
+
+Four schema migrations apply automatically, in seconds even on hundreds of
+millions of checks: `0019` (a `source` column on `checks` telling probes,
+pushes and recorded misses apart; older rows are read exactly as before),
+`0020` (a latency histogram per hourly roll-up, plus two indexes; hours
+rolled up before it are read from raw checks until they age out), `0021`
+(a failure reason code on checks and incidents; older rows keep the
+previous wording-based reading) and `0022` (how an incident's down was
+routed, so a restart mid-incident sends a local-only recovery to the quiet
+channels only; schema-only, instant). One new optional key,
+`alerts.notify_unconfirmed`: deploy the binary before a config that sets it
+(`deny_unknown_fields`). The first page request after the upgrade waits for
+the first summary build (a few seconds on a large database). Check these
+before you roll out:
+
+- **Local-only downs no longer page.** With `confirm_with_peers`, a down
+  that every peer that answered sees up is no longer sent to the monitor's
+  channels (it was, softened). It goes to `alerts.notify_unconfirmed` if
+  you set it - a quiet channel - or is only recorded. If you relied on
+  those softened alerts, add `notify_unconfirmed = ["<channel>"]` under
+  `[alerts]`. Downs that no peer could judge, or that any peer also sees,
+  page exactly as before.
+- **ICMP monitors behind a router that answers "unreachable" turn down.**
+  They were reported up (the router's ICMP error passed for the host's echo
+  reply). A monitor that goes red after the upgrade was never reaching its
+  host.
+- **An https monitor that redirects to plain http is now down**
+  (*redirected to plain http*). Point the monitor at the final https URL,
+  or fix the redirect.
+- **New webhook event and field.** `cert_unreadable` (with the read error
+  in `message`) is a new `event`, and `down` / `recovered` carry
+  `local_only`. A webhook consumer that rejects unknown events or fields
+  has to learn them first.
+- **One `cert_unreadable` alert may arrive after the upgrade** for every
+  monitor whose certificate the watcher cannot read: those used to fail in
+  the log only. Typical causes: a server that only speaks TLS 1.0/1.1, a
+  STARTTLS dialogue that changed, or a proxied monitor behind an `https://`
+  or `socks4://` proxy (the certificate is read through `http://`,
+  `socks5://` and `socks5h://` proxies only).
+- **`POST /api/push/{id}` answers 401 for an unknown id** (it was 404). A
+  script that told the two apart sees a wrong token in both cases.
+- **Probe failure wording is more precise** (*connection failed: connection
+  refused*, *proxy failed: ...*, *domain does not exist (NXDOMAIN)*, *+ 20s
+  grace*). Update any client-side filter that matched the old texts.
+- **HTTP probes send `Accept-Encoding: gzip, br, deflate, zstd`** and
+  decode the answer before the assertions run; a server may now answer
+  compressed where it did not before. `max_body_kb` caps the decoded body.
+- **Announcements**: an `until` longer than a year (`366d`) is refused.
+
+- **Configs that no longer load.** `interval_secs`, `timeout_secs`,
+  `expect_every_secs` or `health.interval_secs` above 30 days
+  (2592000), an `expected_status` outside 100-599, an IPv6 tcp target
+  without brackets (`::1:80` → `[::1]:80`), or a `dns_resolver` given as a
+  hostname. Run `hora check` against your config with the new binary first;
+  a hot reload that fails validation keeps the previous config.
+- **Push monitors and peers that never sent a heartbeat start alerting**
+  ("no heartbeat received yet") once their interval has passed. If you
+  have monitors declared for jobs that do not run yet, comment them out
+  until they do.
+- **Write endpoints and `?token=`.** Push, alert, announce, silence and event
+  still accept the token in the query string, but answer with a
+  `Deprecation` header and log a warning once per endpoint. Move scripts to
+  `Authorization: Bearer` (or `X-Push-Token` for push and alert) - see the
+  [authentication docs](https://uplg.github.io/hora/reference/api/#authentication).
+- **Rate limit on pages.** Pages, badges, reports and `/metrics` are now
+  limited per client IP. Behind a reverse proxy, set
+  `server.client_ip_header` (`x-real-ip` set by your proxy, or
+  `cf-connecting-ip` behind Cloudflare), otherwise every visitor shares the
+  proxy's address - and its bucket.
+- **Notification wording changed** on several channels (`DOWN: API` → `API
+  is DOWN` on ntfy, Gotify and Pushover; `[TAG] <headline>` email
+  subjects). Update any client-side filter that matched the old prefixes.
+- **Atom readers** show existing incidents once more as new: entry ids now
+  point at `/incident/{id}`.
+- **`/healthz` answers 503** on a degraded node. The image's `HEALTHCHECK`
+  relies on it; an external monitor that matched the body still works.
+- Removed monitors now keep their history for 7 days before it is deleted
+  (a warning names them and the date).
+- **One daemon per database.** The daemon now holds `<db>.lock` next to the
+  database (the directory must be writable, as it already is for the WAL);
+  a second daemon on the same file refuses to start.
+- **The status page no longer reloads itself.** A wall screen or kiosk adds
+  `?refresh=30` to its URL.
+- **Latency percentiles** are now read from histograms: identical below
+  64 ms, within 1.6% above. Prometheus quantiles follow.
+- The new design moves the latency heatmaps from `/history` to each
+  monitor's page (`/monitor/{id}`); the monthly report is titled "Service
+  report". The JSON API is unchanged.
 
 ## 0.9.6 → 0.10.0
 

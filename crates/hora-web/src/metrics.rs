@@ -3,32 +3,13 @@
 
 use std::fmt::Write as _;
 
+use hora_core::status::MonitorState;
+
 use crate::summary::Summary;
 
 pub(crate) fn render(summary: &Summary) -> String {
     let mut out = String::with_capacity(4096);
-
-    push_header(
-        &mut out,
-        "hora_monitor_up",
-        "Whether the monitor is up (degraded still counts as up)",
-        "gauge",
-    );
-    for monitor in &summary.monitors {
-        let up = u8::from(monitor.status == "up" || monitor.status == "degraded");
-        let _ = writeln!(out, "hora_monitor_up{} {up}", labels(monitor));
-    }
-
-    push_header(
-        &mut out,
-        "hora_monitor_degraded",
-        "Whether the monitor is up but slower than its degraded threshold",
-        "gauge",
-    );
-    for monitor in &summary.monitors {
-        let degraded = u8::from(monitor.status == "degraded");
-        let _ = writeln!(out, "hora_monitor_degraded{} {degraded}", labels(monitor));
-    }
+    render_status(&mut out, summary);
 
     push_header(
         &mut out,
@@ -64,7 +45,9 @@ pub(crate) fn render(summary: &Summary) -> String {
         &mut out,
         "hora_monitor_latency_ms",
         "Latency quantiles over the last 24 hours in milliseconds",
-        "summary",
+        // Not a Prometheus `summary` (no `_sum`/`_count`): plain gauges that
+        // carry a `quantile` label.
+        "gauge",
     );
     for monitor in &summary.monitors {
         for (quantile, value) in [
@@ -96,6 +79,62 @@ pub(crate) fn render(summary: &Summary) -> String {
     }
 
     out
+}
+
+/// The status families: `hora_monitor_status` for every monitor, then
+/// `hora_monitor_up` / `hora_monitor_degraded` for those with a verdict.
+fn render_status(out: &mut String, summary: &Summary) {
+    // A monitor without a verdict yet (just added, or just restarted) has no
+    // up/degraded sample at all: a 0 would be indistinguishable from down and
+    // fire `hora_monitor_up == 0` alerts on every deploy. Its state is still
+    // visible through `hora_monitor_status`.
+    let known = || {
+        summary
+            .monitors
+            .iter()
+            .filter(|monitor| monitor.status != MonitorState::Unknown)
+    };
+
+    push_header(
+        out,
+        "hora_monitor_status",
+        "Current status of the monitor (1 for its status: up, degraded, down or unknown)",
+        "gauge",
+    );
+    for monitor in &summary.monitors {
+        let _ = writeln!(
+            out,
+            "hora_monitor_status{{id=\"{}\",name=\"{}\",status=\"{}\"}} 1",
+            escape_label(&monitor.id),
+            escape_label(&monitor.name),
+            monitor.status,
+        );
+    }
+
+    push_header(
+        out,
+        "hora_monitor_up",
+        "Whether the monitor is up (degraded still counts as up); absent while unknown",
+        "gauge",
+    );
+    for monitor in known() {
+        let up = u8::from(matches!(
+            monitor.status,
+            MonitorState::Up | MonitorState::Degraded
+        ));
+        let _ = writeln!(out, "hora_monitor_up{} {up}", labels(monitor));
+    }
+
+    push_header(
+        out,
+        "hora_monitor_degraded",
+        "Whether the monitor is up but slower than its degraded threshold",
+        "gauge",
+    );
+    for monitor in known() {
+        let degraded = u8::from(monitor.status == MonitorState::Degraded);
+        let _ = writeln!(out, "hora_monitor_degraded{} {degraded}", labels(monitor));
+    }
 }
 
 fn push_header(out: &mut String, name: &str, help: &str, kind: &str) {

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- Hora: a little owl, the night watch, dozing because all is well (flapping never wakes
+       it). Ariane's family: the petrol tile, the sleepy face without a mouth, the blush;
+       Maison's ears become the owl's tufts. The faint rings are its facial disc. -->
+  <rect width="48" height="48" rx="11" fill="#0E5E68"/>
+  <g fill="#F2F0EA">
+    <path d="M17.6 15.8C15.1 14.8 13.3 12.5 12.7 9.2 15.8 9.6 18.6 11.3 20.4 13.9Z"/>
+    <path d="M30.4 15.8C32.9 14.8 34.7 12.5 35.3 9.2 32.2 9.6 29.4 11.3 27.6 13.9Z"/>
+    <ellipse cx="20.6" cy="40.1" rx="2.1" ry="1.4"/>
+    <ellipse cx="27.4" cy="40.1" rx="2.1" ry="1.4"/>
+    <path d="M24 13C30.9 13 35.6 18.2 35.6 25.6 35.6 33.6 30.6 39.4 24 39.4S12.4 33.6 12.4 25.6C12.4 18.2 17.1 13 24 13Z"/>
+  </g>
+  <g fill="none" stroke="#0E5E68" stroke-width="1" stroke-linecap="round" opacity=".28">
+    <circle cx="18.9" cy="23.6" r="4.9"/><circle cx="29.1" cy="23.6" r="4.9"/>
+    <path d="M14.4 29.8C15.8 32.7 18.1 35.3 21 36.8M33.6 29.8C32.2 32.7 29.9 35.3 27 36.8"/>
+  </g>
+  <path d="M16.7 23.4a2.2 2.2 0 0 0 4.4 0M26.9 23.4a2.2 2.2 0 0 0 4.4 0" fill="none" stroke="#0E5E68" stroke-width="1.7" stroke-linecap="round"/>
+  <path d="M22.9 27.3h2.2L24 29.1Z" fill="#0E5E68" stroke="#0E5E68" stroke-width=".9" stroke-linejoin="round"/>
+  <ellipse cx="16.4" cy="29.6" rx="2" ry="1.2" fill="#E6A49A" opacity=".85"/>
+  <ellipse cx="31.6" cy="29.6" rx="2" ry="1.2" fill="#E6A49A" opacity=".85"/>
+</svg>

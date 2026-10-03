@@ -22,6 +22,7 @@
 //! replay.
 
 use crate::db::CheckSample;
+use crate::status::CheckStatus;
 
 /// The widest tier ratio below which the failure-run lengths are treated as one
 /// continuous cluster (no flap/outage split, hence no threshold recommendation):
@@ -33,9 +34,6 @@ const GAP_RATIO: f64 = 2.0;
 /// is unusual enough that the operator should read the table and decide.
 const MAX_RECOMMENDED_THRESHOLD: u32 = 6;
 
-/// Status code stored for a down check (mirrors `Outcome::status_value`).
-const STATUS_DOWN: i64 = 0;
-
 /// Lengths of every maximal run of consecutive *down* checks (status 0). A
 /// degraded or up check resets the run, exactly as the scheduler resets
 /// `consecutive_down` on any `outcome.up` tick.
@@ -44,7 +42,7 @@ pub fn failure_runs(samples: &[CheckSample]) -> Vec<u32> {
     let mut runs = Vec::new();
     let mut current: u32 = 0;
     for sample in samples {
-        if sample.status == STATUS_DOWN {
+        if sample.status == CheckStatus::Down {
             current = current.saturating_add(1);
         } else if current > 0 {
             runs.push(current);
@@ -86,8 +84,8 @@ pub struct ThresholdAdvice {
 /// outage (`flap_max + 1`, which minimises the added detection delay).
 ///
 /// Returns no recommendation when there is too little signal: fewer than two
-/// distinct run lengths, no gap of at least [`GAP_RATIO`], or a flap cluster
-/// longer than [`MAX_RECOMMENDED_THRESHOLD`].
+/// distinct run lengths, no gap of at least 2x between them, or a flap
+/// cluster longer than 6 checks.
 #[must_use]
 pub fn recommend_threshold(runs: &[u32]) -> ThresholdAdvice {
     let longest_run = runs.iter().copied().max().unwrap_or(0);
@@ -150,7 +148,7 @@ pub struct LatencyStats {
 pub fn latency_stats(samples: &[CheckSample]) -> Option<LatencyStats> {
     let mut latencies: Vec<i64> = samples
         .iter()
-        .filter(|sample| sample.status != STATUS_DOWN)
+        .filter(|sample| sample.status != CheckStatus::Down)
         .filter_map(|sample| sample.latency_ms)
         .collect();
     if latencies.is_empty() {
@@ -293,7 +291,7 @@ pub fn analyze(ctx: &MonitorContext, samples: &[CheckSample]) -> MonitorTuning {
     let currently_degraded = ctx.current_degraded_over_ms.map(|threshold| {
         samples
             .iter()
-            .filter(|sample| sample.status != STATUS_DOWN)
+            .filter(|sample| sample.status != CheckStatus::Down)
             .filter_map(|sample| sample.latency_ms)
             .filter(|&latency| latency > threshold)
             .count()
@@ -303,7 +301,7 @@ pub fn analyze(ctx: &MonitorContext, samples: &[CheckSample]) -> MonitorTuning {
     let single_check_failures = runs.iter().filter(|&&len| len == 1).count();
     let down_checks = samples
         .iter()
-        .filter(|sample| sample.status == STATUS_DOWN)
+        .filter(|sample| sample.status == CheckStatus::Down)
         .count();
     let window = match (samples.first(), samples.last()) {
         (Some(first), Some(last)) => Some((first.time, last.time)),
@@ -341,7 +339,11 @@ mod tests {
     fn sample(time: i64, status: i64, latency_ms: Option<i64>) -> CheckSample {
         CheckSample {
             time,
-            status,
+            status: match status {
+                0 => CheckStatus::Down,
+                2 => CheckStatus::Degraded,
+                _ => CheckStatus::Up,
+            },
             latency_ms,
         }
     }
