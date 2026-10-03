@@ -79,6 +79,10 @@ impl WebhookNotifier {
                 witness: Some(witness),
                 ..Payload::new("peer_link_degraded", peer)
             },
+            Event::CertUnreadable { monitor, error } => Payload {
+                message: Some(error),
+                ..Payload::new("cert_unreadable", monitor)
+            },
             Event::CertChanged {
                 monitor,
                 old_fingerprint,

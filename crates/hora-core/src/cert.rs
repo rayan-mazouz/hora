@@ -19,7 +19,6 @@ use std::time::Duration;
 
 use crate::db::Store;
 use hora_notify::Event;
-use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::client::danger::{
@@ -206,50 +205,90 @@ where
     Ok(())
 }
 
-/// Connect, handshake, and return the leaf certificate's `notAfter` (unix secs)
-/// and the SHA-256 fingerprint of the leaf public key. With a `starttls` mode,
-/// the plaintext negotiation runs first (bounded by the same timeout).
-async fn fetch(
-    config: &Arc<ClientConfig>,
-    host: &str,
+/// Where and how a monitor's certificate is read.
+#[derive(Debug, Clone)]
+struct CertSource {
+    host: String,
     port: u16,
-    starttls: Option<&Starttls>,
-    timeout: Duration,
-) -> anyhow::Result<(i64, String)> {
-    let mut tcp = tokio::time::timeout(timeout, TcpStream::connect((host, port)))
-        .await
-        .map_err(|_elapsed| anyhow::anyhow!("tcp connect timed out"))??;
+    /// The plaintext negotiation to run before the handshake.
+    starttls: Option<Starttls>,
+    /// The monitor's proxy: the certificate is read through it, like the
+    /// probe's requests, not by a direct dial around it - from a network that
+    /// only reaches the target through the proxy that read fails, or reads
+    /// another server than the one the probe sees.
+    proxy: Option<String>,
+}
 
-    if let Some(mode) = starttls {
-        let ehlo_name = match mode {
-            Starttls::Smtp {
-                ehlo_name: Some(name),
-            } => name.clone(),
-            _ => address_literal(tcp.local_addr()?),
-        };
-        tokio::time::timeout(timeout, negotiate(&mut tcp, mode, &ehlo_name))
-            .await
-            .map_err(|_elapsed| anyhow::anyhow!("starttls negotiation timed out"))??;
+impl CertSource {
+    fn of(monitor: &crate::config::Monitor) -> Option<Self> {
+        let (host, port) = monitor_endpoint(monitor)?;
+        Some(Self {
+            host,
+            port,
+            starttls: starttls_of(monitor).cloned(),
+            proxy: monitor.proxy().map(str::to_owned),
+        })
     }
 
-    let connector = TlsConnector::from(Arc::clone(config));
-    let server_name = ServerName::try_from(host.to_owned())?;
-    let stream = tokio::time::timeout(timeout, connector.connect(server_name, tcp))
-        .await
-        .map_err(|_elapsed| anyhow::anyhow!("tls handshake timed out"))??;
+    /// Connect (directly or through the proxy), handshake, and return the
+    /// leaf certificate's `notAfter` (unix secs) and the SHA-256 fingerprint
+    /// of its public key. With a `starttls` mode, the plaintext negotiation
+    /// runs first. Every step is bounded by `timeout`.
+    async fn read(
+        &self,
+        config: &Arc<ClientConfig>,
+        timeout: Duration,
+    ) -> anyhow::Result<(i64, String)> {
+        let Self {
+            host,
+            port,
+            starttls,
+            proxy,
+        } = self;
+        let mut tcp = match proxy {
+            // reqwest tunnels the probe's requests, but hands back no
+            // certificate for a tunneled connection: open the tunnel here.
+            Some(proxy) => crate::tunnel::open(proxy, host, *port, timeout).await?,
+            // Happy-eyeballs: one dead address of a dual-stack name must not
+            // use up the whole timeout before the next is tried.
+            None => crate::connect::connect(host, *port, timeout)
+                .await
+                .map_err(|err| match err.kind() {
+                    std::io::ErrorKind::TimedOut => anyhow::anyhow!("tcp connect timed out"),
+                    _ => anyhow::anyhow!("tcp connect failed: {err}"),
+                })?,
+        };
 
-    let (_io, connection) = stream.get_ref();
-    let leaf = connection
-        .peer_certificates()
-        .and_then(<[CertificateDer<'_>]>::first)
-        .ok_or_else(|| anyhow::anyhow!("server presented no certificate"))?;
+        if let Some(mode) = starttls {
+            let ehlo_name = match mode {
+                Starttls::Smtp {
+                    ehlo_name: Some(name),
+                } => name.clone(),
+                _ => address_literal(tcp.local_addr()?),
+            };
+            tokio::time::timeout(timeout, negotiate(&mut tcp, mode, &ehlo_name))
+                .await
+                .map_err(|_elapsed| anyhow::anyhow!("starttls negotiation timed out"))??;
+        }
 
-    let (_rest, parsed) = x509_parser::certificate::X509Certificate::from_der(leaf.as_ref())
-        .map_err(|err| anyhow::anyhow!("failed to parse certificate: {err}"))?;
+        let connector = TlsConnector::from(Arc::clone(config));
+        let server_name = ServerName::try_from(host.clone())?;
+        let stream = tokio::time::timeout(timeout, connector.connect(server_name, tcp))
+            .await
+            .map_err(|_elapsed| anyhow::anyhow!("tls handshake timed out"))?
+            .map_err(|err| anyhow::anyhow!("tls handshake failed: {err}"))?;
 
-    let not_after = parsed.validity().not_after.timestamp();
-    let fingerprint = sha256_hex(parsed.public_key().raw);
-    Ok((not_after, fingerprint))
+        let (_io, connection) = stream.get_ref();
+        let leaf = connection
+            .peer_certificates()
+            .and_then(<[CertificateDer<'_>]>::first)
+            .ok_or_else(|| anyhow::anyhow!("server presented no certificate"))?;
+        let (_rest, parsed) = x509_parser::certificate::X509Certificate::from_der(leaf.as_ref())
+            .map_err(|err| anyhow::anyhow!("failed to parse certificate: {err}"))?;
+        let not_after = parsed.validity().not_after.timestamp();
+        let fingerprint = sha256_hex(parsed.public_key().raw);
+        Ok((not_after, fingerprint))
+    }
 }
 
 /// A one-shot read of a TLS endpoint's leaf certificate, for `hora probe`.
@@ -263,24 +302,22 @@ pub struct CertInfo {
     pub fingerprint: String,
 }
 
-/// Connect to an endpoint, read its leaf certificate and return its expiry and
-/// public-key fingerprint - optionally negotiating STARTTLS first (announcing
-/// `ehlo_name`, or the local address literal), so `hora probe` reads a
-/// certificate exactly the way the watcher does. Like the watcher, trust is
-/// intentionally not verified: this reads the dates, not the chain.
+/// Read a monitor's certificate and return its expiry and public-key
+/// fingerprint, exactly the way the watcher does (for `hora probe`): through
+/// its proxy when it has one, after its STARTTLS negotiation (announcing
+/// `ehlo_name`, or the local address literal) when it sets one. Like the
+/// watcher, trust is intentionally not verified: this reads the dates, not the
+/// chain.
 ///
 /// # Errors
 ///
-/// Returns an error if the TCP connect, the STARTTLS negotiation or the TLS
-/// handshake fails within `timeout`.
-pub async fn inspect_endpoint(
-    host: &str,
-    port: u16,
-    starttls: Option<&Starttls>,
-    timeout: Duration,
-) -> anyhow::Result<CertInfo> {
+/// Returns an error if the monitor has no TLS endpoint, or if the read fails
+/// within the monitor's timeout.
+pub async fn inspect_monitor(monitor: &crate::config::Monitor) -> anyhow::Result<CertInfo> {
+    let source =
+        CertSource::of(monitor).ok_or_else(|| anyhow::anyhow!("cannot determine host:port"))?;
     let tls = client_config()?;
-    let (not_after, fingerprint) = fetch(&tls, host, port, starttls, timeout).await?;
+    let (not_after, fingerprint) = source.read(&tls, monitor.timeout()).await?;
     let now = chrono::Utc::now().timestamp();
     Ok(CertInfo {
         not_after,
@@ -356,6 +393,7 @@ pub fn spawn_watcher(
 
         let mut warned: HashMap<String, bool> = HashMap::new();
         let mut domain_warned: HashMap<String, bool> = HashMap::new();
+        let mut unreadable: HashMap<String, bool> = HashMap::new();
         let mut ticker = tokio::time::interval(CHECK_INTERVAL);
 
         loop {
@@ -369,6 +407,7 @@ pub fn spawn_watcher(
             // Forget monitors that no longer exist so the alert-dedup maps stay bounded.
             warned.retain(|id, _| snapshot.monitors.iter().any(|m| &m.id == id));
             domain_warned.retain(|id, _| snapshot.monitors.iter().any(|m| &m.id == id));
+            unreadable.retain(|id, _| snapshot.monitors.iter().any(|m| &m.id == id));
 
             // A shutdown mid-sweep stops it rather than waiting out every
             // remaining lookup and handshake.
@@ -383,7 +422,16 @@ pub fn spawn_watcher(
                 )
                 .await;
                 release::check_releases(&store, &snapshot, &notifier, &client, now).await;
-                check_certs(&store, &snapshot, &notifier, &tls, &mut warned, now).await;
+                check_certs(
+                    &store,
+                    &snapshot,
+                    &notifier,
+                    &tls,
+                    &mut warned,
+                    &mut unreadable,
+                    now,
+                )
+                .await;
             };
             tokio::select! {
                 () = sweep => {}
@@ -402,6 +450,7 @@ async fn check_certs(
     notifier: &Notifiers,
     tls: &Arc<ClientConfig>,
     warned: &mut HashMap<String, bool>,
+    unreadable: &mut HashMap<String, bool>,
     now: i64,
 ) {
     use futures_util::StreamExt as _;
@@ -415,18 +464,14 @@ async fn check_certs(
         .enumerate()
         .filter(|(_, m)| m.checks_cert())
         .filter_map(|(index, monitor)| {
-            let endpoint = monitor_endpoint(monitor);
-            if endpoint.is_none() {
+            let source = CertSource::of(monitor);
+            if source.is_none() {
                 warn!(monitor = %monitor.id, "cannot parse host for cert check");
             }
-            endpoint.map(|(host, port)| {
+            source.map(|source| {
                 let tls = Arc::clone(tls);
-                let starttls = starttls_of(monitor).cloned();
                 let timeout = monitor.timeout();
-                async move {
-                    let result = fetch(&tls, &host, port, starttls.as_ref(), timeout).await;
-                    (index, result)
-                }
+                async move { (index, source.read(&tls, timeout).await) }
             })
         })
         .collect();
@@ -457,9 +502,15 @@ async fn check_certs(
     for (index, result) in results {
         let monitor = &snapshot.monitors[index];
         let (not_after, fingerprint) = match result {
-            Ok(found) => found,
+            Ok(found) => {
+                if unreadable.remove(&monitor.id).is_some() {
+                    info!(monitor = %monitor.id, "TLS certificate readable again");
+                }
+                found
+            }
             Err(err) => {
                 warn!(monitor = %monitor.id, "cert check failed: {err:#}");
+                report_unreadable(store, snapshot, notifier, monitor, &err, unreadable).await;
                 continue;
             }
         };
@@ -504,6 +555,51 @@ async fn check_certs(
         }
     }
 }
+
+/// A certificate that could not be read is an expiry nobody watches any more
+/// (a STARTTLS dialogue that changed, a server down to TLS 1.0, a firewall
+/// rule): alert once per streak of failed reads, like an expiring one. Not
+/// while the monitor has an open incident - its down alert already says the
+/// server is unreachable - and not during maintenance; neither records the
+/// streak, so the alert still comes if the read keeps failing afterwards.
+async fn report_unreadable(
+    store: &Store,
+    snapshot: &Config,
+    notifier: &Notifiers,
+    monitor: &crate::config::Monitor,
+    err: &anyhow::Error,
+    unreadable: &mut HashMap<String, bool>,
+) {
+    if unreadable.get(&monitor.id).copied().unwrap_or(false)
+        || snapshot.in_maintenance(&monitor.id, chrono::Utc::now())
+    {
+        return;
+    }
+    match db::find_open_incident(store, &monitor.id).await {
+        Ok(None) => {}
+        Ok(Some(_)) => return,
+        Err(err) => {
+            warn!(monitor = %monitor.id, "failed to read open incident: {err:#}");
+            return;
+        }
+    }
+    // The error may quote the server (an IMAP greeting, an SMTP reply).
+    let error = crate::bounded(&format!("{err:#}"), MAX_UNREADABLE_CHARS);
+    notifier
+        .load_full()
+        .dispatch(
+            Event::CertUnreadable {
+                monitor: &monitor.name,
+                error: &error,
+            },
+            monitor.notify.as_deref(),
+        )
+        .await;
+    unreadable.insert(monitor.id.clone(), true);
+}
+
+/// The longest certificate-read error quoted in an alert.
+const MAX_UNREADABLE_CHARS: usize = 300;
 
 /// Certificate pinning for one check: alert on an unreported mismatch (see
 /// [`pin_to_report`]), and remember the key only once the alert went out.
@@ -903,6 +999,77 @@ mod tests {
         assert_eq!(
             monitor_endpoint(&config.monitors[3]),
             Some(("2001:db8::2".to_owned(), 443))
+        );
+    }
+
+    fn monitor_config(target: &str, extra: &str) -> Config {
+        crate::config::parse(&format!(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "api"
+            name = "API"
+            target = "{target}"
+            interval_secs = 60
+            timeout_secs = 5
+            {extra}
+            "#
+        ))
+        .expect("config")
+    }
+
+    /// A proxied monitor's certificate is read through its proxy - the same
+    /// path the probe takes - not by a direct dial around it.
+    #[tokio::test]
+    async fn a_proxied_monitor_is_read_through_its_proxy() {
+        let port = crate::testing::tls_server().await;
+        let (proxy, tunnels) = crate::testing::connect_proxy().await;
+        let config = monitor_config(
+            &format!("https://localhost:{port}/health"),
+            &format!("proxy = \"{proxy}\""),
+        );
+        let cert = inspect_monitor(&config.monitors[0]).await.expect("read");
+        assert_eq!(cert.not_after, crate::testing::FIXTURE_NOT_AFTER);
+        assert_eq!(tunnels.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Without a proxy: the direct dial reads the same certificate.
+        let config = monitor_config(&format!("https://localhost:{port}/health"), "");
+        let direct = inspect_monitor(&config.monitors[0]).await.expect("read");
+        assert_eq!(direct.fingerprint, cert.fingerprint);
+        assert_eq!(tunnels.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A certificate that cannot be read alerts once per streak, not at every
+    /// sweep, and not while the monitor has an open incident.
+    #[tokio::test]
+    async fn an_unreadable_certificate_alerts_once() {
+        let (hook, posts) = crate::testing::webhook_sink().await;
+        let config = monitor_config(
+            "https://localhost:1/",
+            &format!("[[channels]]\nname = \"hook\"\ntype = \"webhook\"\nurl = \"{hook}\""),
+        );
+        let client = crate::http::client(None).unwrap();
+        let notifier = crate::notifications::shared(&config, &client);
+        let store = Store::in_memory().await;
+        let monitor = &config.monitors[0];
+        let err = anyhow::anyhow!("starttls negotiation timed out");
+        let mut unreadable = HashMap::new();
+
+        // Down (open incident): the down alert already speaks for it.
+        let incident = db::insert_incident_start(&store, "api", None, None, None, &[], None, None)
+            .await
+            .unwrap();
+        report_unreadable(&store, &config, &notifier, monitor, &err, &mut unreadable).await;
+        assert_eq!(crate::testing::events(&posts), Vec::<String>::new());
+
+        db::update_incident_end(&store, incident).await.unwrap();
+        report_unreadable(&store, &config, &notifier, monitor, &err, &mut unreadable).await;
+        report_unreadable(&store, &config, &notifier, monitor, &err, &mut unreadable).await;
+        assert_eq!(crate::testing::events(&posts), ["cert_unreadable"]);
+        assert_eq!(
+            posts.lock().unwrap()[0]["message"],
+            "starttls negotiation timed out"
         );
     }
 }

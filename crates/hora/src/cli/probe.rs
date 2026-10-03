@@ -172,15 +172,9 @@ async fn print_probe_report(
         monitor.kind() == hora_core::config::Kind::Http && monitor.target().starts_with("https://");
     let starttls = hora_core::cert::starttls_of(monitor);
     if reached_server && (https || starttls.is_some()) {
-        // STARTTLS tcp monitors read their certificate exactly like the
-        // watcher: negotiate in plaintext, then handshake.
-        let cert = match hora_core::cert::monitor_endpoint(monitor) {
-            Some((host, port)) => {
-                hora_core::cert::inspect_endpoint(&host, port, starttls, monitor.timeout()).await
-            }
-            None => Err(anyhow::anyhow!("cannot determine host:port")),
-        };
-        match cert {
+        // Read exactly like the watcher: STARTTLS monitors negotiate in
+        // plaintext first, proxied ones go through their proxy.
+        match hora_core::cert::inspect_monitor(monitor).await {
             Ok(cert) => println!(
                 "  cert      {} (expires {})",
                 cert_left_phrase(cert.not_after - chrono::Utc::now().timestamp()),

@@ -65,7 +65,11 @@ fn color(kind: Kind) -> u32 {
     match kind {
         Kind::Down | Kind::Alert(AlertSeverity::Error | AlertSeverity::Critical) => COLOR_DOWN,
         Kind::Recovered | Kind::Digest => COLOR_UP,
-        Kind::CertExpiring | Kind::DomainExpiring | Kind::Release | Kind::CertChanged => COLOR_CERT,
+        Kind::CertExpiring
+        | Kind::DomainExpiring
+        | Kind::Release
+        | Kind::CertChanged
+        | Kind::CertUnreadable => COLOR_CERT,
         Kind::Degraded
         | Kind::PeerLinkDegraded
         | Kind::BudgetBurn

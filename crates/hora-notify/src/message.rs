@@ -26,6 +26,7 @@ pub(crate) enum Kind {
     Digest,
     PeerLinkDegraded,
     CertChanged,
+    CertUnreadable,
     BudgetBurn,
     Alert(AlertSeverity),
 }
@@ -53,7 +54,7 @@ impl Kind {
             Self::Down => "\u{1F534}",
             Self::Degraded => "\u{1F7E0}",
             Self::Recovered => "\u{1F7E2}",
-            Self::CertExpiring => "\u{1F510}",
+            Self::CertExpiring | Self::CertUnreadable => "\u{1F510}",
             Self::DomainExpiring => "\u{1F310}",
             Self::Release => "\u{1F4E6}",
             Self::Digest => "\u{1F4CA}",
@@ -70,7 +71,7 @@ impl Kind {
             Self::Down => "DOWN",
             Self::Degraded => "SLOW",
             Self::Recovered => "OK",
-            Self::CertExpiring | Self::CertChanged => "TLS",
+            Self::CertExpiring | Self::CertChanged | Self::CertUnreadable => "TLS",
             Self::DomainExpiring => "DOMAIN",
             Self::Release => "RELEASE",
             Self::Digest => "DIGEST",
@@ -86,6 +87,7 @@ impl Kind {
             Self::Release => Urgency::Notice,
             Self::Degraded
             | Self::CertExpiring
+            | Self::CertUnreadable
             | Self::DomainExpiring
             | Self::PeerLinkDegraded
             | Self::Alert(AlertSeverity::Warning) => Urgency::Warning,
@@ -222,6 +224,11 @@ impl Message {
                 Kind::PeerLinkDegraded,
                 peer.to_owned(),
                 " link degraded".to_owned(),
+            ),
+            Event::CertUnreadable { monitor, .. } => (
+                Kind::CertUnreadable,
+                monitor.to_owned(),
+                " TLS certificate could not be read".to_owned(),
             ),
             Event::CertChanged { monitor, .. } => (
                 Kind::CertChanged,
@@ -458,6 +465,12 @@ fn details(event: Event<'_>) -> (Option<String>, Vec<Line>) {
                 ),
             ],
         ),
+        Event::CertUnreadable { error, .. } => (
+            Some(error.to_owned()),
+            vec![Line::Text(
+                "Its expiry is not watched until it can be read again.".to_owned(),
+            )],
+        ),
         Event::Alert { message, .. } if !message.is_empty() => {
             (None, vec![Line::Text(message.to_owned())])
         }
@@ -654,6 +667,20 @@ mod tests {
         });
         assert_eq!(msg.headline(), "API TLS certificate changed unexpectedly");
         assert!(msg.plain().contains("old: aa:bb\nnew: cc:dd"));
+    }
+
+    #[test]
+    fn unreadable_cert_names_the_error() {
+        let msg = Message::render(Event::CertUnreadable {
+            monitor: "Mail",
+            error: "starttls negotiation timed out",
+        });
+        assert_eq!(
+            msg.tagged_headline(),
+            "[TLS] Mail TLS certificate could not be read"
+        );
+        assert_eq!(msg.code.as_deref(), Some("starttls negotiation timed out"));
+        assert_eq!(msg.urgency(), Urgency::Warning);
     }
 
     #[test]

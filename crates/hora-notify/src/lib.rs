@@ -159,6 +159,10 @@ pub enum Event<'a> {
     /// `secs_left` is negative once expired: whole days alone would read
     /// "has expired" with hours still to go.
     CertExpiring { monitor: &'a str, secs_left: i64 },
+    /// A cert-watched monitor's TLS certificate could not be read (handshake,
+    /// STARTTLS negotiation or connect failed): its expiry is no longer
+    /// watched until it can be read again.
+    CertUnreadable { monitor: &'a str, error: &'a str },
     /// A monitor's registered domain is within the warning window (or expired),
     /// as reported by the registry over RDAP.
     DomainExpiring {

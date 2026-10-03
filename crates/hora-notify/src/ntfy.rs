@@ -43,7 +43,7 @@ fn tag(kind: Kind) -> &'static str {
         }
         Kind::Degraded | Kind::PeerLinkDegraded | Kind::Alert(AlertSeverity::Warning) => "warning",
         Kind::Recovered => "white_check_mark",
-        Kind::CertExpiring | Kind::CertChanged => "lock",
+        Kind::CertExpiring | Kind::CertChanged | Kind::CertUnreadable => "lock",
         Kind::DomainExpiring => "globe_with_meridians",
         Kind::Release => "package",
         Kind::Digest => "bar_chart",
