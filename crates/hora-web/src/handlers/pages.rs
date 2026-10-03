@@ -299,7 +299,7 @@ pub(crate) async fn report_page(
                 .as_deref()
                 .is_none_or(|group| row.group.as_deref() == Some(group))
     };
-    let groups = crate::report::group_rows(&report, shown);
+    let groups = crate::report::group_rows(&report, &config.maintenance, shown);
     let kpis = crate::report::kpis(&report, shown);
     // A scoped report with nothing visible answers like the group page: 404,
     // revealing neither the group's existence nor its members.

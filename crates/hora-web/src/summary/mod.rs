@@ -18,6 +18,7 @@ pub(crate) use view::{
 };
 
 use monitor::{MonitorData, build_groups, build_monitor_view};
+pub(crate) use status::DAY_OUTAGE_BELOW_PERMILLE;
 use status::{iso, overall_label, worse};
 
 use std::collections::HashMap;

@@ -5,8 +5,9 @@
 
 use askama::Template;
 use chrono::{Datelike, NaiveDate, Utc};
+use hora_core::config::Maintenance;
 use hora_core::fmt;
-use hora_core::report::{MonitorMonth, MonthReport};
+use hora_core::report::{DayTally, MonitorMonth, MonthReport};
 
 use crate::layout::{Chrome, join_and, minutes};
 
@@ -64,6 +65,9 @@ pub(crate) struct ReportRow {
     downtime: String,
     mttr: String,
     left: String,
+    /// The month's days as a strip (an inline SVG), and its words.
+    days: String,
+    days_label: String,
 }
 
 impl ReportGroup {
@@ -76,6 +80,7 @@ impl ReportGroup {
 /// Group the report rows (already in configuration order) and format them.
 pub(crate) fn group_rows(
     report: &MonthReport,
+    maintenance: &[Maintenance],
     visible: impl Fn(&MonitorMonth) -> bool,
 ) -> Vec<ReportGroup> {
     let mut groups: Vec<(String, Vec<&MonitorMonth>)> = Vec::new();
@@ -94,7 +99,10 @@ pub(crate) fn group_rows(
         .map(|(name, rows)| ReportGroup {
             name,
             uptime: uptime_of(&rows),
-            rows: rows.into_iter().map(format_row).collect(),
+            rows: rows
+                .into_iter()
+                .map(|row| format_row(row, &report.month, maintenance))
+                .collect(),
         })
         .collect()
 }
@@ -205,7 +213,73 @@ pub(crate) fn span(month: &str) -> String {
     format!("1 to {last} {}", first.format("%B %Y"))
 }
 
-fn format_row(row: &MonitorMonth) -> ReportRow {
+/// A report day's class in the strip, by the status bar's rule (see
+/// `summary::status::day_cell`): slow, or briefly down, stays amber; red
+/// once the day was mostly an outage. A planned window turns a day that
+/// was not an outage into maintenance.
+fn day_class(day: DayTally, maintenance: bool) -> u8 {
+    let total = day.up + day.down + day.degraded;
+    if total == 0 {
+        return b'n';
+    }
+    let permille = (day.up + day.degraded).saturating_mul(1000) / total;
+    if permille < crate::summary::DAY_OUTAGE_BELOW_PERMILLE {
+        b'x'
+    } else if maintenance {
+        b'm'
+    } else if day.down == 0 && day.degraded == 0 {
+        b'u'
+    } else {
+        b'd'
+    }
+}
+
+/// How many days `month` (`2026-05`) has; 31 when it does not parse.
+fn month_length(month: &str) -> usize {
+    NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d")
+        .ok()
+        .and_then(|first| first.checked_add_months(chrono::Months::new(1)))
+        .and_then(|next| next.pred_opt())
+        .map_or(31, |last| last.day() as usize)
+}
+
+/// The days of `month` (`2026-05`) a planned window covering `id` touched,
+/// as 1-based day numbers.
+fn maintenance_days(month: &str, id: &str, windows: &[Maintenance]) -> Vec<u32> {
+    let Some(first) = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d").ok() else {
+        return Vec::new();
+    };
+    let mut days = Vec::new();
+    for window in windows
+        .iter()
+        .filter(|window| window.monitors.is_empty() || window.monitors.iter().any(|m| m == id))
+    {
+        let mut day = window.start.date_naive();
+        while day <= window.end.date_naive() {
+            if day.year() == first.year() && day.month() == first.month() {
+                days.push(day.day());
+            }
+            let Some(next) = day.succ_opt() else { break };
+            day = next;
+        }
+    }
+    days
+}
+
+fn format_row(row: &MonitorMonth, month: &str, maintenance: &[Maintenance]) -> ReportRow {
+    let planned = maintenance_days(month, &row.id, maintenance);
+    let mut classes = Vec::with_capacity(row.days.len());
+    let mut outages = 0;
+    for (day, number) in row.days.iter().zip(1_u32..) {
+        let class = day_class(*day, planned.contains(&number));
+        outages += usize::from(class == b'x');
+        classes.push(class);
+    }
+    let days_label = match outages {
+        0 => "No day with an outage".to_owned(),
+        1 => "1 day with an outage".to_owned(),
+        n => format!("{n} days with an outage"),
+    };
     let dash = || "\u{2014}".to_owned();
     let (met_state, met_word) = match row.slo_met {
         Some(true) => ("up", "Met"),
@@ -231,6 +305,8 @@ fn format_row(row: &MonitorMonth) -> ReportRow {
             (Some(consumed), Some(budget)) => minutes((budget - consumed).max(0)),
             _ => dash(),
         },
+        days: crate::render::day_strip(&classes, month_length(month)),
+        days_label,
     }
 }
 
@@ -247,5 +323,38 @@ mod tests {
         assert_eq!(span("2026-02"), "1 to 28 February 2026");
         assert_eq!(span("2024-02"), "1 to 29 February 2024");
         assert_eq!(pct_bp(9997), "99.97 %");
+    }
+
+    #[test]
+    fn strip_days_follow_the_bar_rule() {
+        let tally = |up, down, degraded| DayTally { up, down, degraded };
+        assert_eq!(day_class(tally(0, 0, 0), false), b'n');
+        assert_eq!(day_class(tally(100, 0, 0), false), b'u');
+        assert_eq!(day_class(tally(95, 5, 0), false), b'd');
+        assert_eq!(day_class(tally(50, 50, 0), false), b'x');
+        // A planned window marks the day, unless it was still an outage.
+        assert_eq!(day_class(tally(95, 5, 0), true), b'm');
+        assert_eq!(day_class(tally(50, 50, 0), true), b'x');
+    }
+
+    #[test]
+    fn maintenance_days_are_clipped_to_the_month() {
+        let window: Maintenance = toml::from_str(
+            r#"
+            start = "2026-04-29T22:00:00Z"
+            end = "2026-05-02T01:00:00Z"
+            monitors = ["api"]
+        "#,
+        )
+        .unwrap();
+        let windows = [window];
+        assert_eq!(maintenance_days("2026-05", "api", &windows), [1, 2]);
+        assert_eq!(maintenance_days("2026-04", "api", &windows), [29, 30]);
+        assert_eq!(
+            maintenance_days("2026-05", "web", &windows),
+            Vec::<u32>::new()
+        );
+        assert_eq!(month_length("2026-02"), 28);
+        assert_eq!(month_length("2024-02"), 29);
     }
 }

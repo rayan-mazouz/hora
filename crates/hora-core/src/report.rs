@@ -46,6 +46,17 @@ pub struct MonitorMonth {
     /// Minutes of that budget consumed (conservative: the covered part of the
     /// month is assumed fully monitored).
     pub budget_consumed_minutes: Option<i64>,
+    /// Each day of the month so far, first day first: its check counts (all
+    /// zero for a day without data), for the report's day strip.
+    pub days: Vec<DayTally>,
+}
+
+/// One monitor-day's check counts in a [`MonitorMonth`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DayTally {
+    pub up: i64,
+    pub down: i64,
+    pub degraded: i64,
 }
 
 /// A calendar month's report, monitors in configuration order.
@@ -108,14 +119,30 @@ pub async fn build(pool: &SqlitePool, config: &Config, month: &str) -> anyhow::R
     // Every incident overlapping the month, however many came after it.
     let incidents = db::incidents_between(pool, start, covered_end).await?;
 
+    // The days elapsed so far (all of them for a past month).
+    let day_count =
+        usize::try_from((covered_end - start + SECONDS_PER_DAY - 1) / SECONDS_PER_DAY).unwrap_or(0);
+
     let mut rows = Vec::with_capacity(config.monitors.len());
     for monitor in &config.monitors {
         let (mut up, mut down, mut degraded) = (0_i64, 0_i64, 0_i64);
+        let mut tallies = vec![DayTally::default(); day_count];
         if let Some(days) = daily.get(&monitor.id) {
             for day in days.iter().filter(|day| day.day.starts_with(month)) {
                 up += day.up;
                 down += day.down;
                 degraded += day.degraded;
+                // "2026-05-07" is the 7th: index 6.
+                let index = day
+                    .day
+                    .get(8..10)
+                    .and_then(|dd| dd.parse::<usize>().ok())
+                    .and_then(|dd| dd.checked_sub(1));
+                if let Some(tally) = index.and_then(|index| tallies.get_mut(index)) {
+                    tally.up += day.up;
+                    tally.down += day.down;
+                    tally.degraded += day.degraded;
+                }
             }
         }
         let total = up + down + degraded;
@@ -165,6 +192,7 @@ pub async fn build(pool: &SqlitePool, config: &Config, month: &str) -> anyhow::R
             slo_met,
             budget_minutes,
             budget_consumed_minutes,
+            days: tallies,
         });
     }
 
@@ -309,6 +337,17 @@ mod tests {
         // is far past it.
         assert_eq!(row.budget_minutes, Some(44));
         assert!(row.budget_consumed_minutes.unwrap() > 44);
+        // The day strip: every January day, all of the checks on the 1st.
+        assert_eq!(row.days.len(), 31);
+        assert_eq!(
+            row.days[0],
+            DayTally {
+                up: 9,
+                down: 1,
+                degraded: 0
+            }
+        );
+        assert!(row.days[1..].iter().all(|day| *day == DayTally::default()));
 
         // A busy February (more incidents than any "latest N" read would
         // fetch) must not push January's incident out of its own report.

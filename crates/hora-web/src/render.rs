@@ -135,6 +135,40 @@ pub(crate) fn day_bar(days: &[u8]) -> String {
     )
 }
 
+/// A month's day strip for the report, first day first, from day cell
+/// classes: run-length rects like [`day_bar`], on a 16-unit height (down
+/// fills it, up stops short). The gaps between days are the stylesheet's
+/// mask for the month's length (`d31`): a running month's strip keeps the
+/// whole month's width, its days to come left empty.
+pub(crate) fn day_strip(days: &[u8], month_days: usize) -> String {
+    let mut rects = String::new();
+    let mut start = 0;
+    while let Some(&class) = days.get(start) {
+        let run = days[start..]
+            .iter()
+            .take_while(|day| **day == class)
+            .count();
+        let (y, height) = match class {
+            b'u' => (4, 12),
+            b'd' => (8, 8),
+            b'x' => (0, 16),
+            b'm' => (10, 6),
+            _ => (14, 2),
+        };
+        let _ = write!(
+            rects,
+            "<rect class=\"{}\" x=\"{start}\" y=\"{y}\" width=\"{run}\" height=\"{height}\"/>",
+            char::from(class)
+        );
+        start += run;
+    }
+    let width = month_days.max(days.len()).max(1);
+    format!(
+        "<svg class=\"d{width}\" viewBox=\"0 0 {width} 16\" preserveAspectRatio=\"none\" \
+         aria-hidden=\"true\" focusable=\"false\">{rects}</svg>"
+    )
+}
+
 /// A thin horizontal meter (`value` of `max`), drawn as an svg so its width is
 /// an attribute, not an inline style the CSP would refuse.
 pub(crate) fn meter(value: i64, max: i64, class: &str) -> String {
