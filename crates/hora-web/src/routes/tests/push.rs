@@ -50,14 +50,19 @@ async fn push_rejects_wrong_token() {
 }
 
 #[tokio::test]
-async fn push_to_non_push_monitor_is_404() {
-    // "web" exists but is an HTTP monitor, not a push target.
-    let res = test_app()
-        .await
-        .oneshot(push("/api/push/web?token=x"))
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+async fn push_to_an_unknown_id_answers_like_a_wrong_token() {
+    // "web" exists but is an HTTP monitor, not a push target; "nope" does
+    // not exist at all. Both read like a wrong token: no id oracle.
+    let app = test_app().await;
+    for uri in [
+        "/api/push/web?token=x",
+        "/api/push/nope",
+        "/api/push/beat?token=wrong",
+    ] {
+        let res = app.clone().oneshot(push(uri)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        assert_eq!(body_text(res).await, "invalid push token", "{uri}");
+    }
 }
 
 #[tokio::test]

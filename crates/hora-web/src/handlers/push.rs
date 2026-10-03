@@ -43,8 +43,7 @@ pub(crate) struct PushQuery {
     responses(
         (status = 200, description = "Heartbeat recorded"),
         (status = 400, description = "Unknown status or negative ping"),
-        (status = 401, description = "Missing or wrong token"),
-        (status = 404, description = "Unknown push monitor")
+        (status = 401, description = "Missing or wrong token (also for an unknown id, so ids cannot be probed)")
     )
 )]
 pub(crate) async fn push(
@@ -70,7 +69,11 @@ pub(crate) async fn push(
     {
         peer.listen_token.as_ref()
     } else {
-        return Err(AppError::NotFound("unknown push target"));
+        // The same 401 as a wrong token: a 404 here would tell anyone which
+        // push ids exist (and so which ones to try tokens on). The operator
+        // finds a typo'd id in the log.
+        tracing::debug!(id = %hora_core::bounded(&id, 64), "push for an unknown id");
+        return Err(AppError::Unauthorized("invalid push token"));
     };
 
     // A configured token is required; without one, the id alone authorizes. Prefer
