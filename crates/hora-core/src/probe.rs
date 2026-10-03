@@ -259,7 +259,7 @@ async fn http(client: &Client, monitor: &Monitor) -> Outcome {
     // taken when the final response's headers arrive, before the body read, to
     // match the single-request timing this replaced.
     let attempt = async {
-        let response = send_following_redirects(client, monitor).await?;
+        let mut response = send_following_redirects(client, monitor).await?;
         let latency = millis(start.elapsed());
         let code = response.status().as_u16();
         let status_ok = match monitor.expected_status {
@@ -283,8 +283,12 @@ async fn http(client: &Client, monitor: &Monitor) -> Outcome {
             // A body cut short by a transport error is reported as such:
             // running the assertions on the fragment would blame the content
             // ("keyword missing") for what is a connection problem.
-            let body = read_body(response, cap).await.map_err(HttpError::Request)?;
-            (head, body)
+            // Past the cap the rest is dropped unread: a snapshot or an
+            // assertion only ever looks at the first `cap` bytes.
+            let body = crate::http::read_capped(&mut response, cap)
+                .await
+                .map_err(HttpError::Request)?;
+            (head, body.bytes)
         } else {
             (String::new(), Vec::new())
         };
@@ -754,21 +758,6 @@ fn over_threshold(latency_ms: i64, threshold: Option<i64>) -> bool {
 
 fn millis(elapsed: Duration) -> i64 {
     i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
-}
-
-/// Read the response body up to `cap` bytes (so a huge body can't exhaust
-/// memory). A transport error mid-body is an error, not a short body.
-async fn read_body(mut response: reqwest::Response, cap: usize) -> reqwest::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    while buf.len() < cap {
-        let Some(chunk) = response.chunk().await? else {
-            break;
-        };
-        // Copy at most the remaining budget so one huge chunk can't blow the bound.
-        let take = (cap - buf.len()).min(chunk.len());
-        buf.extend_from_slice(&chunk[..take]);
-    }
-    Ok(buf)
 }
 
 /// The status line and (bounded) headers of a response, captured before the

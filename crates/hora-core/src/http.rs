@@ -149,6 +149,77 @@ pub async fn read_capped(response: &mut Response, cap: usize) -> reqwest::Result
     })
 }
 
+/// The largest JSON document [`get_json_following`] reads. RDAP domain
+/// objects and GitHub release objects run to tens of KiB; anything far beyond
+/// is not the answer we want.
+pub(crate) const MAX_JSON_BYTES: usize = 1 << 20;
+
+/// Read a whole response body, failing once it exceeds `cap` bytes: for
+/// answers that are useless cut short (a JSON document, a version string).
+///
+/// # Errors
+///
+/// Returns an error on a transport failure or an oversized body.
+pub(crate) async fn read_all_capped(mut response: Response, cap: usize) -> anyhow::Result<Vec<u8>> {
+    let body = read_capped(&mut response, cap).await?;
+    anyhow::ensure!(!body.truncated, "answer larger than {cap} bytes");
+    Ok(body.bytes)
+}
+
+/// GET a JSON document, following up to `max_redirects` redirects itself:
+/// whatever the client's own redirect policy, a 30x that reaches us is
+/// followed here, with a relative `Location` resolved against the current
+/// URL (`Url::join`). A hop from `https` down to plain `http` is refused, so
+/// a redirect can never strip transport security. `headers` are sent on
+/// every hop, cross-origin included, so they must never carry a secret.
+/// Used by the RDAP lookup and the release watch.
+///
+/// Returns the parsed body of a 2xx answer (read up to [`MAX_JSON_BYTES`]),
+/// or `Err(status)` for any other final status, for the caller to word.
+///
+/// # Errors
+///
+/// Returns an error on a network failure, a redirect without a usable
+/// `Location`, a downgrade, too many redirects, or an oversized or invalid
+/// JSON body.
+pub(crate) async fn get_json_following(
+    client: &Client,
+    url: &str,
+    headers: &[(&'static str, &'static str)],
+    max_redirects: usize,
+) -> anyhow::Result<Result<serde_json::Value, reqwest::StatusCode>> {
+    let mut url = Url::parse(url)?;
+    for _ in 0..=max_redirects {
+        let mut request = client.get(url.clone());
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        if status.is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| anyhow::anyhow!("redirect without a Location header"))?;
+            let next = url.join(location)?;
+            anyhow::ensure!(
+                !(url.scheme() == "https" && next.scheme() != "https"),
+                "refusing a redirect from https to {}",
+                next.scheme()
+            );
+            url = next;
+            continue;
+        }
+        if !status.is_success() {
+            return Ok(Err(status));
+        }
+        let body = read_all_capped(response, MAX_JSON_BYTES).await?;
+        return Ok(Ok(serde_json::from_slice(&body)?));
+    }
+    anyhow::bail!("too many redirects")
+}
+
 /// Send `request` and decode its JSON answer, bounded in time (`deadline`,
 /// covering the body too) and size (`cap` bytes). Every failure - transport, a
 /// non-2xx status (including an unfollowed redirect), an oversized, truncated

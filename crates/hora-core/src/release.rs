@@ -8,7 +8,7 @@
 //! rather than asking on each tick.
 
 use crate::config::ReleaseWatch;
-use crate::rdap::{MAX_JSON_BYTES, get_json, read_capped};
+use crate::http::{MAX_JSON_BYTES, get_json_following, read_all_capped};
 
 /// GitHub's REST API, repositories.
 const API: &str = "https://api.github.com/repos";
@@ -44,7 +44,7 @@ pub(crate) async fn latest(client: &reqwest::Client, project: &str) -> anyhow::R
         ),
         ("X-GitHub-Api-Version", "2022-11-28"),
     ];
-    let body = match get_json(client, &url, &headers, MAX_REDIRECTS).await? {
+    let body = match get_json_following(client, &url, &headers, MAX_REDIRECTS).await? {
         Ok(body) => body,
         Err(reqwest::StatusCode::NOT_FOUND) => anyhow::bail!(
             "no such repository, or no published release (tags alone are not releases)"
@@ -84,7 +84,7 @@ pub(crate) async fn running(
     let response = client.get(url).send().await?;
     let status = response.status();
     anyhow::ensure!(status.is_success(), "{url} answered HTTP {status}");
-    let body = read_capped(response, MAX_JSON_BYTES).await?;
+    let body = read_all_capped(response, MAX_JSON_BYTES).await?;
     version_in(
         &String::from_utf8_lossy(&body),
         watch.current_query.as_deref(),
