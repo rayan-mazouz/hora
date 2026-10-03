@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Kind;
+use crate::status::MonitorState;
 
 // --- /healthz report ------------------------------------------------------
 
@@ -17,7 +18,7 @@ use crate::config::Kind;
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct HealthReport {
     /// `"ok"` when the scheduler and database are both healthy, else `"degraded"`.
-    pub status: String,
+    pub status: HealthStatus,
     pub scheduler_ok: bool,
     pub db_ok: bool,
     /// Seconds since the most recent scheduler tick; `-1` if it has not ticked yet.
@@ -29,11 +30,59 @@ pub struct HealthReport {
     pub peers: HashMap<String, PeerSeen>,
 }
 
+/// A node's own health on `/healthz`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthStatus {
+    /// The scheduler ticks and the database answers.
+    Ok,
+    /// Anything else - including a word a newer peer may send one day: a
+    /// report this node cannot read is not a healthy one.
+    #[serde(other)]
+    Degraded,
+}
+
+impl HealthStatus {
+    /// The wire word.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Degraded => "degraded",
+        }
+    }
+}
+
+/// How a node sees a peer it watches, from that peer's heartbeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerState {
+    /// Heartbeating within its expected interval.
+    Up,
+    /// Its last heartbeat is overdue.
+    Down,
+    /// Never heard from (or a word this node does not know).
+    #[serde(other)]
+    Unknown,
+}
+
+impl PeerState {
+    /// The wire word.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// One node's view of a peer, as reported on `/healthz`.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PeerSeen {
     /// `"up"`, `"down"`, or `"unknown"` (never seen).
-    pub state: String,
+    pub state: PeerState,
     /// Seconds since the peer's last heartbeat; `-1` if never seen.
     pub age: i64,
 }
@@ -75,7 +124,7 @@ pub struct PeerMonitor {
     pub kind: Kind,
     pub target: String,
     /// `up` | `degraded` | `down` | `unknown`, from that node's view.
-    pub status: String,
+    pub status: MonitorState,
     /// That node's 24h median latency to the target, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub p50_ms: Option<i64>,

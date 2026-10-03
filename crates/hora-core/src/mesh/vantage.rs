@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::{Config, Kind, Monitor};
 use crate::mesh::wire::PeerMonitors;
+use crate::status::MonitorState;
 
 /// How often the peers are polled. Latency medians move slowly; a minute
 /// keeps the display fresh without turning the mesh into a chat room.
@@ -36,7 +37,7 @@ pub struct PeerVantage {
     /// The peer's display name (`[[peers]].name`).
     pub peer: String,
     /// `up` | `degraded` | `down` | `unknown`, from that vantage.
-    pub status: String,
+    pub status: MonitorState,
     /// That vantage's 24h median latency, when it has one.
     pub p50_ms: Option<i64>,
 }
@@ -140,7 +141,7 @@ pub(crate) fn merge_peer<S: std::hash::BuildHasher>(
             .or_default()
             .push(PeerVantage {
                 peer: peer_name.to_owned(),
-                status: monitor.status.clone(),
+                status: monitor.status,
                 p50_ms: monitor.p50_ms,
             });
     }
@@ -174,7 +175,7 @@ mod tests {
                 .map(|&(target, status, p50_ms)| PeerMonitor {
                     kind: Kind::Tcp,
                     target: target.to_owned(),
-                    status: status.to_owned(),
+                    status: serde_json::from_value(serde_json::json!(status)).unwrap(),
                     p50_ms,
                 })
                 .collect(),
@@ -195,7 +196,10 @@ mod tests {
         assert_eq!(db.len(), 2);
         assert_eq!((db[0].peer.as_str(), db[0].p50_ms), ("Hora B", Some(220)));
         assert_eq!((db[1].peer.as_str(), db[1].p50_ms), ("Hora C", Some(85)));
-        assert_eq!(map[&key(Kind::Tcp, "other:80")][0].status, "down");
+        assert_eq!(
+            map[&key(Kind::Tcp, "other:80")][0].status,
+            MonitorState::Down
+        );
 
         // The same target under another kind is a different measurement.
         assert!(!map.contains_key(&key(Kind::Dns, "db:5432")));

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, TimeDelta, Utc};
 
 use hora_core::db::DayRow;
+use hora_core::status::MonitorState;
 
 use super::view::DayCell;
 
@@ -18,7 +19,7 @@ pub(crate) fn slo_state(target: Option<i64>, p95: Option<i64>) -> &'static str {
     }
 }
 
-pub(crate) fn worse(current: &'static str, candidate: &'static str) -> &'static str {
+pub(crate) fn worse(current: MonitorState, candidate: MonitorState) -> MonitorState {
     if rank(candidate) > rank(current) {
         candidate
     } else {
@@ -26,21 +27,23 @@ pub(crate) fn worse(current: &'static str, candidate: &'static str) -> &'static 
     }
 }
 
-pub(crate) fn rank(status: &str) -> u8 {
+/// How bad a state is for the overall badge: no data ranks above up (the
+/// page cannot claim all is well) and below any trouble.
+pub(crate) fn rank(status: MonitorState) -> u8 {
     match status {
-        "up" => 0,
-        "degraded" => 2,
-        "down" => 3,
-        _ => 1,
+        MonitorState::Up => 0,
+        MonitorState::Unknown => 1,
+        MonitorState::Degraded => 2,
+        MonitorState::Down => 3,
     }
 }
 
-pub(crate) fn overall_label(status: &str) -> &'static str {
+pub(crate) fn overall_label(status: MonitorState) -> &'static str {
     match status {
-        "up" => "All systems operational",
-        "degraded" => "Degraded performance",
-        "down" => "Major outage",
-        _ => "Awaiting data",
+        MonitorState::Up => "All systems operational",
+        MonitorState::Degraded => "Degraded performance",
+        MonitorState::Down => "Major outage",
+        MonitorState::Unknown => "Awaiting data",
     }
 }
 

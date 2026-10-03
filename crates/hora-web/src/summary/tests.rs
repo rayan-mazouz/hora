@@ -1,11 +1,12 @@
 use hora_core::db::DayRow;
+use hora_core::status::{CheckStatus, MonitorState};
 
 use super::monitor::{format_minutes, format_slo_pct, topology_context};
 use super::status::{build_bar, cert_state_for, day_cell, slo_state};
 use super::*;
 
 use crate::visibility::Audience;
-fn check(status: i64) -> Latest {
+fn check(status: CheckStatus) -> Latest {
     Latest {
         time: 0,
         latency_ms: None,
@@ -15,21 +16,26 @@ fn check(status: i64) -> Latest {
 }
 #[test]
 fn worse_picks_higher_severity() {
-    assert_eq!(worse("up", "degraded"), "degraded");
-    assert_eq!(worse("down", "degraded"), "down");
-    assert_eq!(worse("up", "unknown"), "unknown");
-    assert_eq!(worse("degraded", "up"), "degraded");
+    use MonitorState::{Degraded, Down, Unknown, Up};
+    assert_eq!(worse(Up, Degraded), Degraded);
+    assert_eq!(worse(Down, Degraded), Down);
+    assert_eq!(worse(Up, Unknown), Unknown);
+    assert_eq!(worse(Degraded, Up), Degraded);
 }
 
 #[test]
 fn derive_status_confirms_down_only_after_threshold() {
+    let down = CheckStatus::Down;
     assert_eq!(
-        db::derive_status(&[check(0), check(0), check(0)], 3),
-        "down"
+        db::derive_status(&[check(down), check(down), check(down)], 3),
+        MonitorState::Down
     );
-    assert_eq!(db::derive_status(&[check(0)], 3), "degraded");
-    assert_eq!(db::derive_status(&[], 3), "unknown");
-    assert_eq!(db::derive_status(&[check(1)], 3), "up");
+    assert_eq!(db::derive_status(&[check(down)], 3), MonitorState::Degraded);
+    assert_eq!(db::derive_status(&[], 3), MonitorState::Unknown);
+    assert_eq!(
+        db::derive_status(&[check(CheckStatus::Up)], 3),
+        MonitorState::Up
+    );
 }
 
 #[test]
@@ -106,9 +112,9 @@ fn topology_context_hides_private_names_from_public_view() {
     )
     .expect("config");
     // Everything is down.
-    let statuses: HashMap<String, &'static str> = ["db", "edge", "worker"]
+    let statuses: HashMap<String, MonitorState> = ["db", "edge", "worker"]
         .into_iter()
-        .map(|id| (id.to_owned(), "down"))
+        .map(|id| (id.to_owned(), MonitorState::Down))
         .collect();
 
     let operator = Audience::Operator;
@@ -226,7 +232,7 @@ async fn derived_views_share_unchanged_cards_and_redact_the_rest() {
     assert!(std::ptr::eq(theirs.bar.as_ptr(), ours.bar.as_ptr()));
     assert_eq!(public.groups.len(), 1);
     assert_eq!(public.groups[0].ids, ["ok", "bad"]);
-    assert_eq!(public.overall, "degraded");
+    assert_eq!(public.overall, MonitorState::Degraded);
 }
 
 #[tokio::test]

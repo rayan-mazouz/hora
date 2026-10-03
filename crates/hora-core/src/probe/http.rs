@@ -1,5 +1,6 @@
 //! HTTP(S) checks: status, redirects, latency and body assertions.
 
+use crate::status::CheckStatus;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -68,10 +69,13 @@ pub(super) async fn http(client: &Client, monitor: &Monitor) -> Outcome {
                 (true, None)
             };
 
-            let degraded = up && over_threshold(latency, monitor.degraded_over_ms);
+            let status = if up {
+                CheckStatus::up_unless(over_threshold(latency, monitor.degraded_over_ms))
+            } else {
+                CheckStatus::Down
+            };
             Outcome {
-                up,
-                degraded,
+                status,
                 latency_ms: Some(latency),
                 status_code: Some(i64::from(code)),
                 error,

@@ -1,6 +1,7 @@
 //! Dual-stack probing: run a check over IPv4 and IPv6 separately and combine
 //! the two results.
 
+use crate::status::CheckStatus;
 use std::net::IpAddr;
 use std::sync::OnceLock;
 
@@ -104,10 +105,9 @@ fn family_client(family: Family) -> reqwest::Result<Client> {
 /// clients still reach the service; the reason names the failing family and
 /// the latency reflects the surviving path. Both down → down with both reasons.
 pub(super) fn combine(v4: &Outcome, v6: &Outcome) -> Outcome {
-    match (v4.up, v6.up) {
+    match (v4.is_up(), v6.is_up()) {
         (true, true) => Outcome {
-            up: true,
-            degraded: v4.degraded || v6.degraded,
+            status: CheckStatus::up_unless(v4.is_degraded() || v6.is_degraded()),
             latency_ms: match (v4.latency_ms, v6.latency_ms) {
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
@@ -119,8 +119,7 @@ pub(super) fn combine(v4: &Outcome, v6: &Outcome) -> Outcome {
         (false, true) => one_family_down(Family::V4, v4, v6),
         (true, false) => one_family_down(Family::V6, v6, v4),
         (false, false) => Outcome {
-            up: false,
-            degraded: false,
+            status: CheckStatus::Down,
             latency_ms: None,
             status_code: v4.status_code.or(v6.status_code),
             error: Some(format!(
@@ -137,8 +136,7 @@ pub(super) fn combine(v4: &Outcome, v6: &Outcome) -> Outcome {
 /// status code, the healthy family's latency.
 fn one_family_down(failed: Family, failure: &Outcome, healthy: &Outcome) -> Outcome {
     Outcome {
-        up: false,
-        degraded: false,
+        status: CheckStatus::Down,
         latency_ms: healthy.latency_ms,
         status_code: failure.status_code,
         error: Some(format!(

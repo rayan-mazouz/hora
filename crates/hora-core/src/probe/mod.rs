@@ -22,6 +22,7 @@ use std::time::Duration;
 use reqwest::Client;
 
 use crate::config::{Kind, Monitor};
+use crate::status::CheckStatus;
 
 use dns::dns;
 use family::{Family, dual_stack};
@@ -32,8 +33,7 @@ use tcp::tcp;
 /// Result of a single probe.
 #[derive(Debug)]
 pub struct Outcome {
-    pub up: bool,
-    pub degraded: bool,
+    pub status: CheckStatus,
     pub latency_ms: Option<i64>,
     pub status_code: Option<i64>,
     pub error: Option<String>,
@@ -44,22 +44,21 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    /// Numeric status stored in the database: 0 = down, 1 = up, 2 = degraded.
+    /// Whether the check passed (up or degraded).
     #[must_use]
-    pub fn status_value(&self) -> i64 {
-        if !self.up {
-            0
-        } else if self.degraded {
-            2
-        } else {
-            1
-        }
+    pub fn is_up(&self) -> bool {
+        self.status.is_available()
+    }
+
+    /// Whether the check passed too slowly (or with a warning).
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        self.status == CheckStatus::Degraded
     }
 
     pub(crate) fn down(error: String) -> Self {
         Self {
-            up: false,
-            degraded: false,
+            status: CheckStatus::Down,
             latency_ms: None,
             status_code: None,
             error: Some(error),
@@ -81,7 +80,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 pub async fn run(client: &Client, monitor: &Monitor) -> Outcome {
     let mut outcome = probe_once(client, monitor).await;
     for attempt in 1..=monitor.probe_retries() {
-        if outcome.up {
+        if outcome.is_up() {
             break;
         }
         tracing::info!(

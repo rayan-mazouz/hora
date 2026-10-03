@@ -1,5 +1,6 @@
 //! TCP connect checks.
 
+use crate::status::CheckStatus;
 use std::time::Instant;
 
 use tokio::net::TcpStream;
@@ -30,8 +31,7 @@ async fn tcp_connect<A: tokio::net::ToSocketAddrs>(monitor: &Monitor, addr: A) -
         Ok(Ok(_stream)) => {
             let latency = millis(start.elapsed());
             Outcome {
-                up: true,
-                degraded: over_threshold(latency, monitor.degraded_over_ms),
+                status: CheckStatus::up_unless(over_threshold(latency, monitor.degraded_over_ms)),
                 latency_ms: Some(latency),
                 status_code: None,
                 error: None,

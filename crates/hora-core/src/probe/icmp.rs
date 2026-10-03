@@ -1,5 +1,6 @@
 //! ICMP echo (ping) checks.
 
+use crate::status::CheckStatus;
 use socket2::Type;
 use surge_ping::{
     Client as PingClient, Config as PingConfig, ICMP, PingIdentifier, PingSequence, SurgeError,
@@ -48,8 +49,7 @@ pub(super) async fn icmp_family(monitor: &Monitor, family: Option<Family>) -> Ou
         Ok((_packet, rtt)) => {
             let latency = millis(rtt);
             Outcome {
-                up: true,
-                degraded: over_threshold(latency, monitor.degraded_over_ms),
+                status: CheckStatus::up_unless(over_threshold(latency, monitor.degraded_over_ms)),
                 latency_ms: Some(latency),
                 status_code: None,
                 error: None,

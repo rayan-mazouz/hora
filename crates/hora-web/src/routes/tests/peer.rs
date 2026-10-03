@@ -210,7 +210,11 @@ async fn peer_monitors_match_the_full_summary() {
             .find(|view| view["id"] == id)
             .unwrap();
         let answer = peer.monitors.iter().find(|m| m.target == target).unwrap();
-        assert_eq!(answer.status, view["status"].as_str().unwrap(), "{id}");
+        assert_eq!(
+            answer.status.as_str(),
+            view["status"].as_str().unwrap(),
+            "{id}"
+        );
         assert_eq!(answer.p50_ms, view["latency_p50_ms"].as_i64(), "{id}");
     }
     let web = peer

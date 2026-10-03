@@ -25,6 +25,7 @@ pub mod report;
 pub mod scheduler;
 pub mod silence;
 pub mod slo;
+pub mod status;
 pub mod supervisor;
 pub mod timeline;
 pub mod topology;

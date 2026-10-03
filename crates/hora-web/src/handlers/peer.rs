@@ -6,6 +6,7 @@ use axum::http::HeaderMap;
 use serde::Deserialize;
 
 use hora_core::config::Kind;
+use hora_core::status::MonitorState;
 
 use crate::AppState;
 use crate::auth::authorize_peer;
@@ -82,7 +83,7 @@ pub(crate) async fn peer_probe(
         }
     };
     Ok(Json(hora_core::mesh::wire::ProbeResponse {
-        up: outcome.up,
+        up: outcome.is_up(),
         // Bounded: the reason crosses the wire into another node's logs.
         error: outcome.error.map(|error| error.chars().take(200).collect()),
     }))
@@ -136,7 +137,7 @@ pub(crate) async fn peer_monitors(
             hora_core::mesh::wire::PeerMonitor {
                 kind: monitor.kind,
                 target: monitor.target.clone(),
-                status: view.map_or("unknown", |view| view.status).to_owned(),
+                status: view.map_or(MonitorState::Unknown, |view| view.status),
                 p50_ms: view.and_then(|view| view.p50_ms),
             }
         })

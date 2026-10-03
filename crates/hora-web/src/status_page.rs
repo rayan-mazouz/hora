@@ -365,7 +365,7 @@ pub(crate) fn build<'a>(summary: &'a Summary, config: &Config, ask: &Ask) -> Sta
                 .peers
                 .iter()
                 .map(|peer| {
-                    let state = crate::layout::display_state(peer.status);
+                    let state = crate::layout::display_state(peer.status.as_str());
                     let mut note = peer.last_seen.as_ref().map_or_else(
                         || "never heard from".to_owned(),
                         |seen| format!("last heartbeat {seen}"),
@@ -707,7 +707,7 @@ fn local_notice<'a>(local: &[&'a MonitorView]) -> Option<LocalNotice<'a>> {
                     .unwrap_or_else(|| "no answer".to_owned()),
             }];
             places.extend(monitor.vantages.iter().map(|vantage| {
-                let state = crate::layout::display_state(&vantage.status);
+                let state = crate::layout::display_state(vantage.status.as_str());
                 Place {
                     name: vantage.peer.clone(),
                     role: "peer",
@@ -881,7 +881,7 @@ fn seen_from(monitor: &MonitorView) -> (Vec<Place>, String) {
         answer: String::new(),
     }];
     places.extend(monitor.vantages.iter().map(|vantage| {
-        let state = crate::layout::display_state(&vantage.status);
+        let state = crate::layout::display_state(vantage.status.as_str());
         Place {
             name: vantage.peer.clone(),
             role: "peer",

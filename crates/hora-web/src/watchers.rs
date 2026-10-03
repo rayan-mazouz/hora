@@ -10,7 +10,7 @@ use askama::Template;
 use hora_core::config::Config;
 use hora_core::db::Incident;
 use hora_core::fmt::xml_escape;
-use hora_core::mesh::wire::HealthReport;
+use hora_core::mesh::wire::{HealthReport, HealthStatus, PeerState};
 
 use crate::layout::{Chrome, display_state, ms, word};
 use crate::render::{OWL_PARTS as OWL, coord, owl};
@@ -89,7 +89,7 @@ pub(crate) fn build(
     summary: &Summary,
     incidents: &[Incident],
 ) -> WatchersPage {
-    let healthy = health.status == "ok";
+    let healthy = health.status == HealthStatus::Ok;
     let self_name = health.id.clone().unwrap_or_else(|| "This Hora".to_owned());
     let pinged = config
         .peers
@@ -125,7 +125,7 @@ pub(crate) fn build(
                 .count();
             let mut detail;
             let (state, word, label, link) = match seen {
-                Some(seen) if seen.state == "up" => {
+                Some(seen) if seen.state == PeerState::Up => {
                     detail = format!("Last heartbeat {} ago.", ago(seen.age));
                     (
                         "up",
@@ -134,7 +134,7 @@ pub(crate) fn build(
                         "link",
                     )
                 }
-                Some(seen) if seen.state == "down" => {
+                Some(seen) if seen.state == PeerState::Down => {
                     detail = if seen.age >= 0 {
                         format!("No heartbeat here for {}. ", ago(seen.age))
                     } else {
@@ -351,7 +351,7 @@ fn matrix(summary: &Summary) -> (Vec<String>, Vec<MatrixRow>, usize) {
         .iter()
         .filter(|monitor| !monitor.vantages.is_empty())
         .map(|monitor| {
-            let here = display_state(monitor.status);
+            let here = display_state(monitor.status.as_str());
             let here_cell = match here {
                 "up" | "degraded" => monitor
                     .p50_ms
@@ -369,7 +369,7 @@ fn matrix(summary: &Summary) -> (Vec<String>, Vec<MatrixRow>, usize) {
                         .find(|vantage| &vantage.peer == peer)
                     {
                         Some(vantage) => {
-                            let state = display_state(&vantage.status);
+                            let state = display_state(vantage.status.as_str());
                             let text = match (state, vantage.p50_ms) {
                                 ("up" | "degraded", Some(latency)) => ms(latency),
                                 _ => word(state).to_owned(),

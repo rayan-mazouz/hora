@@ -20,7 +20,7 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
 
 use hora_core::config::{Config, Monitor};
 use hora_core::db::Point;
-use hora_core::mesh::wire::{HealthReport, PeerSeen};
+use hora_core::mesh::wire::{HealthReport, HealthStatus, PeerSeen};
 
 use crate::AppState;
 use crate::error::AppError;
@@ -126,7 +126,7 @@ pub(crate) async fn healthz(State(state): State<AppState>) -> Response {
     // A degraded node answers 503 so plain health checks (Docker's
     // HEALTHCHECK, a load balancer) notice; the body is unchanged for the
     // peers and keyword monitors that read it.
-    let status = if report.status == "ok" {
+    let status = if report.status == HealthStatus::Ok {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE

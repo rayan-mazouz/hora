@@ -78,7 +78,7 @@ pub(crate) async fn probe(args: &[String]) -> Result<(), CliError> {
 
     // Down exits non-zero so `hora probe url && deploy` works as a gate;
     // degraded is still up.
-    if !outcome.up {
+    if !outcome.is_up() {
         return Err(CliError::Silent);
     }
     Ok(())
@@ -139,9 +139,9 @@ async fn print_probe_report(
     monitor: &hora_core::config::Monitor,
     outcome: &hora_core::probe::Outcome,
 ) {
-    let status = if !outcome.up {
+    let status = if !outcome.is_up() {
         "DOWN"
-    } else if outcome.degraded {
+    } else if outcome.is_degraded() {
         "DEGRADED (up but slow)"
     } else {
         "UP"
@@ -170,7 +170,7 @@ async fn print_probe_report(
     // Only read the certificate when the probe actually reached the server (up,
     // or a response like a 5xx where TLS still answered). A transport failure
     // means the cert handshake would just hit the same timeout twice.
-    let reached_server = outcome.up || outcome.status_code.is_some();
+    let reached_server = outcome.is_up() || outcome.status_code.is_some();
     let https =
         monitor.kind == hora_core::config::Kind::Http && monitor.target.starts_with("https://");
     let starttls = hora_core::cert::Starttls::for_monitor(monitor);
@@ -211,7 +211,8 @@ async fn confirm_probe(
     outcome: &hora_core::probe::Outcome,
 ) -> anyhow::Result<()> {
     let plain = hora_core::http::client(None).context("building the confirm HTTP client")?;
-    match hora_core::mesh::confirm::confirm_verdict(&plain, config, monitor, outcome.up).await {
+    match hora_core::mesh::confirm::confirm_verdict(&plain, config, monitor, outcome.is_up()).await
+    {
         Some(verdict) => println!("  vantage   {verdict}"),
         None => {
             println!(

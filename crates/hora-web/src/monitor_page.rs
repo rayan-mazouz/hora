@@ -161,7 +161,7 @@ pub(crate) fn build(
 
     // The chart is drawn here, for the one monitor asked for (the status
     // page draws none); the series is shared with the snapshot.
-    let chart = sparkline(&m.spark, m.status, events);
+    let chart = sparkline(&m.spark, m.status.as_str(), events);
     MonitorPage {
         state,
         word: match down_for(&m, now) {
@@ -469,7 +469,7 @@ fn places(m: &MonitorView) -> (Vec<PlaceRow>, String, &'static str, String) {
     if m.vantages.is_empty() {
         return (Vec::new(), String::new(), "none", String::new());
     }
-    let here = display_state(m.status);
+    let here = display_state(m.status.as_str());
     let mut rows = vec![PlaceRow {
         name: "This Hora".to_owned(),
         sub: m.last_checked.as_deref().map_or_else(
@@ -482,7 +482,7 @@ fn places(m: &MonitorView) -> (Vec<PlaceRow>, String, &'static str, String) {
         meter: String::new(),
     }];
     for vantage in &m.vantages {
-        let state = display_state(&vantage.status);
+        let state = display_state(vantage.status.as_str());
         rows.push(PlaceRow {
             name: vantage.peer.clone(),
             sub: "peer".to_owned(),

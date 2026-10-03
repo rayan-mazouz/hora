@@ -246,7 +246,7 @@ mod tests {
                 id: 1,
                 title: "Fiber cut".to_owned(),
                 body: "ETA 6pm".to_owned(),
-                severity: "warning".to_owned(),
+                severity: crate::config::Severity::Warning,
                 until: None,
                 created_at: 120,
             }],

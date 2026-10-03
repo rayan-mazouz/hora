@@ -1,5 +1,6 @@
 //! DNS checks: resolve a record and optionally compare the answer.
 
+use crate::status::CheckStatus;
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -76,8 +77,7 @@ pub(super) async fn dns(monitor: &Monitor) -> Outcome {
                     // exactly like an HTTP failure body.
                     let answer = snippet(answer.as_bytes());
                     return Outcome {
-                        up: false,
-                        degraded: false,
+                        status: CheckStatus::Down,
                         latency_ms: Some(latency),
                         status_code: None,
                         error: Some(format!("expected {wanted}, got {answer}")),
@@ -87,8 +87,7 @@ pub(super) async fn dns(monitor: &Monitor) -> Outcome {
             }
 
             Outcome {
-                up: true,
-                degraded: over_threshold(latency, monitor.degraded_over_ms),
+                status: CheckStatus::up_unless(over_threshold(latency, monitor.degraded_over_ms)),
                 latency_ms: Some(latency),
                 status_code: None,
                 error: None,

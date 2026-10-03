@@ -85,14 +85,7 @@ impl Announcement {
     ///
     /// Returns an error if the insert fails.
     pub async fn pin(&self, store: &Store) -> crate::db::Result<i64> {
-        db::insert_announcement(
-            store,
-            &self.title,
-            &self.body,
-            self.severity.as_str(),
-            self.until,
-        )
-        .await
+        db::insert_announcement(store, &self.title, &self.body, self.severity, self.until).await
     }
 }
 

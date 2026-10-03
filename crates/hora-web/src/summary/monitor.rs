@@ -9,6 +9,7 @@ use chrono::TimeDelta;
 use hora_core::SECONDS_PER_DAY;
 use hora_core::config::Monitor;
 use hora_core::db::{self, DayRow, Latest, Point};
+use hora_core::status::MonitorState;
 use hora_core::{slo, topology};
 
 use super::status::{build_bar, cert_label, cert_state_for, iso, slo_state};
@@ -22,7 +23,7 @@ use crate::visibility::Visibility;
 pub(crate) struct MonitorData<'a> {
     pub(super) recent: &'a HashMap<String, Vec<Latest>>,
     /// Every monitor's current status, for the topology walk.
-    pub(super) statuses: &'a HashMap<String, &'static str>,
+    pub(super) statuses: &'a HashMap<String, MonitorState>,
     pub(super) availability: &'a HashMap<String, (i64, i64)>,
     pub(super) daily: &'a HashMap<String, Vec<DayRow>>,
     pub(super) percentiles: &'a HashMap<String, Percentiles>,
@@ -121,7 +122,7 @@ pub(crate) fn build_monitor_view(
         .map(|&not_after| (not_after - ctx.timestamp) / SECONDS_PER_DAY);
 
     let latest = recent.first();
-    let (cause, impacted) = if status == "down" {
+    let (cause, impacted) = if status == MonitorState::Down {
         topology_context(monitor, data.statuses, all_monitors, visibility)
     } else {
         (None, Vec::new())
@@ -157,7 +158,7 @@ pub(crate) fn build_monitor_view(
         budget_title: budget.as_ref().map(|b| b.title.clone()).unwrap_or_default(),
         budget_state: budget.as_ref().map_or("none", |b| b.state),
         maintenance: None,
-        down_since: (status == "down")
+        down_since: (status == MonitorState::Down)
             .then(|| {
                 data.marks
                     .get(&monitor.id)
@@ -208,7 +209,7 @@ fn vantage_views(
 /// nameable down ancestor further up is still named.
 pub(super) fn topology_context(
     monitor: &Monitor,
-    statuses: &HashMap<String, &'static str>,
+    statuses: &HashMap<String, MonitorState>,
     all_monitors: &[Monitor],
     visibility: &Visibility<'_>,
 ) -> (Option<String>, Vec<String>) {
@@ -216,7 +217,7 @@ pub(super) fn topology_context(
 
     let upstreams = topology::transitive_upstreams(all_monitors, &monitor.id);
     for up_id in &upstreams {
-        if statuses.get(*up_id).copied() == Some("down")
+        if statuses.get(*up_id).copied() == Some(MonitorState::Down)
             && nameable(up_id)
             && let Some(name) = topology::monitor_name(all_monitors, up_id)
         {

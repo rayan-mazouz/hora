@@ -2,6 +2,7 @@
 //! announcements, pushed alerts and silences, plus the `meta` key-value table.
 
 use super::Store;
+use crate::config::Severity;
 
 /// Read a value from the `meta` key-value store.
 ///
@@ -44,11 +45,32 @@ pub struct Announcement {
     pub id: i64,
     pub title: String,
     pub body: String,
-    /// `info` | `warning` | `critical` | `resolved` (validated at insert).
-    pub severity: String,
+    /// Validated at insert; a row holding anything else reads as `info`
+    /// rather than breaking the page that lists it.
+    pub severity: Severity,
     /// Auto-expiry (unix epoch seconds); `None` = shown until cleared.
     pub until: Option<i64>,
     pub created_at: i64,
+}
+
+// An announcement's severity is stored as its word. Decoding is lenient: the
+// insert only ever writes a valid word, and a hand-edited row must cost one
+// banner its colour, not the whole status page.
+impl sqlx::Type<sqlx::Sqlite> for Severity {
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        <str as sqlx::Type<sqlx::Sqlite>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+        <str as sqlx::Type<sqlx::Sqlite>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for Severity {
+    fn decode(value: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let word = <&str as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
+        Ok(word.parse().unwrap_or_default())
+    }
 }
 
 /// Pin an announcement.
@@ -60,7 +82,7 @@ pub async fn insert_announcement(
     store: &Store,
     title: &str,
     body: &str,
-    severity: &str,
+    severity: Severity,
     until: Option<i64>,
 ) -> sqlx::Result<i64> {
     let result = sqlx::query(
@@ -69,7 +91,7 @@ pub async fn insert_announcement(
     )
     .bind(title)
     .bind(body)
-    .bind(severity)
+    .bind(severity.as_str())
     .bind(until)
     .bind(chrono::Utc::now().timestamp())
     .execute(store.sqlx())

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use askama::Template;
 use chrono::{DateTime, Utc};
+use hora_core::status::MonitorState;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -12,7 +13,7 @@ use utoipa::ToSchema;
 #[derive(Serialize, ToSchema)]
 pub(crate) struct Summary {
     pub(crate) title: String,
-    pub(crate) overall: &'static str,
+    pub(crate) overall: MonitorState,
     pub(crate) overall_label: &'static str,
     pub(crate) generated_at: String,
     #[serde(skip)]
@@ -101,7 +102,7 @@ pub(crate) struct MaintenanceView {
 pub(crate) struct PeerView {
     pub(crate) id: String,
     pub(crate) name: String,
-    pub(crate) status: &'static str,
+    pub(crate) status: MonitorState,
     pub(crate) last_seen: Option<String>,
     /// Whether this node also heartbeats the peer (the OUT side is configured).
     pub(crate) pings: bool,
@@ -128,7 +129,7 @@ pub(crate) struct ChannelView {
 pub(crate) struct MonitorView {
     pub(crate) id: String,
     pub(crate) name: String,
-    pub(crate) status: &'static str,
+    pub(crate) status: MonitorState,
     pub(crate) last_latency_ms: Option<i64>,
     /// Failure reason of the most recent check, when it was not up: surfaces
     /// the *why* behind a degraded/down card without opening the database.
@@ -213,7 +214,7 @@ pub(crate) struct VantageView {
     /// The peer's display name.
     pub(crate) peer: String,
     /// `up` | `degraded` | `down` | `unknown` from that vantage.
-    pub(crate) status: String,
+    pub(crate) status: MonitorState,
     /// That vantage's 24h median latency, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) p50_ms: Option<i64>,
@@ -309,17 +310,17 @@ impl MonitorView {
             return "up";
         }
         match self.status {
-            "up" => "up",
-            "degraded" => "degraded",
-            "down" => "down",
-            _ => "none",
+            MonitorState::Up => "up",
+            MonitorState::Degraded => "degraded",
+            MonitorState::Down => "down",
+            MonitorState::Unknown => "none",
         }
     }
 
     /// Down from this node only: every peer that watches the same target
     /// sees it up (or slow). A network problem near this node, not an outage.
     pub(crate) fn local_only(&self) -> bool {
-        self.status == "down"
+        self.status == MonitorState::Down
             && !self.vantages.is_empty()
             && self
                 .vantages

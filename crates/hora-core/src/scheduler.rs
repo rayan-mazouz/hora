@@ -15,6 +15,7 @@ use crate::config::{Config, Kind, Monitor};
 use crate::heartbeat::{HeartbeatWatch, heartbeat_outcome_for};
 use crate::notifications::Notifiers;
 use crate::probe::Outcome;
+use crate::status::MonitorState;
 use crate::topology;
 use crate::{db, probe, slo};
 
@@ -267,7 +268,7 @@ async fn run(
         // page only shows "degraded" until the threshold confirms, so this is
         // where a blip's reason is visible). Quiet once the outage is
         // confirmed - "confirmed down" already said it.
-        if !outcome.up && state.level != AlertLevel::Down {
+        if !outcome.is_up() && state.level != AlertLevel::Down {
             warn!(
                 monitor = %monitor.id,
                 error = outcome.error.as_deref().unwrap_or("unknown"),
@@ -283,7 +284,7 @@ async fn run(
         // or merely degraded) ends it, whatever the alert state machine does -
         // including an incident inherited from a previous run, and even during
         // maintenance (the record should reflect the real outage span).
-        if outcome.up {
+        if outcome.is_up() {
             close_open_incident(&store, &monitor.id, &mut open_incident).await;
         }
 
@@ -298,13 +299,13 @@ async fn run(
         // cost nothing; once tripped, evaluation continues on up ticks so the
         // alert can re-arm when the windows cool.
         if let Some(slo_bp) = monitor.slo_uptime
-            && (!outcome.up || state.burn.any())
+            && (!outcome.is_up() || state.burn.any())
         {
             evaluate_burn(&store, &notifier, &monitor, slo_bp, &mut state.burn).await;
             alert_state.set(state);
         }
 
-        if !outcome.up {
+        if !outcome.is_up() {
             // Down resets degraded tracking; alert once `threshold` consecutive
             // failures confirm it (escalating from healthy or degraded).
             if state.observe_down(threshold) {
@@ -323,7 +324,7 @@ async fn run(
                 .await;
                 state.level = AlertLevel::Down;
             }
-        } else if outcome.degraded && alert_on_degraded {
+        } else if outcome.is_degraded() && alert_on_degraded {
             // Up but slow: same anti-flap threshold as down, separate state.
             if state.observe_degraded(threshold) {
                 alert_degraded(&notifier, &monitor, &outcome).await;
@@ -533,7 +534,7 @@ async fn tick_outcome(
     } else {
         probe::run(client, monitor).await
     };
-    if let Err(err) = db::insert_check(store, &monitor.id, outcome.status_value(), &outcome).await {
+    if let Err(err) = db::insert_check(store, &monitor.id, &outcome).await {
         error!(monitor = %monitor.id, "failed to record check: {err:#}");
     }
     Some(outcome)
@@ -680,7 +681,7 @@ async fn down_context(
         let Ok(recent) = db::recent_checks(store, up_id, threshold_i64).await else {
             continue;
         };
-        if db::derive_status(&recent, threshold_i64) == "down"
+        if db::derive_status(&recent, threshold_i64) == MonitorState::Down
             && let Some(name) = topology::monitor_name(&config.monitors, up_id)
         {
             return (Some(((*up_id).to_owned(), name.to_owned())), Vec::new());
@@ -699,6 +700,7 @@ async fn down_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status::CheckStatus;
 
     use std::time::Duration;
 
@@ -826,9 +828,15 @@ mod tests {
         let cell = AlertCell::default();
 
         // The job reports a failure: confirmed down, announced once.
-        db::insert_push(&store, "job", 0, None, Some("backup failed"))
-            .await
-            .unwrap();
+        db::insert_push(
+            &store,
+            "job",
+            CheckStatus::Down,
+            None,
+            Some("backup failed"),
+        )
+        .await
+        .unwrap();
         let task = push_task(&store, &config_rx, &alerts_tx, &cell, &shutdown_rx);
         assert_eq!(
             next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
@@ -854,7 +862,9 @@ mod tests {
         );
 
         // The job recovers: the recovery is announced, exactly once.
-        db::insert_push(&store, "job", 1, None, None).await.unwrap();
+        db::insert_push(&store, "job", CheckStatus::Up, None, None)
+            .await
+            .unwrap();
         assert_eq!(
             next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
             Some(("recovered", "job".to_owned()))

@@ -107,9 +107,10 @@ fn millis_saturates() {
 }
 
 #[test]
-fn status_value_mapping() {
+fn a_down_outcome_is_stored_as_down() {
     let down = Outcome::down("x".to_owned());
-    assert_eq!(down.status_value(), 0);
+    assert_eq!(down.status, CheckStatus::Down);
+    assert!(!down.is_up() && !down.is_degraded());
 }
 
 fn number(pattern: &str, min: Option<i64>, max: Option<i64>, body: &str) -> Option<String> {
@@ -190,7 +191,7 @@ async fn expected_redirect_is_not_followed() {
     monitor.target = url;
     monitor.expected_status = Some(301);
     let outcome = http(&client, &monitor).await;
-    assert!(outcome.up, "{:?}", outcome.error);
+    assert!(outcome.is_up(), "{:?}", outcome.error);
     assert_eq!(outcome.status_code, Some(301));
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 
@@ -211,7 +212,7 @@ async fn truncated_body_is_a_body_error_not_an_assertion_failure() {
     monitor.target = url;
     monitor.keyword = Some("complete".to_owned());
     let outcome = http(&client, &monitor).await;
-    assert!(!outcome.up);
+    assert!(!outcome.is_up());
     assert_eq!(outcome.error.as_deref(), Some("invalid response body"));
 }
 
@@ -316,8 +317,11 @@ async fn resolve_parses_ip_literals() {
 
 fn outcome(up: bool, latency_ms: Option<i64>, error: Option<&str>) -> Outcome {
     Outcome {
-        up,
-        degraded: false,
+        status: if up {
+            CheckStatus::Up
+        } else {
+            CheckStatus::Down
+        },
         latency_ms,
         status_code: None,
         error: error.map(str::to_owned),
@@ -332,7 +336,7 @@ fn combine_requires_both_families() {
         &outcome(true, Some(20), None),
         &outcome(true, Some(35), None),
     );
-    assert!(both.up);
+    assert!(both.is_up());
     assert_eq!(both.latency_ms, Some(35));
     assert_eq!(both.error, None);
 
@@ -342,7 +346,7 @@ fn combine_requires_both_families() {
         &outcome(true, Some(20), None),
         &outcome(false, None, Some("connection timed out")),
     );
-    assert!(!v6_dead.up);
+    assert!(!v6_dead.is_up());
     assert_eq!(v6_dead.latency_ms, Some(20));
     assert_eq!(
         v6_dead.error.as_deref(),
@@ -353,7 +357,7 @@ fn combine_requires_both_families() {
         &outcome(false, None, Some("connection refused")),
         &outcome(true, Some(12), None),
     );
-    assert!(!v4_dead.up);
+    assert!(!v4_dead.is_up());
     assert_eq!(
         v4_dead.error.as_deref(),
         Some("IPv4 failing: connection refused (IPv6 ok)")
@@ -364,7 +368,7 @@ fn combine_requires_both_families() {
         &outcome(false, None, Some("timeout")),
         &outcome(false, None, Some("refused")),
     );
-    assert!(!dark.up);
+    assert!(!dark.is_up());
     assert_eq!(dark.latency_ms, None);
     assert_eq!(
         dark.error.as_deref(),
@@ -375,10 +379,10 @@ fn combine_requires_both_families() {
 #[test]
 fn combine_keeps_either_degraded() {
     let mut slow_v6 = outcome(true, Some(900), None);
-    slow_v6.degraded = true;
+    slow_v6.status = CheckStatus::Degraded;
     let both = combine(&outcome(true, Some(20), None), &slow_v6);
-    assert!(both.up);
-    assert!(both.degraded);
+    assert!(both.is_up());
+    assert!(both.is_degraded());
 }
 
 #[test]

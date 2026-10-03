@@ -9,6 +9,7 @@ use serde::Deserialize;
 use hora_core::config::{Kind, Monitor};
 use hora_core::db::{self};
 use hora_core::notifications::{AlertSeverity, Event};
+use hora_core::status::CheckStatus;
 
 use crate::auth::{QueryTokenAuth, Viewer, ct_eq, push_token};
 use crate::error::AppError;
@@ -88,12 +89,9 @@ pub(crate) async fn push(
     // A typo'd status must fail loudly: recording `status=dwon` as "up" would
     // report the opposite of what the job meant.
     let status = match query.status.as_deref() {
-        None | Some("" | "up") => 1,
-        Some("down") => 0,
-        Some("degraded") => 2,
-        Some(_) => {
-            return Err(AppError::BadRequest("status must be up, down or degraded"));
-        }
+        None | Some("") => CheckStatus::Up,
+        Some(word) => CheckStatus::parse(word)
+            .ok_or(AppError::BadRequest("status must be up, down or degraded"))?,
     };
     if query.ping.is_some_and(|ping| ping < 0) {
         return Err(AppError::BadRequest("ping must not be negative"));

@@ -86,7 +86,7 @@ pub(crate) async fn status_badge(
     badge_monitor(&config, &id)?;
     let threshold = i64::from(config.alerts.fail_threshold.max(1));
     let recent = db::recent_checks(&state.store, &id, threshold).await?;
-    let status = db::derive_status(&recent, threshold);
+    let status = db::derive_status(&recent, threshold).as_str();
     Ok(svg_response(badge(
         "status",
         status,

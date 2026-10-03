@@ -3,13 +3,14 @@
 use super::Store;
 
 use crate::probe::Outcome;
+use crate::status::{CheckStatus, MonitorState};
 
 /// Latest stored check for a monitor.
 #[derive(Debug, sqlx::FromRow)]
 pub struct Latest {
     pub time: i64,
     pub latency_ms: Option<i64>,
-    pub status: i64,
+    pub status: CheckStatus,
     /// Failure reason (or response snippet) when the check was not up.
     pub error: Option<String>,
 }
@@ -39,7 +40,7 @@ impl CheckSource {
 struct CheckRow<'a> {
     time: i64,
     monitor_id: &'a str,
-    status: i64,
+    status: CheckStatus,
     latency_ms: Option<i64>,
     status_code: Option<i64>,
     error: Option<&'a str>,
@@ -84,18 +85,13 @@ async fn insert_check_row(store: &Store, row: CheckRow<'_>) -> sqlx::Result<()> 
 /// # Errors
 ///
 /// Returns an error if the insert fails.
-pub async fn insert_check(
-    store: &Store,
-    monitor_id: &str,
-    status: i64,
-    outcome: &Outcome,
-) -> sqlx::Result<()> {
+pub async fn insert_check(store: &Store, monitor_id: &str, outcome: &Outcome) -> sqlx::Result<()> {
     insert_check_row(
         store,
         CheckRow {
             time: chrono::Utc::now().timestamp(),
             monitor_id,
-            status,
+            status: outcome.status,
             latency_ms: outcome.latency_ms,
             status_code: outcome.status_code,
             error: outcome.error.as_deref(),
@@ -131,7 +127,7 @@ pub(super) async fn insert_heartbeat_miss_at(
         CheckRow {
             time,
             monitor_id,
-            status: 0,
+            status: CheckStatus::Down,
             latency_ms: None,
             status_code: None,
             error: Some(reason),
@@ -141,7 +137,7 @@ pub(super) async fn insert_heartbeat_miss_at(
     .await
 }
 
-/// Record a heartbeat pushed via the API (status: 0 down, 1 up, 2 degraded).
+/// Record a heartbeat pushed via the API.
 /// The last push within a second wins (see [`insert_check_row`]).
 ///
 /// # Errors
@@ -150,7 +146,7 @@ pub(super) async fn insert_heartbeat_miss_at(
 pub async fn insert_push(
     store: &Store,
     monitor_id: &str,
-    status: i64,
+    status: CheckStatus,
     latency_ms: Option<i64>,
     message: Option<&str>,
 ) -> sqlx::Result<()> {
@@ -168,7 +164,7 @@ pub async fn insert_push(
 pub(super) async fn insert_push_at(
     store: &Store,
     monitor_id: &str,
-    status: i64,
+    status: CheckStatus,
     latency_ms: Option<i64>,
     message: Option<&str>,
     time: i64,
@@ -210,11 +206,11 @@ pub async fn recent_checks(
 }
 
 /// A stored check reduced to what `hora tune` replays: when it ran, its status
-/// (0 down, 1 up, 2 degraded) and the latency sample, if any.
+/// and the latency sample, if any.
 #[derive(Debug, sqlx::FromRow)]
 pub struct CheckSample {
     pub time: i64,
-    pub status: i64,
+    pub status: CheckStatus,
     pub latency_ms: Option<i64>,
 }
 
@@ -260,8 +256,8 @@ pub async fn last_check_time(store: &Store, monitor_id: &str) -> sqlx::Result<Op
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct Heartbeat {
     pub time: i64,
-    /// 0 down, 1 up, 2 degraded, as pushed.
-    pub status: i64,
+    /// As pushed.
+    pub status: CheckStatus,
     pub latency_ms: Option<i64>,
     /// The pushed `msg`, if any.
     pub error: Option<String>,
@@ -306,19 +302,21 @@ pub async fn last_heartbeat_time(store: &Store, monitor_id: &str) -> sqlx::Resul
 /// Current status from the recent checks (newest first): a single failure only
 /// counts as `degraded` until `threshold` consecutive failures confirm `down`.
 #[must_use]
-pub fn derive_status(recent: &[Latest], threshold: i64) -> &'static str {
+pub fn derive_status(recent: &[Latest], threshold: i64) -> MonitorState {
     let Some(latest) = recent.first() else {
-        return "unknown";
+        return MonitorState::Unknown;
     };
     match latest.status {
-        1 => "up",
-        2 => "degraded",
-        _ => {
+        CheckStatus::Up => MonitorState::Up,
+        CheckStatus::Degraded => MonitorState::Degraded,
+        CheckStatus::Down => {
             let needed = usize::try_from(threshold).unwrap_or(usize::MAX);
-            if recent.len() >= needed && recent.iter().all(|check| check.status == 0) {
-                "down"
+            if recent.len() >= needed
+                && recent.iter().all(|check| check.status == CheckStatus::Down)
+            {
+                MonitorState::Down
             } else {
-                "degraded"
+                MonitorState::Degraded
             }
         }
     }

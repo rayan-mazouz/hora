@@ -12,6 +12,7 @@
 //! scrubbed environment - the daemon's own env carries notification tokens
 //! that no plugin has any business reading.
 
+use crate::status::CheckStatus;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -210,24 +211,21 @@ fn first_line(output: &[u8]) -> Option<String> {
 fn outcome_for(code: Option<i32>, message: Option<String>, latency_ms: i64) -> Outcome {
     match code {
         Some(0) => Outcome {
-            up: true,
-            degraded: false,
+            status: CheckStatus::Up,
             latency_ms: Some(latency_ms),
             status_code: None,
             error: None,
             snapshot: None,
         },
         Some(1) => Outcome {
-            up: true,
-            degraded: true,
+            status: CheckStatus::Degraded,
             latency_ms: Some(latency_ms),
             status_code: None,
             error: Some(message.unwrap_or_else(|| "plugin warning (exit 1)".to_owned())),
             snapshot: None,
         },
         Some(code) => Outcome {
-            up: false,
-            degraded: false,
+            status: CheckStatus::Down,
             latency_ms: Some(latency_ms),
             status_code: None,
             error: Some(
@@ -312,22 +310,22 @@ mod tests {
         fixture.script("silent-crit", "exit 3");
 
         let up = run(&fixture.dir, &exec_monitor(&["ok"], 5)).await;
-        assert!(up.up && !up.degraded);
+        assert!(up.is_up() && !up.is_degraded());
         assert_eq!(up.error, None);
         assert!(up.latency_ms.is_some());
 
         // Exit 1: degraded, message kept, perfdata-free.
         let warn = run(&fixture.dir, &exec_monitor(&["warn"], 5)).await;
-        assert!(warn.up && warn.degraded);
+        assert!(warn.is_up() && warn.is_degraded());
         assert_eq!(warn.error.as_deref(), Some("DISK WARNING - 85% used"));
 
         let crit = run(&fixture.dir, &exec_monitor(&["crit"], 5)).await;
-        assert!(!crit.up);
+        assert!(!crit.is_up());
         assert_eq!(crit.error.as_deref(), Some("DISK CRITICAL - 99% used"));
 
         // No output: a synthesized reason carries the exit code.
         let silent = run(&fixture.dir, &exec_monitor(&["silent-crit"], 5)).await;
-        assert!(!silent.up);
+        assert!(!silent.is_up());
         assert!(silent.error.as_deref().unwrap().contains("exit 3"));
     }
 
@@ -345,7 +343,7 @@ mod tests {
         fixture.script("hang", "sleep 60");
         let started = std::time::Instant::now();
         let outcome = run(&fixture.dir, &exec_monitor(&["hang"], 1)).await;
-        assert!(!outcome.up);
+        assert!(!outcome.is_up());
         assert!(outcome.error.as_deref().unwrap().contains("timed out"));
         assert!(started.elapsed().as_secs() < 5, "killed promptly");
     }
@@ -359,7 +357,7 @@ mod tests {
             r#"echo "still fine"; i=0; while [ $i -lt 4000 ]; do printf '%4096s' x; i=$((i+1)); done; exit 0"#,
         );
         let outcome = run(&fixture.dir, &exec_monitor(&["flood"], 10)).await;
-        assert!(outcome.up, "{:?}", outcome.error);
+        assert!(outcome.is_up(), "{:?}", outcome.error);
     }
 
     #[tokio::test]
@@ -369,7 +367,7 @@ mod tests {
         // the *name* looks legitimate.
         std::os::unix::fs::symlink("/bin/sh", fixture.dir.join("sneaky")).expect("symlink");
         let outcome = run(&fixture.dir, &exec_monitor(&["sneaky"], 5)).await;
-        assert!(!outcome.up);
+        assert!(!outcome.is_up());
         assert!(
             outcome.error.as_deref().unwrap().contains("escapes"),
             "{:?}",
@@ -381,12 +379,12 @@ mod tests {
     async fn missing_plugins_and_missing_dirs_are_clean_downs() {
         let fixture = Fixture::new("missing");
         let outcome = run(&fixture.dir, &exec_monitor(&["nope"], 5)).await;
-        assert!(!outcome.up);
+        assert!(!outcome.is_up());
         assert!(outcome.error.as_deref().unwrap().contains("not found"));
 
         let gone = std::path::Path::new("/nonexistent-hora-exec-dir");
         let outcome = run(gone, &exec_monitor(&["nope"], 5)).await;
-        assert!(!outcome.up);
+        assert!(!outcome.is_up());
         assert!(outcome.error.as_deref().unwrap().contains("not found"));
     }
 
@@ -428,7 +426,7 @@ mod tests {
         fixture.script("daemonizes", "sleep 30 &\necho \"all good\"\nexit 0");
         let started = std::time::Instant::now();
         let outcome = run(&fixture.dir, &exec_monitor(&["daemonizes"], 5)).await;
-        assert!(outcome.up, "{:?}", outcome.error);
+        assert!(outcome.is_up(), "{:?}", outcome.error);
         assert!(started.elapsed().as_secs() < 3, "waited for the pipe");
     }
 
@@ -443,6 +441,6 @@ mod tests {
             r#"if [ -n "$CARGO_PKG_NAME$CARGO_MANIFEST_DIR$HORA_LOG" ]; then echo "LEAKED"; exit 2; else echo "clean"; exit 0; fi"#,
         );
         let outcome = run(&fixture.dir, &exec_monitor(&["leak"], 5)).await;
-        assert!(outcome.up, "{:?}", outcome.error);
+        assert!(outcome.is_up(), "{:?}", outcome.error);
     }
 }

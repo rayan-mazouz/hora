@@ -98,9 +98,15 @@ async fn timeline_merges_and_keeps_operator_streams_private() {
     )
     .await
     .unwrap();
-    hora_core::db::insert_announcement(&store, "Fiber cut", "ETA 6pm", "warning", None)
-        .await
-        .unwrap();
+    hora_core::db::insert_announcement(
+        &store,
+        "Fiber cut",
+        "ETA 6pm",
+        hora_core::config::Severity::Warning,
+        None,
+    )
+    .await
+    .unwrap();
 
     // Anonymous: the public incident (sanitized) and the announcement -
     // never the operator streams (events, silences) or the raw reason.
@@ -537,7 +543,7 @@ fn web_seen_from_paris(status: &str) -> hora_core::mesh::vantage::VantageMap {
         "http|https://example.com".to_owned(),
         vec![hora_core::mesh::vantage::PeerVantage {
             peer: "Paris".to_owned(),
-            status: status.to_owned(),
+            status: serde_json::from_value(serde_json::json!(status)).unwrap(),
             p50_ms: Some(80),
         }],
     )])));

@@ -21,7 +21,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use super::wire::{HealthReport, PeerSeen};
+use super::wire::{HealthReport, HealthStatus, PeerSeen, PeerState};
 use crate::config::{Config, Health, Peer};
 use crate::db;
 use crate::heartbeat::{Cadence, heartbeat_expected_since, heartbeat_outcome_for};
@@ -62,11 +62,10 @@ pub async fn report(store: &Store, config: &Config, last_tick: &AtomicU64) -> He
 
     HealthReport {
         status: if scheduler_ok && db_ok {
-            "ok"
+            HealthStatus::Ok
         } else {
-            "degraded"
-        }
-        .to_owned(),
+            HealthStatus::Degraded
+        },
         scheduler_ok,
         db_ok,
         last_tick_age,
@@ -123,12 +122,16 @@ async fn peer_seen(store: &Store, peer: &Peer, now: i64) -> PeerSeen {
         Ok(Some(last)) => {
             let age = (now - last).max(0);
             PeerSeen {
-                state: if now - last > expect { "down" } else { "up" }.to_owned(),
+                state: if now - last > expect {
+                    PeerState::Down
+                } else {
+                    PeerState::Up
+                },
                 age,
             }
         }
         _ => PeerSeen {
-            state: "unknown".to_owned(),
+            state: PeerState::Unknown,
             age: -1,
         },
     }
@@ -294,7 +297,7 @@ pub(crate) fn spawn_watch(
             }
             let threshold = snapshot.alerts.fail_threshold.max(1);
 
-            if outcome.up {
+            if outcome.is_up() {
                 let previous = state.level;
                 if state.observe_up() {
                     // Only announce recovery if we actually alerted (Isolated was silent).
@@ -428,7 +431,7 @@ async fn confirm_down(client: &Client, config: &Config, target: &Peer) -> Verdic
                 && seen
                     .peers
                     .get(&target.id)
-                    .is_some_and(|view| view.state == "up")
+                    .is_some_and(|view| view.state == PeerState::Up)
             {
                 partition = Some(name);
             }
@@ -515,27 +518,33 @@ mod tests {
 
         // Never seen.
         peer.id = "never".to_owned();
-        assert_eq!(peer_seen(&store, &peer, now).await.state, "unknown");
+        assert_eq!(
+            peer_seen(&store, &peer, now).await.state,
+            PeerState::Unknown
+        );
 
         // Recent up ping.
         peer.id = "up".to_owned();
         insert(&store, "up", now - 10, 1).await;
         let seen = peer_seen(&store, &peer, now).await;
-        assert_eq!(seen.state, "up");
+        assert_eq!(seen.state, PeerState::Up);
         assert_eq!(seen.age, 10);
 
         // A lone recorded miss (no positive heartbeat ever) is still unknown:
         // staleness is measured from real heartbeats, not from recorded misses.
         peer.id = "miss".to_owned();
         insert(&store, "miss", now - 1, 0).await;
-        assert_eq!(peer_seen(&store, &peer, now).await.state, "unknown");
+        assert_eq!(
+            peer_seen(&store, &peer, now).await.state,
+            PeerState::Unknown
+        );
 
         // Stale up ping, with a fresh miss on top: age is measured from the last
         // real heartbeat (200s), so it is down despite the recent miss row.
         peer.id = "stale".to_owned();
         insert(&store, "stale", now - 200, 1).await;
         insert(&store, "stale", now - 1, 0).await;
-        assert_eq!(peer_seen(&store, &peer, now).await.state, "down");
+        assert_eq!(peer_seen(&store, &peer, now).await.state, PeerState::Down);
         assert_eq!(peer_seen(&store, &peer, now).await.age, 200);
     }
 
@@ -549,10 +558,10 @@ mod tests {
         assert_eq!(report.id.as_deref(), Some("hora-a"));
         assert!(report.db_ok);
         // No monitors -> scheduler trivially alive, so status is ok.
-        assert_eq!(report.status, "ok");
+        assert_eq!(report.status, HealthStatus::Ok);
         // Only the watched peer (hora-b) appears; the OUT-only peer (hc) does not.
         assert!(report.peers.contains_key("hora-b"));
         assert!(!report.peers.contains_key("hc"));
-        assert_eq!(report.peers["hora-b"].state, "unknown");
+        assert_eq!(report.peers["hora-b"].state, PeerState::Unknown);
     }
 }

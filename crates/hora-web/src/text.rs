@@ -101,7 +101,7 @@ pub(crate) fn render(summary: &Summary, operator: bool) -> String {
         let _ = writeln!(out, "Watchers");
         let _ = writeln!(out, "--------");
         for peer in &summary.peers {
-            let state = crate::layout::display_state(peer.status);
+            let state = crate::layout::display_state(peer.status.as_str());
             let _ = writeln!(out, "  {} {}", status_symbol(state), peer.name);
         }
     }

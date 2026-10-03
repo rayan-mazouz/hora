@@ -31,6 +31,7 @@ use hora_core::SECONDS_PER_DAY;
 use hora_core::config::{Config, Monitor};
 use hora_core::db::{self, Latest};
 use hora_core::notifications::ChannelHealthEntry;
+use hora_core::status::MonitorState;
 
 use crate::SPARK_BUCKETS;
 use crate::visibility::{Audience, Visibility};
@@ -59,7 +60,7 @@ pub(crate) struct BuildState {
 /// newest incidents unfiltered (each audience lists the ones it may see).
 pub(crate) struct Built {
     pub(crate) summary: Arc<Summary>,
-    pub(crate) statuses: HashMap<String, &'static str>,
+    pub(crate) statuses: HashMap<String, MonitorState>,
     pub(crate) incidents: Vec<db::Incident>,
 }
 
@@ -136,7 +137,7 @@ pub(crate) async fn build_summary(
     let marks = or_empty(marks, "incident marks");
     let logged = or_empty(logged, "recent incidents");
     let (availability, percentiles) = split_window(&window);
-    let statuses: HashMap<String, &'static str> = recent
+    let statuses: HashMap<String, MonitorState> = recent
         .iter()
         .map(|(id, checks)| (id.clone(), db::derive_status(checks, ctx.threshold)))
         .collect();
@@ -158,7 +159,7 @@ pub(crate) async fn build_summary(
 
     let overall = monitors
         .iter()
-        .fold("up", |worst, m| worse(worst, m.status));
+        .fold(MonitorState::Up, |worst, m| worse(worst, m.status));
 
     let groups = build_groups(&monitors, &config.monitors);
 
@@ -351,7 +352,7 @@ pub(crate) fn derive(built: &Built, config: &Config, visibility: &Visibility<'_>
         .collect();
     let overall = monitors
         .iter()
-        .fold("up", |worst, m| worse(worst, m.status));
+        .fold(MonitorState::Up, |worst, m| worse(worst, m.status));
     let groups = build_groups(&monitors, &config.monitors);
     let summary = Summary {
         title: operator.title.clone(),
@@ -391,7 +392,7 @@ fn derive_view(
             hora_core::probe::public_reason(reason).to_owned()
         }
     });
-    let (cause, impacted) = if view.status == "down" {
+    let (cause, impacted) = if view.status == MonitorState::Down {
         monitor::topology_context(monitor, &built.statuses, &config.monitors, visibility)
     } else {
         (None, Vec::new())
@@ -485,9 +486,9 @@ pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Opti
         return None;
     }
 
-    let overall = monitors
-        .iter()
-        .fold("up", |worst, monitor| worse(worst, monitor.status));
+    let overall = monitors.iter().fold(MonitorState::Up, |worst, monitor| {
+        worse(worst, monitor.status)
+    });
     let ids: std::collections::HashSet<&str> =
         monitors.iter().map(|monitor| monitor.id.as_str()).collect();
     let maintenances = build_maintenances(config, Utc::now(), Some(&ids));
@@ -529,7 +530,7 @@ async fn announcement_banners(store: &Store, now: i64) -> Vec<IncidentView> {
         .map(|announcement| IncidentView {
             title: announcement.title,
             body: announcement.body,
-            severity: severity_label(&announcement.severity),
+            severity: announcement.severity.as_str(),
             at: chrono::DateTime::from_timestamp(announcement.created_at, 0)
                 .map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string()),
         })
@@ -538,13 +539,6 @@ async fn announcement_banners(store: &Store, now: i64) -> Vec<IncidentView> {
 
 /// The static severity label for a stored announcement (validated at insert;
 /// anything unexpected degrades to `info`).
-fn severity_label(severity: &str) -> &'static str {
-    severity
-        .parse::<hora_core::config::Severity>()
-        .unwrap_or_default()
-        .as_str()
-}
-
 /// The configured announcements, rendered for the status page banner.
 fn build_incident_banners(config: &Config) -> Vec<IncidentView> {
     config

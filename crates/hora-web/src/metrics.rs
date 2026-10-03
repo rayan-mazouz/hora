@@ -3,6 +3,8 @@
 
 use std::fmt::Write as _;
 
+use hora_core::status::MonitorState;
+
 use crate::summary::Summary;
 
 pub(crate) fn render(summary: &Summary) -> String {
@@ -90,7 +92,7 @@ fn render_status(out: &mut String, summary: &Summary) {
         summary
             .monitors
             .iter()
-            .filter(|monitor| monitor.status != "unknown")
+            .filter(|monitor| monitor.status != MonitorState::Unknown)
     };
 
     push_header(
@@ -116,7 +118,10 @@ fn render_status(out: &mut String, summary: &Summary) {
         "gauge",
     );
     for monitor in known() {
-        let up = u8::from(monitor.status == "up" || monitor.status == "degraded");
+        let up = u8::from(matches!(
+            monitor.status,
+            MonitorState::Up | MonitorState::Degraded
+        ));
         let _ = writeln!(out, "hora_monitor_up{} {up}", labels(monitor));
     }
 
@@ -127,7 +132,7 @@ fn render_status(out: &mut String, summary: &Summary) {
         "gauge",
     );
     for monitor in known() {
-        let degraded = u8::from(monitor.status == "degraded");
+        let degraded = u8::from(monitor.status == MonitorState::Degraded);
         let _ = writeln!(out, "hora_monitor_degraded{} {degraded}", labels(monitor));
     }
 }

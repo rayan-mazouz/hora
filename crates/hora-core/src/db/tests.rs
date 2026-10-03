@@ -8,6 +8,7 @@ use super::retention::{
 use super::*;
 use crate::SECONDS_PER_DAY;
 use crate::config::Config;
+use crate::status::CheckStatus;
 
 #[tokio::test]
 async fn a_release_alerts_once_and_a_new_project_starts_afresh() {
@@ -71,11 +72,11 @@ async fn availability_latest_and_series() {
     assert_eq!(recent.len(), 2);
     assert_eq!(
         (recent[0].time, recent[0].status, recent[0].latency_ms),
-        (300, 1, Some(20))
+        (300, CheckStatus::Up, Some(20))
     );
     assert_eq!(
         recent.iter().map(|c| c.status).collect::<Vec<_>>(),
-        vec![1, 0]
+        vec![CheckStatus::Up, CheckStatus::Down]
     );
 
     let series = latency_series(&store, "m", 0, 1).await.unwrap();
@@ -105,12 +106,19 @@ async fn last_heartbeat_ignores_recorded_misses() {
 #[tokio::test]
 async fn explicit_down_push_is_a_heartbeat_but_a_miss_is_not() {
     let store = Store::in_memory().await;
-    insert_push_at(&store, "job", 1, None, None, 100)
+    insert_push_at(&store, "job", CheckStatus::Up, None, None, 100)
         .await
         .unwrap();
-    insert_push_at(&store, "job", 0, None, Some("backup failed"), 200)
-        .await
-        .unwrap();
+    insert_push_at(
+        &store,
+        "job",
+        CheckStatus::Down,
+        None,
+        Some("backup failed"),
+        200,
+    )
+    .await
+    .unwrap();
     insert_heartbeat_miss_at(&store, "job", "missing heartbeat", 300)
         .await
         .unwrap();
@@ -119,7 +127,7 @@ async fn explicit_down_push_is_a_heartbeat_but_a_miss_is_not() {
     // the fresher recorded miss is skipped.
     let beat = last_heartbeat(&store, "job").await.unwrap().unwrap();
     assert_eq!(beat.time, 200);
-    assert_eq!(beat.status, 0);
+    assert_eq!(beat.status, CheckStatus::Down);
     assert_eq!(beat.error.as_deref(), Some("backup failed"));
 }
 
@@ -128,14 +136,21 @@ async fn same_second_pushes_keep_the_last_write() {
     let store = Store::in_memory().await;
     // `status=up` at the start of a job, `status=down` when it fails, both
     // within the same second: the failure must survive.
-    insert_push_at(&store, "job", 1, Some(5), None, 100)
+    insert_push_at(&store, "job", CheckStatus::Up, Some(5), None, 100)
         .await
         .unwrap();
-    insert_push_at(&store, "job", 0, None, Some("disk full"), 100)
-        .await
-        .unwrap();
+    insert_push_at(
+        &store,
+        "job",
+        CheckStatus::Down,
+        None,
+        Some("disk full"),
+        100,
+    )
+    .await
+    .unwrap();
     let beat = last_heartbeat(&store, "job").await.unwrap().unwrap();
-    assert_eq!((beat.time, beat.status), (100, 0));
+    assert_eq!((beat.time, beat.status), (100, CheckStatus::Down));
     assert_eq!(beat.error.as_deref(), Some("disk full"));
     assert_eq!(beat.latency_ms, None);
     let rows = recent_checks(&store, "job", 10).await.unwrap();
@@ -150,22 +165,25 @@ async fn push_replaces_a_same_second_miss_and_never_the_reverse() {
     insert_heartbeat_miss_at(&store, "job", "missing heartbeat", 100)
         .await
         .unwrap();
-    insert_push_at(&store, "job", 1, None, None, 100)
+    insert_push_at(&store, "job", CheckStatus::Up, None, None, 100)
         .await
         .unwrap();
     let beat = last_heartbeat(&store, "job").await.unwrap().unwrap();
-    assert_eq!((beat.time, beat.status), (100, 1));
+    assert_eq!((beat.time, beat.status), (100, CheckStatus::Up));
 
     // The other order: a miss racing a push it did not see must not erase it.
-    insert_push_at(&store, "job", 1, None, None, 200)
+    insert_push_at(&store, "job", CheckStatus::Up, None, None, 200)
         .await
         .unwrap();
     insert_heartbeat_miss_at(&store, "job", "missing heartbeat", 200)
         .await
         .unwrap();
     let beat = last_heartbeat(&store, "job").await.unwrap().unwrap();
-    assert_eq!((beat.time, beat.status), (200, 1));
-    assert_eq!(recent_checks(&store, "job", 10).await.unwrap()[0].status, 1);
+    assert_eq!((beat.time, beat.status), (200, CheckStatus::Up));
+    assert_eq!(
+        recent_checks(&store, "job", 10).await.unwrap()[0].status,
+        CheckStatus::Up
+    );
 }
 
 #[tokio::test]
@@ -834,23 +852,49 @@ async fn events_record_list_correlate_and_prune() {
 }
 
 #[tokio::test]
+async fn an_announcement_with_a_bad_severity_reads_as_info() {
+    let store = Store::in_memory().await;
+    // Only a hand edit can store this; it must not break the page listing it.
+    sqlx::query(
+        "INSERT INTO announcements (title, severity, created_at) VALUES ('Odd', 'panic', 1)",
+    )
+    .execute(store.sqlx())
+    .await
+    .unwrap();
+    let pinned = active_announcements(&store, 10).await.unwrap();
+    assert_eq!(pinned[0].severity, crate::config::Severity::Info);
+}
+
+#[tokio::test]
 async fn announcements_pin_expire_and_clear() {
     let store = Store::in_memory().await;
     let now = 1000;
 
-    let id = insert_announcement(&store, "Fiber cut", "ETA 6pm", "warning", Some(now + 600))
-        .await
-        .unwrap();
-    insert_announcement(&store, "Maintenance done", "", "resolved", None)
-        .await
-        .unwrap();
+    let id = insert_announcement(
+        &store,
+        "Fiber cut",
+        "ETA 6pm",
+        crate::config::Severity::Warning,
+        Some(now + 600),
+    )
+    .await
+    .unwrap();
+    insert_announcement(
+        &store,
+        "Maintenance done",
+        "",
+        crate::config::Severity::Resolved,
+        None,
+    )
+    .await
+    .unwrap();
 
     // Newest first; both active.
     let pinned = active_announcements(&store, now).await.unwrap();
     assert_eq!(pinned.len(), 2);
     assert_eq!(pinned[0].title, "Maintenance done");
     assert_eq!(pinned[1].id, id);
-    assert_eq!(pinned[1].severity, "warning");
+    assert_eq!(pinned[1].severity, crate::config::Severity::Warning);
 
     // The bounded one expires on its own; the unbounded one stays.
     let later = active_announcements(&store, now + 601).await.unwrap();

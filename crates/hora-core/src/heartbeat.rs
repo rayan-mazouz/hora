@@ -2,6 +2,7 @@
 //! peers (the mesh): when a heartbeat is due, and what the stored ones say.
 
 use crate::db::Store;
+use crate::status::CheckStatus;
 use tracing::error;
 
 use crate::config::Monitor;
@@ -177,19 +178,18 @@ fn judge_heartbeat(
         return HeartbeatVerdict::Unknown;
     };
     HeartbeatVerdict::OnTime(match beat.status {
-        0 => Outcome::down(
+        CheckStatus::Down => Outcome::down(
             beat.error
                 .clone()
                 .unwrap_or_else(|| "push reported down".to_owned()),
         ),
         status => Outcome {
-            up: true,
-            degraded: status == 2,
+            status,
             latency_ms: beat.latency_ms,
             status_code: None,
             // A degraded push keeps the job's words for the degraded alert;
             // an up one has nothing to say.
-            error: if status == 2 {
+            error: if status == CheckStatus::Degraded {
                 beat.error.clone()
             } else {
                 None
@@ -240,7 +240,7 @@ pub(crate) async fn heartbeat_outcome_for(
 mod tests {
     use super::*;
 
-    fn beat(time: i64, status: i64, error: Option<&str>) -> db::Heartbeat {
+    fn beat(time: i64, status: CheckStatus, error: Option<&str>) -> db::Heartbeat {
         db::Heartbeat {
             time,
             status,
@@ -328,17 +328,20 @@ mod tests {
         let now = 1_000;
 
         // A fresh `status=down&msg=backup failed`: down, with the job's words.
-        let HeartbeatVerdict::OnTime(outcome) =
-            judge_heartbeat(&every, Some(&beat(990, 0, Some("backup failed"))), 0, now)
-        else {
+        let HeartbeatVerdict::OnTime(outcome) = judge_heartbeat(
+            &every,
+            Some(&beat(990, CheckStatus::Down, Some("backup failed"))),
+            0,
+            now,
+        ) else {
             panic!("on time");
         };
-        assert!(!outcome.up);
+        assert!(!outcome.is_up());
         assert_eq!(outcome.error.as_deref(), Some("backup failed"));
 
         // Without a message it still reads as the job's own verdict.
         let HeartbeatVerdict::OnTime(outcome) =
-            judge_heartbeat(&every, Some(&beat(990, 0, None)), 0, now)
+            judge_heartbeat(&every, Some(&beat(990, CheckStatus::Down, None)), 0, now)
         else {
             panic!("on time");
         };
@@ -346,25 +349,28 @@ mod tests {
 
         // Degraded is up-but-degraded, so `alert_on_degraded` applies; the
         // job's message rides along for the degraded alert.
-        let HeartbeatVerdict::OnTime(outcome) =
-            judge_heartbeat(&every, Some(&beat(990, 2, Some("disk 91% full"))), 0, now)
-        else {
+        let HeartbeatVerdict::OnTime(outcome) = judge_heartbeat(
+            &every,
+            Some(&beat(990, CheckStatus::Degraded, Some("disk 91% full"))),
+            0,
+            now,
+        ) else {
             panic!("on time");
         };
-        assert!(outcome.up && outcome.degraded);
+        assert!(outcome.is_up() && outcome.is_degraded());
         assert_eq!(outcome.error.as_deref(), Some("disk 91% full"));
 
         // Up is up.
         let HeartbeatVerdict::OnTime(outcome) =
-            judge_heartbeat(&every, Some(&beat(990, 1, None)), 0, now)
+            judge_heartbeat(&every, Some(&beat(990, CheckStatus::Up, None)), 0, now)
         else {
             panic!("on time");
         };
-        assert!(outcome.up && !outcome.degraded);
+        assert!(outcome.is_up() && !outcome.is_degraded());
 
         // Any of them, once stale, is a missing heartbeat.
         assert!(matches!(
-            judge_heartbeat(&every, Some(&beat(900, 0, Some("x"))), 0, now),
+            judge_heartbeat(&every, Some(&beat(900, CheckStatus::Down, Some("x"))), 0, now),
             HeartbeatVerdict::Overdue(reason) if reason == "missing heartbeat"
         ));
     }
@@ -411,13 +417,19 @@ mod tests {
     async fn explicit_down_push_is_evaluated_and_never_recorded_as_a_miss() {
         let store = Store::in_memory().await;
         let now = chrono::Utc::now().timestamp();
-        db::insert_push(&store, "job", 0, None, Some("backup failed"))
-            .await
-            .unwrap();
+        db::insert_push(
+            &store,
+            "job",
+            CheckStatus::Down,
+            None,
+            Some("backup failed"),
+        )
+        .await
+        .unwrap();
         let outcome = heartbeat_outcome_for(&store, "job", &Cadence::Every(60), now, now)
             .await
             .expect("an outcome");
-        assert!(!outcome.up);
+        assert!(!outcome.is_up());
         assert_eq!(outcome.error.as_deref(), Some("backup failed"));
         // Only the push itself is stored: an on-time down records no miss.
         assert_eq!(db::recent_checks(&store, "job", 10).await.unwrap().len(), 1);
@@ -429,7 +441,7 @@ mod tests {
         assert_eq!(outcome.error.as_deref(), Some("no heartbeat received yet"));
         let rows = db::recent_checks(&store, "silent", 10).await.unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].status, 0);
+        assert_eq!(rows[0].status, CheckStatus::Down);
         // And that miss is not a heartbeat: still never pinged.
         assert_eq!(db::last_heartbeat(&store, "silent").await.unwrap(), None);
     }
