@@ -109,6 +109,11 @@ pub(crate) fn humanize_verdict(verdict: &str) -> Option<(&'static str, String)> 
             "none",
             "Not confirmed: no other place could be asked.".to_owned(),
         ))
+    } else if verdict.starts_with("no peer watches") {
+        Some((
+            "none",
+            "Not confirmed: no other place watches this service.".to_owned(),
+        ))
     } else {
         None
     }
@@ -563,6 +568,8 @@ mod tests {
             humanize_verdict("no peer vantage reachable, unconfirmed").map(|v| v.0),
             Some("none")
         );
+        let (_, text) = humanize_verdict("no peer watches this target, unconfirmed").unwrap();
+        assert!(text.contains("no other place watches"), "{text}");
         assert!(humanize_verdict("something new").is_none());
         assert_eq!(human_duration(41 * 60), "41 minutes");
         assert_eq!(human_duration(1), "1 second");

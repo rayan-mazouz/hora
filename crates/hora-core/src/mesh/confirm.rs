@@ -46,9 +46,12 @@ pub(crate) enum Verdict {
     Down,
     /// The peer probed and sees it **up**: the disagreement that matters.
     Up,
-    /// No usable answer: unreachable, an error, a timeout, or the peer does
-    /// not know this target (404). Counts for nothing on either side.
+    /// No usable answer: unreachable, an error, a timeout. Counts for nothing
+    /// on either side.
     Unknown,
+    /// The peer answered, but does not watch this target (404). Counts for
+    /// nothing either - but it is not an unreachable peer.
+    NotWatched,
 }
 
 /// Whether multi-vantage confirmation applies to this monitor under this
@@ -188,12 +191,13 @@ async fn probe_peer(
     if let Some(token) = token {
         builder = builder.header("x-push-token", token);
     }
-    let answer: Option<ProbeResponse> =
-        crate::http::fetch_json_capped(builder, MAX_RESPONSE_BYTES, PROBE_DEADLINE).await;
+    let answer: Result<ProbeResponse, _> =
+        crate::http::fetch_json_or_status(builder, MAX_RESPONSE_BYTES, PROBE_DEADLINE).await;
     match answer {
-        Some(response) if response.up => Verdict::Up,
-        Some(_) => Verdict::Down,
-        None => Verdict::Unknown,
+        Ok(response) if response.up => Verdict::Up,
+        Ok(_) => Verdict::Down,
+        Err(Some(reqwest::StatusCode::NOT_FOUND)) => Verdict::NotWatched,
+        Err(_) => Verdict::Unknown,
     }
 }
 
@@ -216,11 +220,15 @@ fn summarize_down(views: &[(&str, Verdict)]) -> String {
     let down = 1 + count(views, Verdict::Down);
     let disagreeing = named(views, Verdict::Up);
     let unknown = count(views, Verdict::Unknown);
-    let answered = 1 + views.len() - unknown;
+    let not_watched = count(views, Verdict::NotWatched);
+    let answered = 1 + views.len() - unknown - not_watched;
 
     let mut out = if disagreeing.is_empty() {
-        if answered == 1 {
-            // Every peer was unreachable or unaware: nothing was confirmed.
+        if answered == 1 && unknown == 0 {
+            // Every peer answered, none watches it: nobody else can tell.
+            "no peer watches this target, unconfirmed".to_owned()
+        } else if answered == 1 {
+            // Every peer was unreachable (or unaware): nothing was confirmed.
             "no peer vantage reachable, unconfirmed".to_owned()
         } else {
             format!("confirmed down from {down}/{answered} vantage points")
@@ -246,10 +254,12 @@ fn summarize_up(views: &[(&str, Verdict)]) -> String {
     let up = 1 + count(views, Verdict::Up);
     let disagreeing = named(views, Verdict::Down);
     let unknown = count(views, Verdict::Unknown);
-    let answered = 1 + views.len() - unknown;
+    let answered = 1 + views.len() - unknown - count(views, Verdict::NotWatched);
 
     let mut out = if disagreeing.is_empty() {
-        if answered == 1 {
+        if answered == 1 && unknown == 0 {
+            "up here; no peer watches this target".to_owned()
+        } else if answered == 1 {
             "up here; no peer vantage reachable".to_owned()
         } else {
             format!("up from {up}/{answered} vantage points")
@@ -340,6 +350,24 @@ mod tests {
         assert!(!local_only(&[("b", Unknown)]));
         assert!(!local_only(&[("b", Up), ("c", Down)]));
         assert!(!local_only(&[("b", Down)]));
+    }
+
+    #[test]
+    fn a_peer_not_watching_the_target_is_not_an_unreachable_one() {
+        use Verdict::{Down, NotWatched, Unknown};
+        assert_eq!(
+            summarize(false, &[("b", NotWatched)]),
+            "no peer watches this target, unconfirmed"
+        );
+        assert_eq!(
+            summarize(false, &[("b", NotWatched), ("c", Unknown)]),
+            "no peer vantage reachable, unconfirmed, 1 vantage(s) unreachable"
+        );
+        assert_eq!(
+            summarize(false, &[("b", NotWatched), ("c", Down)]),
+            "confirmed down from 2/2 vantage points"
+        );
+        assert!(!local_only(&[("b", NotWatched)]));
     }
 
     #[test]

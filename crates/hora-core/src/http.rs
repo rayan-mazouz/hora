@@ -230,22 +230,32 @@ pub async fn fetch_json_capped<T: DeserializeOwned>(
     cap: usize,
     deadline: Duration,
 ) -> Option<T> {
+    fetch_json_or_status(request, cap, deadline).await.ok()
+}
+
+/// Like [`fetch_json_capped`], but a non-2xx answer is told apart from the
+/// other failures: `Err(Some(status))` is the server's answer (a peer saying
+/// 404 "not one of my targets" did answer), `Err(None)` everything else.
+pub(crate) async fn fetch_json_or_status<T: DeserializeOwned>(
+    request: RequestBuilder,
+    cap: usize,
+    deadline: Duration,
+) -> Result<T, Option<reqwest::StatusCode>> {
     let request = request.timeout(deadline);
     let fetch = async {
-        let mut response = request.send().await.ok()?;
+        let mut response = request.send().await.map_err(|_| None)?;
         if !response.status().is_success() {
-            return None;
+            return Err(Some(response.status()));
         }
-        let body = read_capped(&mut response, cap).await.ok()?;
+        let body = read_capped(&mut response, cap).await.map_err(|_| None)?;
         if body.truncated {
-            return None;
+            return Err(None);
         }
-        serde_json::from_slice::<T>(&body.bytes).ok()
+        serde_json::from_slice::<T>(&body.bytes).map_err(|_| None)
     };
     tokio::time::timeout(deadline + OUTER_DEADLINE_SLACK, fetch)
         .await
-        .ok()
-        .flatten()
+        .unwrap_or(Err(None))
 }
 
 #[cfg(test)]
