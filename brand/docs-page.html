@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mutual surveillance (peers) · Hora</title>
+<meta name="description" content="Who watches the watcher: dead-man heartbeats between Hora nodes, quorum, and external receivers.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#F2F0EA" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151A21" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/CalSansVF.woff2" as="font" type="font/woff2" crossorigin>
+<script>
+/* theme: system by default; the button cycles auto, light, dark and remembers (per viewer) */
+(function () {
+  var d = document.documentElement, k = 'hora-theme';
+  try { var t = localStorage.getItem(k); if (t) d.dataset.theme = t; } catch (e) {}
+  addEventListener('click', function (e) {
+    var b = e.target.closest('.theme-btn'); if (!b) return;
+    var next = { '': 'light', light: 'dark', dark: '' }[d.dataset.theme || ''];
+    if (next) d.dataset.theme = next; else delete d.dataset.theme;
+    b.setAttribute('aria-label', 'Theme: ' + (next || 'auto') + '. Change theme');
+    try { next ? localStorage.setItem(k, next) : localStorage.removeItem(k); } catch (e) {}
+  });
+})();
+</script>
+<style>
+@font-face { font-family: 'Fraunces Variable'; src: url('fonts/Fraunces-VF.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: 'Cal Sans'; src: url('fonts/CalSansVF.woff2') format('woff2'); font-weight: 400 700; font-display: swap; }
+@font-face { font-family: 'Borel Display'; src: url('fonts/BorelDisplay-Regular.woff2') format('woff2'); font-display: swap; }
+@font-face { font-family: 'JetBrains Mono'; src: url('fonts/JetBrainsMono.woff2') format('woff2'); font-weight: 400 800; font-display: swap; }
+
+:root { color-scheme: light dark; }
+:root[data-theme='light'] { color-scheme: light; }
+:root[data-theme='dark'] { color-scheme: dark; }
+
+:root {
+  /* raw palette: synthe.se (2026-08-17), unchanged */
+  --raw-cloud: #f2f0ea; --raw-cloud-deep: #e7e4db; --raw-ink: #1b222c; --raw-ink-soft: #525a66;
+  --raw-night: #151a21; --raw-night-raised: #1e2530; --raw-paper-dark: #eae7e0; --raw-muted-dark: #a8aeb8;
+  --raw-petrol: #0e5e68; --raw-petrol-soft: #4e8a92; --raw-petrol-wash: #d8e4e2;
+  --raw-petrol-bright: #63c0cb; --raw-petrol-dim: #3e7a84; --raw-petrol-wash-dark: #1d2a31;
+  --raw-warn: #b4633f; --raw-warn-dark: #d89372; --raw-down: #a5372a; --raw-down-dark: #e07a63;
+  --raw-blush: #e6a49a;
+
+  /* semantic (Maison's tokens.css) */
+  --ground: light-dark(var(--raw-cloud), var(--raw-night));
+  --ground-raised: light-dark(var(--raw-cloud-deep), var(--raw-night-raised));
+  --surface: light-dark(#faf9f5, #1a2029);
+  --line: light-dark(#d6d2c6, #2e3744);
+  --ink: light-dark(var(--raw-ink), var(--raw-paper-dark));
+  --ink-muted: light-dark(var(--raw-ink-soft), var(--raw-muted-dark));
+  --accent: light-dark(var(--raw-petrol), var(--raw-petrol-bright));
+  --accent-soft: light-dark(var(--raw-petrol-soft), var(--raw-petrol-dim));
+  --accent-wash: light-dark(var(--raw-petrol-wash), var(--raw-petrol-wash-dark));
+  --on-accent: light-dark(var(--raw-cloud), var(--raw-night));
+  --warn-text: light-dark(#8f4b22, var(--raw-warn-dark));
+  --blocked-wash: light-dark(#f3e2dc, #33211f);
+
+  /* Hora: five states, each colour + shape + word (the colour is the least of the three) */
+  --st-up: light-dark(var(--raw-petrol-soft), var(--raw-petrol-dim));      /* graphics, 3:1+ */
+  --st-up-text: var(--accent);
+  --st-degraded: light-dark(var(--raw-warn), var(--raw-warn-dark));
+  --st-degraded-text: var(--warn-text);
+  --st-down: light-dark(var(--raw-down), var(--raw-down-dark));
+  --st-down-text: var(--st-down);
+  --st-maint: var(--ink-muted);
+  --st-none: light-dark(#87837a, #687180);
+  --wash-up: var(--accent-wash);
+  --wash-degraded: light-dark(#f5e7da, #30261e);
+  --wash-down: var(--blocked-wash);
+  --wash-maint: var(--ground-raised);
+  --blush: light-dark(var(--raw-blush), #b8776e);
+  /* the owl's body: surface, outlined in ink (ArianeFace's recipe) */
+  --owl-fill: var(--surface);
+  --owl-line: var(--ink);
+
+  --shadow-near: light-dark(rgb(27 34 44 / 6%), rgb(0 0 0 / 30%));
+  --shadow-far: light-dark(rgb(27 34 44 / 6%), rgb(0 0 0 / 25%));
+  --shadow: 0 1px 2px var(--shadow-near), 0 4px 14px var(--shadow-far);
+  --shadow-pop: 0 10px 30px rgb(27 34 44 / 18%);
+
+  --focus-ring: 3px solid var(--accent);
+  --focus-offset: 2px;
+
+  --font-display: 'Fraunces Variable', Georgia, serif;
+  --font-text: 'Cal Sans', system-ui, sans-serif;
+  --font-brand: 'Borel Display', var(--font-display);
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --t-hero: 500 clamp(1.75rem, 1.35rem + 1.8vw, 2.6rem)/1.15 var(--font-display);
+  --t-page: 500 1.75rem/2.125rem var(--font-display);
+  --t-group: 500 1.1875rem/1.625rem var(--font-display);
+  --t-body: 400 1rem/1.5rem var(--font-text);
+  --t-secondary: 400 0.875rem/1.25rem var(--font-text);
+  --t-label: 500 0.875rem/1.25rem var(--font-text);
+  --t-meta: 500 0.8125rem/1rem var(--font-text);
+  --t-tiny: 500 0.75rem/1rem var(--font-text);
+  --t-brand: 400 1.35rem/1 var(--font-brand);
+
+  --page-max: 2400px; --page-margin: 16px; --measure: 42rem; --measure-wide: 64rem;
+  --s-half: 2px; --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px; --s-7: 48px;
+  --control-h: 44px; --control-h-s: 36px; --control-h-xs: 32px; --control-h-l: 52px;
+  --radius-xs: 2px; --radius-s: 4px; --radius: 6px; --radius-m: 8px; --radius-l: 10px;
+  --radius-xl: 12px; --radius-2xl: 16px; --radius-pill: 999px;
+  --row-min: 48px; --header-h: 56px;
+  --glyph: 16px;          /* a state's shape beside its word */
+  --bar-day-h: 22px;      /* the 90-day bar */
+  --group-col: 26rem;     /* a group's column on wide screens */
+}
+@media (min-width: 600px) { :root { --page-margin: 24px; } }
+@media (min-width: 1600px) { :root { --page-margin: 32px; } }
+@media (max-width: 599px) { :root { --row-min: 56px; } }
+@media (pointer: coarse) { :root { --control-h-s: 44px; --control-h-xs: 44px; } }
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--ground); color: var(--ink); font: var(--t-body); font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+h1, h2, h3, p { margin: 0; }
+a { color: var(--accent); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); border-radius: var(--radius-s); }
+[hidden] { display: none !important; }
+code, pre, kbd { font-family: var(--font-mono); font-size: 0.875em; }
+.skip { position: absolute; left: var(--s-2); top: -100px; z-index: 9; background: var(--ink); color: var(--ground);
+  padding: var(--s-2) var(--s-3); border-radius: var(--radius); font: var(--t-label); }
+.skip:focus { top: var(--s-2); }
+.vh { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.page { width: 100%; max-width: var(--page-max); margin: 0 auto; padding: 0 var(--page-margin); }
+.measure { max-width: var(--measure); }
+.eyebrow { font: var(--t-meta); text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-muted); }
+.muted { color: var(--ink-muted); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* header: the operator's sign on the left, the live pill and the theme on the right */
+.top { border-bottom: 1px solid var(--line); background: var(--ground); }
+.top .page { min-height: var(--header-h); display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding-block: var(--s-2); }
+.sign { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; margin-right: auto; min-width: 0; }
+.sign .op-logo { width: 32px; height: 32px; border-radius: var(--radius-m); display: grid; place-items: center; flex: none;
+  background: var(--ink); color: var(--ground); font: 600 1rem/1 var(--font-display); }
+.sign b { font: 500 1.15rem/1.2 var(--font-display); white-space: nowrap; }
+.sign span { font: var(--t-secondary); color: var(--ink-muted); white-space: nowrap; }
+.sign.hora span.name { font: var(--t-brand); color: var(--ink); transform: translateY(0.16em); }
+.top nav { display: flex; gap: var(--s-1); }
+@media (max-width: 599px) {
+  .top .page { row-gap: 0; }
+  .top nav { order: 3; width: 100%; margin-inline: calc(-1 * var(--s-3)); }
+  .top .pill { display: none; }
+  .theme-btn .lbl { display: none; }
+  .theme-btn { padding: 0; width: var(--control-h-xs); }
+}
+.navlink { display: inline-flex; align-items: center; min-height: var(--control-h-s); padding: 0 var(--s-3); border-radius: var(--radius-pill);
+  color: var(--ink-muted); text-decoration: none; font: var(--t-label); }
+.navlink:hover { background: var(--ground-raised); color: var(--ink); }
+.navlink[aria-current='page'] { background: var(--accent-wash); color: var(--accent); }
+
+.pill { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-h-xs); padding: 0 var(--s-3);
+  border: 1px solid var(--line); border-radius: var(--radius-pill); font: var(--t-meta); color: var(--ink-muted); background: var(--surface); white-space: nowrap; }
+.pill .g { width: 10px; height: 10px; color: var(--st-up); }
+
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2); min-height: var(--control-h-s);
+  padding: 0 var(--s-4); border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font: var(--t-label); text-decoration: none; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--ink-muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--accent); padding: 0 var(--s-2); }
+.btn svg { width: 16px; height: 16px; flex: none; }
+.theme-btn { min-height: var(--control-h-xs); padding: 0 var(--s-3); font: var(--t-meta); border-radius: var(--radius-pill); }
+
+/* the state glyphs: shape + colour, always followed by the word */
+.g { width: var(--glyph); height: var(--glyph); flex: none; display: inline-block; vertical-align: -0.18em; }
+.g.up { color: var(--st-up); } .g.degraded { color: var(--st-degraded); } .g.down { color: var(--st-down); }
+.g.maint { color: var(--st-maint); } .g.none { color: var(--st-none); } .g.info { color: var(--accent); }
+.word { font: var(--t-label); }
+.g + .word { margin-left: 4px; }
+.word.up { color: var(--st-up-text); } .word.degraded { color: var(--st-degraded-text); } .word.down { color: var(--st-down-text); }
+.word.maint, .word.none { color: var(--ink-muted); }
+
+.chips { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.chip { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-h-xs); padding: 0 var(--s-3);
+  border-radius: var(--radius-pill); background: var(--ground-raised); color: var(--ink); font: var(--t-label); text-decoration: none; white-space: nowrap; }
+.chip.degraded { background: var(--wash-degraded); color: var(--st-degraded-text); }
+.chip.down { background: var(--wash-down); color: var(--st-down-text); }
+.chip.up { background: var(--wash-up); color: var(--st-up-text); }
+.chip.up .g { color: var(--accent); } /* 3.0:1 is too close on the wash: the up glyph goes text-grade there */
+.chip.maint { background: var(--wash-maint); color: var(--ink-muted); }
+a.chip:hover { box-shadow: inset 0 0 0 1px currentColor; }
+
+/* the hero: the owl calls the hour, the sentence says it, the line under it proves it */
+.hero { display: grid; grid-template-columns: auto 1fr; gap: var(--s-4) var(--s-5); align-items: center;
+  padding: var(--s-5); border-radius: var(--radius-2xl); background: var(--wash-up); margin-top: var(--s-5); }
+.hero.degraded { background: var(--wash-degraded); }
+.hero.down { background: var(--wash-down); }
+.hero.maint { background: var(--wash-maint); }
+.hero > .owl { width: clamp(64px, 12vw, 96px); height: auto; }
+.hero h1 { font: var(--t-hero); letter-spacing: -0.01em; text-wrap: balance; }
+.hero .sub { margin-top: var(--s-2); color: var(--ink-muted); font: var(--t-body); }
+.hero .sub b { color: var(--ink); font-weight: 500; }
+.hero .chips { grid-column: 1 / -1; }
+@media (min-width: 840px) { .hero { padding: var(--s-6); } .hero .chips { grid-column: 2; } }
+@media (max-width: 420px) { .hero { grid-template-columns: 1fr; } }
+
+.section { margin-top: var(--s-7); }
+.section-head { display: flex; align-items: baseline; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-3); }
+.section-head h2 { font: var(--t-group); }
+.section-head .fact { margin-left: auto; font: var(--t-secondary); color: var(--ink-muted); }
+
+/* callouts: announcements and maintenance; an icon and a word, a wash, never a coloured edge alone */
+.callout { display: grid; grid-template-columns: auto 1fr; gap: var(--s-1) var(--s-3); padding: var(--s-4); border-radius: var(--radius-l);
+  background: var(--accent-wash); margin-top: var(--s-4); }
+.callout > .g { margin-top: 3px; }
+.callout .k { font: var(--t-label); }
+.callout p { color: var(--ink); max-width: var(--measure); }
+.callout .when { font: var(--t-meta); color: var(--ink-muted); margin-top: var(--s-1); }
+.callout.warning { background: var(--wash-degraded); } .callout.warning .k { color: var(--st-degraded-text); }
+.callout.critical { background: var(--wash-down); } .callout.critical .k { color: var(--st-down-text); }
+.callout.maint { background: var(--wash-maint); }
+.callout.info .k { color: var(--accent); }
+
+/* groups as framed lists of rows (Maison); columns of whole groups on wide screens */
+.groups { display: grid; gap: var(--s-6) var(--s-5); grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--group-col)), 1fr)); align-items: start; }
+.group-head { display: flex; align-items: baseline; gap: var(--s-3); margin-bottom: var(--s-3); }
+.group-head h3 { font: var(--t-group); }
+.group-head .fact { margin-left: auto; font: var(--t-secondary); color: var(--ink-muted); white-space: nowrap; }
+.list { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); overflow: hidden; }
+.list > li + li { border-top: 1px solid var(--line); }
+.row { display: grid; grid-template-columns: var(--glyph) 1fr auto; column-gap: var(--s-3); row-gap: var(--s-2); align-items: center;
+  padding: var(--s-3) var(--s-4); min-height: var(--row-min); color: inherit; text-decoration: none; }
+a.row:hover { background: color-mix(in srgb, var(--ground-raised) 55%, transparent); }
+.row .name { font: var(--t-label); font-size: 0.9375rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .name small { font: var(--t-secondary); color: var(--ink-muted); margin-left: 6px; }
+.row .state { font: var(--t-secondary); text-align: right; white-space: nowrap; }
+.row .state .word { font: var(--t-label); }
+.row .bar { grid-column: 1 / -1; }
+.row .why { grid-column: 2 / -1; font: var(--t-secondary); color: var(--ink-muted); margin-top: -4px; }
+.row.down .why, .row.degraded .why { color: var(--ink); }
+.bar-legend { display: flex; justify-content: space-between; font: var(--t-tiny); color: var(--ink-muted); padding: var(--s-2) var(--s-4) var(--s-3); }
+.bar-legend .d30 { display: none; }
+@media (max-width: 599px) { .bar-legend .d90 { display: none; } .bar-legend .d30 { display: inline; } }
+
+/* the 90-day bar: ONE svg, a handful of run-length rects, gaps drawn by a mask (not 90 nodes) */
+.bar { display: block; overflow: hidden; height: calc(var(--bar-day-h) + 7px); }
+.bar svg { display: block; width: 100%; height: 100%; overflow: visible;
+  -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 calc(100% / 90 - 1.5px), transparent calc(100% / 90 - 1.5px) calc(100% / 90));
+  mask-image: repeating-linear-gradient(90deg, #000 0 calc(100% / 90 - 1.5px), transparent calc(100% / 90 - 1.5px) calc(100% / 90)); }
+.bar .u { fill: var(--st-up); } .bar .d { fill: var(--st-degraded); } .bar .x { fill: var(--st-down); }
+.bar .m { fill: var(--st-maint); } .bar .n { fill: var(--st-none); }
+/* a phone shows the last 30 days: the same svg, three times wider, its right end in view */
+@media (max-width: 599px) { .bar svg { width: 300%; margin-left: -200%; } }
+
+/* the legend: what each shape means, once per page */
+.legend { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); font: var(--t-secondary); color: var(--ink-muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend svg.cell { width: 8px; height: 24px; overflow: visible; }
+
+/* the footer: Hora signs the page, quietly */
+.foot { margin-top: var(--s-7); border-top: 1px solid var(--line); }
+.foot .page { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3) var(--s-5); padding-block: var(--s-5) var(--s-6); font: var(--t-secondary); color: var(--ink-muted); }
+.foot nav { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-4); }
+.foot a { color: var(--ink-muted); }
+.foot a:hover { color: var(--ink); }
+.watched { display: inline-flex; align-items: center; gap: var(--s-2); margin-left: auto; color: var(--ink-muted); text-decoration: none; }
+.watched img { width: 22px; height: 22px; border-radius: 5px; }
+.watched .b { font: 400 1.05rem/1 var(--font-brand); color: var(--ink); transform: translateY(0.14em); }
+
+/* the owl: pose = state; it moves only when the state changes, once */
+.owl { overflow: visible; flex: none; }
+.owl .ln { fill: var(--owl-fill); stroke: var(--owl-line); stroke-width: 1.5; stroke-linejoin: round; }
+.owl .tx { fill: none; stroke: var(--owl-line); stroke-width: 1; stroke-linecap: round; opacity: 0.2; }
+.owl .ft { fill: var(--owl-line); }
+.owl .ey path, .owl .ey line { fill: none; stroke: var(--owl-line); stroke-width: 1.8; stroke-linecap: round; }
+.owl .ey ellipse { fill: var(--owl-line); }
+.owl .ey .glint { fill: var(--owl-fill); }
+.owl .bk { fill: var(--accent); stroke: var(--accent); stroke-width: 0.9; stroke-linejoin: round; }
+.owl .ck { fill: var(--blush); opacity: 0.85; transition: opacity 0.3s; }
+.owl .tl, .owl .tr { transform-box: fill-box; transition: transform 0.35s cubic-bezier(.3,1.4,.6,1); }
+.owl .tl { transform-origin: 100% 100%; } .owl .tr { transform-origin: 0% 100%; }
+.owl .ey > g { transition: opacity 0.18s; opacity: 0; }
+.owl .bd { fill: var(--ground); }
+.owl .badge > g { opacity: 0; }
+.owl .badge { opacity: 0; transition: opacity 0.2s; }
+/* up: asleep, the tufts at rest. Nothing is wrong, so nothing moves. */
+.owl[data-state='up'] .shut-l, .owl[data-state='up'] .shut-r { opacity: 1; }
+.owl[data-state='up'] .tl { transform: rotate(-5deg); } .owl[data-state='up'] .tr { transform: rotate(5deg); }
+/* degraded: one eye open, one tuft up: half an eye on it */
+.owl[data-state='degraded'] .shut-l, .owl[data-state='degraded'] .open-r { opacity: 1; }
+.owl[data-state='degraded'] .tl { transform: rotate(-5deg); } .owl[data-state='degraded'] .tr { transform: rotate(-6deg); }
+/* down: awake, both eyes open, tufts up. Attentive, never alarmed, never sad. */
+.owl[data-state='down'] .open-l, .owl[data-state='down'] .open-r { opacity: 1; }
+.owl[data-state='down'] .tl { transform: rotate(3deg); } .owl[data-state='down'] .tr { transform: rotate(-3deg); }
+/* maintenance: a planned nap, tufts folded */
+.owl[data-state='maint'] .shut-l, .owl[data-state='maint'] .shut-r { opacity: 1; }
+.owl[data-state='maint'] .tl { transform: rotate(-22deg); } .owl[data-state='maint'] .tr { transform: rotate(22deg); }
+/* no data: it cannot see yet; two dashes, no blush */
+.owl[data-state='none'] .dash { opacity: 1; }
+.owl[data-state='none'] .ck { opacity: 0; }
+.owl[data-state='degraded'] .badge, .owl[data-state='down'] .badge, .owl[data-state='maint'] .badge, .owl[data-state='none'] .badge { opacity: 1; }
+.owl[data-state='degraded'] .b-degraded, .owl[data-state='down'] .b-down, .owl[data-state='maint'] .b-maint, .owl[data-state='none'] .b-none { opacity: 1; }
+.owl .b-degraded { color: var(--st-degraded); } .owl .b-down { color: var(--st-down); } .owl .b-maint { color: var(--st-maint); } .owl .b-none { color: var(--st-none); }
+/* waking: one perk of the tufts when the state turns to down, then still */
+.owl.woke .tl, .owl.woke .tr { animation: perk 0.6s ease-out 1; }
+@keyframes perk { 40% { translate: 0 -1.2px; } }
+@media (prefers-reduced-motion: reduce) {
+  .owl *, .owl { transition: none !important; animation: none !important; }
+}
+
+/* theme switch (the only script on a page, with the owl demo) */
+.theme-btn .lbl::before { content: 'Auto'; }
+:root[data-theme='light'] .theme-btn .lbl::before { content: 'Light'; }
+:root[data-theme='dark'] .theme-btn .lbl::before { content: 'Dark'; }
+
+.mock-note { margin: var(--s-6) 0 0; padding: var(--s-3) var(--s-4); border: 1px dashed var(--line); border-radius: var(--radius-l);
+  font: var(--t-secondary); color: var(--ink-muted); max-width: var(--measure-wide); }
+.mock-note b { color: var(--ink); font-weight: 500; }
+
+.owls { overflow: visible; display: block; max-width: 100%; height: auto; }
+.owls .branch { fill: none; stroke: var(--ink-muted); stroke-width: 1.4; stroke-linecap: round; opacity: 0.5; }
+.owls .olab { font: 500 5.2px var(--font-text); fill: var(--ink-muted); }
+/* where it is watched from: places, each with its own shape and word */
+.vantages { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: center; }
+.vchip { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 10px; border-radius: var(--radius-pill); background: var(--ground-raised); font: var(--t-meta); color: var(--ink); white-space: nowrap; }
+.vchip .g { width: 12px; height: 12px; }
+.vchip small { font: var(--t-meta); color: var(--ink-muted); }
+.vchip.down { background: var(--wash-down); } .vchip.degraded { background: var(--wash-degraded); }
+.watchers { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); font: var(--t-secondary); color: var(--ink-muted); }
+.watchers .owls { width: 92px; }
+
+.spark, .facts { display: none; }
+body { --nav-h: 56px; }
+.sl-top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--ground) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+.sl-top .in { height: var(--nav-h); display: flex; align-items: center; gap: var(--s-3); padding: 0 var(--page-margin); }
+.sl-top .sign { margin-right: 0; }
+.sl-top .search { display: flex; align-items: center; gap: var(--s-2); min-height: var(--control-h-s); padding: 0 var(--s-3); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--ink-muted); font: var(--t-secondary); flex: 0 1 22rem; margin-inline: auto; cursor: text; }
+.sl-top .search kbd { margin-left: auto; font: var(--t-tiny); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 0 6px; }
+.sl-top .right { display: flex; align-items: center; gap: var(--s-1); }
+@media (max-width: 599px) { .sl-top .search { flex: 0 0 auto; margin-left: auto; margin-right: 0; padding: 0; width: var(--control-h-s); justify-content: center; } .sl-top .search span, .sl-top .search kbd { display: none; } .theme-btn .lbl { display: none; } .theme-btn { padding: 0; width: var(--control-h-xs); } }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 800px) { .layout { grid-template-columns: 17.5rem minmax(0, 1fr); } }
+@media (min-width: 1152px) { .layout { grid-template-columns: 17.5rem minmax(0, 1fr) 15rem; } }
+/* sidebar */
+.side { display: none; border-right: 1px solid var(--line); background: var(--ground); }
+@media (min-width: 800px) { .side { display: block; position: sticky; top: var(--nav-h); height: calc(100dvh - var(--nav-h)); overflow-y: auto; padding: var(--s-5) var(--s-4) var(--s-6); } }
+.side h2 { font: var(--t-meta); text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-muted); margin: var(--s-5) var(--s-3) var(--s-2); }
+.side h2:first-child { margin-top: 0; }
+.side ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.side a { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 var(--s-3); border-radius: var(--radius); color: var(--ink); text-decoration: none; font: var(--t-secondary); font-size: 0.9375rem; }
+.side a:hover { background: var(--ground-raised); }
+.side a[aria-current='page'] { background: var(--accent-wash); color: var(--accent); font-weight: 500; box-shadow: inset 3px 0 0 var(--accent); }
+.side a .ext { margin-left: auto; width: 12px; height: 12px; color: var(--ink-muted); }
+/* mobile menu and toc */
+.mob { display: grid; gap: var(--s-2); padding: var(--s-3) var(--page-margin) 0; }
+@media (min-width: 800px) { .mob .menu { display: none; } }
+@media (min-width: 1152px) { .mob { display: none; } }
+.mob details { border: 1px solid var(--line); border-radius: var(--radius-l); background: var(--surface); }
+.mob summary { cursor: pointer; min-height: var(--control-h); display: flex; align-items: center; gap: var(--s-2); padding: 0 var(--s-4); font: var(--t-label); list-style: none; }
+.mob summary::-webkit-details-marker { display: none; }
+.mob summary .muted { margin-left: auto; font: var(--t-secondary); }
+.mob details > div { padding: 0 var(--s-2) var(--s-3); }
+.mob .side { display: block; position: static; height: auto; border: 0; padding: var(--s-2); background: none; }
+/* content */
+.content { padding: var(--s-6) var(--page-margin) var(--s-7); min-width: 0; }
+@media (min-width: 800px) { .content { padding-inline: var(--s-6); } }
+.content > * { max-width: 46rem; }
+.content .crumb { font: var(--t-secondary); color: var(--ink-muted); }
+.content h1 { font: 500 clamp(2rem, 1.6rem + 1.6vw, 2.6rem)/1.12 var(--font-display); letter-spacing: -0.015em; margin: var(--s-2) 0 var(--s-3); text-wrap: balance; }
+.content .lede { font: 400 1.1875rem/1.6 var(--font-text); color: var(--ink-muted); margin-bottom: var(--s-6); }
+.prose h2 { font: 500 1.75rem/1.2 var(--font-display); margin: var(--s-7) 0 var(--s-3); scroll-margin-top: calc(var(--nav-h) + 16px); }
+.prose h3 { font: 500 1.3125rem/1.3 var(--font-display); margin: var(--s-6) 0 var(--s-2); scroll-margin-top: calc(var(--nav-h) + 16px); }
+.prose h2 a.anchor, .prose h3 a.anchor { color: var(--ink-muted); text-decoration: none; opacity: 0; margin-left: 6px; font-family: var(--font-text); font-size: 0.8em; }
+.prose h2:hover a.anchor, .prose h3:hover a.anchor, .prose a.anchor:focus-visible { opacity: 1; }
+.prose p, .prose li { font: 400 1rem/1.75 var(--font-text); }
+.prose p { margin: 0 0 var(--s-4); }
+.prose ul, .prose ol { margin: 0 0 var(--s-4); padding-left: 1.4em; }
+.prose li { margin-bottom: 6px; }
+.prose li::marker { color: var(--accent-soft); }
+.prose strong { font-weight: 600; }
+.prose em { font-style: italic; }
+.prose :not(pre) > code { font: 400 0.875em/1 var(--font-mono); background: var(--ground-raised); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 0.12em 0.36em; overflow-wrap: anywhere; }
+.prose a code { color: var(--accent); }
+/* code blocks (Expressive Code, re-skinned) */
+.ec { margin: 0 0 var(--s-5); border: 1px solid var(--line); border-radius: var(--radius-l); overflow: hidden; background: var(--surface); }
+.ec .ecbar { display: flex; align-items: center; gap: var(--s-2); min-height: 36px; padding: 0 var(--s-2) 0 var(--s-4); border-bottom: 1px solid var(--line); background: var(--ground-raised); font: var(--t-meta); color: var(--ink-muted); }
+.ec .ecbar .title { font-family: var(--font-mono); font-weight: 400; }
+.ec .ecbar .copy { margin-left: auto; min-height: 28px; padding: 0 10px; font: var(--t-meta); }
+.ec .ecbar .copy svg { width: 14px; height: 14px; }
+.ec pre { margin: 0; padding: var(--s-4); overflow-x: auto; font: 400 0.84375rem/1.7 var(--font-mono); color: var(--ink); }
+.ec.term { background: var(--raw-ink); border-color: var(--raw-ink); }
+.ec.term .ecbar { background: color-mix(in srgb, var(--raw-paper-dark) 8%, var(--raw-ink)); border-color: color-mix(in srgb, var(--raw-paper-dark) 14%, var(--raw-ink)); color: #A8AEB8; }
+.ec.term .ecbar .dots { display: inline-flex; gap: 6px; margin-right: 4px; } .ec.term .ecbar .dots i { width: 9px; height: 9px; border-radius: 50%; background: #525A66; }
+.ec.term .copy { background: transparent; color: #EAE7E0; border-color: #525A66; }
+.ec.term pre { color: #EAE7E0; }
+.ec.term .p { color: #63C0CB; user-select: none; } .ec.term .o { color: #A8AEB8; } .ec.term .ok { color: #63C0CB; } .ec.term .w { color: #D89372; }
+.tk { color: var(--accent); } .ts { color: light-dark(#8F4B22, #D89372); } .tc { color: var(--ink-muted); font-style: italic; } .tb { color: light-dark(#6B3F8F, #C3A6E0); }
+/* asides, on the state system: note = info, tip = up, caution = slow, danger = down */
+.aside { display: grid; grid-template-columns: auto 1fr; gap: 4px var(--s-3); padding: var(--s-4) var(--s-5) var(--s-4) var(--s-4); border-radius: var(--radius-l); margin: 0 0 var(--s-5); background: var(--accent-wash); }
+.aside > .g { margin-top: 3px; }
+.aside .t { font: var(--t-label); font-size: 0.9375rem; }
+.aside p { grid-column: 2; margin: 0; font: 400 0.9375rem/1.65 var(--font-text); }
+.aside.note .t { color: var(--accent); }
+.aside.tip { background: var(--wash-up); } .aside.tip .t { color: var(--st-up-text); } .aside.tip > .g { color: var(--accent); }
+.aside.caution { background: var(--wash-degraded); } .aside.caution .t { color: var(--st-degraded-text); }
+.aside.danger { background: var(--wash-down); } .aside.danger .t { color: var(--st-down-text); }
+/* tables */
+.tbl { overflow-x: auto; margin: 0 0 var(--s-5); border: 1px solid var(--line); border-radius: var(--radius-l); background: var(--surface); }
+.tbl table { width: 100%; border-collapse: collapse; font: var(--t-secondary); font-size: 0.9375rem; min-width: 30rem; }
+.tbl th, .tbl td { text-align: left; padding: var(--s-3) var(--s-4); border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl thead th { font: var(--t-meta); color: var(--ink-muted); background: var(--ground-raised); }
+.tbl td .word { white-space: nowrap; }
+/* figure: the verdicts as owls */
+.verdicts { display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); margin: 0 0 var(--s-5); }
+.verdicts figure { min-width: 0; margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-l); padding: var(--s-4); display: grid; gap: var(--s-2); justify-items: center; text-align: center; }
+.verdicts .owls { width: 100%; max-width: 190px; }
+.verdicts figcaption { font: var(--t-secondary); color: var(--ink-muted); }
+.verdicts figcaption code { font: 400 0.8rem/1.4 var(--font-mono); color: var(--ink); display: block; margin-top: 4px; }
+/* toc */
+.toc { display: none; }
+@media (min-width: 1152px) { .toc { display: block; position: sticky; top: var(--nav-h); height: calc(100dvh - var(--nav-h)); overflow-y: auto; padding: var(--s-6) var(--s-4); border-left: 1px solid var(--line); } }
+.toc h2, .mob .tocl h2 { font: var(--t-meta); text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-muted); margin-bottom: var(--s-3); }
+.toc ul, .tocl ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.toc a, .tocl a { display: block; padding: 5px 0 5px var(--s-3); border-left: 2px solid var(--line); color: var(--ink-muted); text-decoration: none; font: var(--t-secondary); }
+.toc a.sub, .tocl a.sub { padding-left: var(--s-5); }
+.toc a:hover, .tocl a:hover { color: var(--ink); }
+.toc a[aria-current='true'] { color: var(--accent); border-left-color: var(--accent); font-weight: 500; }
+.toc .meta { margin-top: var(--s-5); padding-top: var(--s-4); border-top: 1px solid var(--line); display: grid; gap: var(--s-2); font: var(--t-secondary); }
+.toc .meta a { border: 0; padding: 0; color: var(--ink-muted); display: inline-flex; gap: 6px; align-items: center; }
+/* after the article */
+.edit { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); justify-content: space-between; margin-top: var(--s-7); padding-top: var(--s-4); border-top: 1px solid var(--line); font: var(--t-secondary); color: var(--ink-muted); }
+.edit a { color: var(--ink-muted); display: inline-flex; align-items: center; gap: 6px; }
+.pager { display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); margin-top: var(--s-5); }
+.pager a { display: grid; gap: 2px; padding: var(--s-4); border: 1px solid var(--line); border-radius: var(--radius-l); background: var(--surface); text-decoration: none; color: var(--ink); }
+.pager a:hover { border-color: var(--accent-soft); }
+.pager a span { font: var(--t-meta); color: var(--ink-muted); display: inline-flex; align-items: center; gap: 6px; }
+.pager a b { font: 500 1.125rem/1.3 var(--font-display); color: var(--accent); }
+.pager a.next { text-align: right; justify-items: end; }
+.pager a.prev span svg { transform: rotate(180deg); }
+.sl-foot { margin-top: var(--s-6); display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-4); font: var(--t-secondary); color: var(--ink-muted); }
+.sl-foot .watched { margin-left: 0; }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+<symbol id="g-up" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="currentColor"/></symbol>
+<symbol id="g-degraded" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 2.6a5.4 5.4 0 0 0 0 10.8z" fill="currentColor"/></symbol>
+<symbol id="g-down" viewBox="0 0 16 16"><path d="M8 1.2 14.8 8 8 14.8 1.2 8Z" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/><path d="M8 4.9v3.6" stroke="var(--surface, #fff)" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="11" r=".95" fill="var(--surface, #fff)"/></symbol>
+<symbol id="g-maint" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 4.9V8l2.2 1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="g-none" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.4 2.0"/></symbol>
+<symbol id="g-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.4" fill="currentColor"/><path d="M8 7.3v4" stroke="var(--surface, #fff)" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="4.9" r=".95" fill="var(--surface, #fff)"/></symbol>
+<symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+<symbol id="i-feed" viewBox="0 0 16 16"><path d="M3 3.5a9.5 9.5 0 0 1 9.5 9.5M3 7.5A5.5 5.5 0 0 1 8.5 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="3.8" cy="12.2" r="1.3" fill="currentColor"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="i-copy" viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 2.8H4.4a1.6 1.6 0 0 0-1.6 1.6v6.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+<symbol id="i-pin" viewBox="0 0 16 16"><path d="M8 14.5s4.8-4.3 4.8-8a4.8 4.8 0 0 0-9.6 0c0 3.7 4.8 8 4.8 8Z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="6.5" r="1.6" fill="currentColor"/></symbol>
+<symbol id="i-lock" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.2 7V5a2.8 2.8 0 0 1 5.6 0v2" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+<symbol id="i-print" viewBox="0 0 16 16"><path d="M4.5 6V2.5h7V6M4.5 11.5H3a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v3.5a1 1 0 0 1-1 1h-1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><rect x="4.5" y="9.5" width="7" height="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+<symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+<symbol id="i-gh" viewBox="0 0 16 16"><path fill="currentColor" d="M8 .6a7.4 7.4 0 0 0-2.34 14.42c.37.07.5-.16.5-.36v-1.3c-2.06.45-2.5-.87-2.5-.87-.33-.86-.82-1.09-.82-1.09-.67-.46.05-.45.05-.45.74.05 1.13.76 1.13.76.66 1.13 1.73.8 2.15.61.07-.48.26-.8.47-.99-1.64-.19-3.37-.82-3.37-3.65 0-.8.29-1.46.76-1.98-.08-.19-.33-.94.07-1.95 0 0 .62-.2 2.03.76a7 7 0 0 1 3.7 0c1.41-.96 2.03-.76 2.03-.76.4 1.01.15 1.76.07 1.95.47.52.76 1.18.76 1.98 0 2.84-1.73 3.46-3.38 3.64.27.23.5.68.5 1.37v2.03c0 .2.13.43.5.36A7.4 7.4 0 0 0 8 .6Z"/></symbol>
+</svg>
+<header class="sl-top"><div class="in">
+<a class="sign hora" href="docs-home.html"><img src="assets/mark.svg" alt="" width="32" height="32" style="border-radius:8px"><span class="name">Hora</span></a>
+<button class="search" type="button" aria-label="Search the docs"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-search"/></svg><span>Search</span><kbd>Ctrl K</kbd></button>
+<span class="right"><a class="btn quiet" href="#" aria-label="Hora on GitHub"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-gh"/></svg></a><button class="btn theme-btn" type="button" aria-label="Theme: auto. Change theme"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-sun"/></svg><span class="lbl" aria-hidden="true"></span></button></span>
+</div></header>
+<div class="layout">
+<nav class="side" aria-label="Main"><h2>Start here</h2><ul><li><a href="#">Getting started</a></li><li><a href="#">Configuration</a></li><li><a href="#">Upgrading</a></li></ul><h2>Guides</h2><ul><li><a href="#">Monitors</a></li><li><a href="#">Alerting & notifications</a></li><li><a href="#">SLOs & error budgets</a></li><li><a href="#">Incidents & history</a></li><li><a href="#">Per-group pages & SLA reports</a></li><li><a href="#" aria-current="page">Mutual surveillance (peers)</a></li><li><a href="#">Importing from Uptime Kuma</a></li></ul><h2>Reference</h2><ul><li><a href="#">CLI</a></li><li><a href="#">HTTP API</a></li></ul><h2>Project</h2><ul><li><a href="#">Roadmap</a></li><li><a href="#">Changelog<svg class="ext" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3h7v7M13 3 4 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="vh">(opens GitHub)</span></a></li></ul></nav>
+<div style="min-width:0">
+<div class="mob">
+  <details class="menu"><summary>Menu<span class="muted">Guides</span></summary><div><nav class="side" aria-label="Main (mobile)"><h2>Start here</h2><ul><li><a href="#">Getting started</a></li><li><a href="#">Configuration</a></li><li><a href="#">Upgrading</a></li></ul><h2>Guides</h2><ul><li><a href="#">Monitors</a></li><li><a href="#">Alerting & notifications</a></li><li><a href="#">SLOs & error budgets</a></li><li><a href="#">Incidents & history</a></li><li><a href="#">Per-group pages & SLA reports</a></li><li><a href="#" aria-current="page">Mutual surveillance (peers)</a></li><li><a href="#">Importing from Uptime Kuma</a></li></ul><h2>Reference</h2><ul><li><a href="#">CLI</a></li><li><a href="#">HTTP API</a></li></ul><h2>Project</h2><ul><li><a href="#">Roadmap</a></li><li><a href="#">Changelog<svg class="ext" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3h7v7M13 3 4 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="vh">(opens GitHub)</span></a></li></ul></nav></div></details>
+  <details class="tocl"><summary>On this page<span class="muted">Multi-vantage confirmation</span></summary><div style="padding:0 var(--s-4) var(--s-3)"><ul><li><a href="#heartbeat" class="">The outbound heartbeat</a></li><li><a href="#peers" class="">Peers: two independent halves</a></li><li><a href="#quorum" class="">Quorum: outage or partition?</a></li><li><a href="#vantage" class="">Multi-vantage confirmation</a></li><li><a href="#probe" class="sub">How a probe request works</a></li><li><a href="#failure" class="sub">Failure behaviour</a></li><li><a href="#external" class="">External receivers</a></li></ul></div></details>
+</div>
+<main id="main" class="content">
+<p class="crumb">Guides</p>
+<h1>Mutual surveillance (peers)</h1>
+<p class="lede">Who watches the watcher: dead-man heartbeats between Hora nodes, quorum, and external receivers.</p>
+<div class="prose">
+<p>A monitor is only as good as the machine it runs on. Two Hora nodes (two Raspberry Pi at two friends' places, a VPS and a homelab...) can watch each other with <strong>dead-man heartbeats</strong>: each node pings the other while it is healthy; when the pings stop, the survivor alerts.</p>
+<p>Nothing here is a bespoke protocol: every exchange is plain HTTP, so a peer can be another Hora, a healthchecks.io / UptimeRobot endpoint, or a cron job.</p>
+
+<h2 id="heartbeat">The outbound heartbeat: <code>[health]</code><a class="anchor" href="#heartbeat" aria-label="Link to this section">#</a></h2>
+<div class="ec"><div class="ecbar"><span class="title">config.toml</span><button class="btn copy" type="button" aria-label="Copy config.toml"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-copy"/></svg>Copy</button></div><pre><code><span class="tk">[health]</span>
+<span class="tk">id</span> = <span class="ts">"hora-a"</span>        <span class="tc"># this node&#39;s identity (how peers refer to it)</span>
+<span class="tk">interval_secs</span> = <span class="tb">60</span>   <span class="tc"># heartbeat cadence while healthy</span>
+<span class="tk">grace_secs</span> = <span class="tb">180</span>     <span class="tc"># startup grace before a never-seen peer is alerted</span>
+<span class="tc"># quorum = true      # see below</span>
+<span class="tc"># heartbeat_url = &quot;${HC_PING_URL}&quot;   # optional extra dead-man target</span></code></pre></div>
+<p>The node POSTs to each peer's <code>ping_url</code> every <code>interval_secs</code>, but <strong>only while it is locally healthy</strong> (its scheduler is ticking and its database is writable). A hung process stops pinging, and the receiver notices.</p>
+
+<h2 id="peers">Peers: two independent halves<a class="anchor" href="#peers" aria-label="Link to this section">#</a></h2>
+<p>Each <code>[[peers]]</code> entry can declare either or both directions:</p>
+<div class="ec"><div class="ecbar"><span class="title">config.toml</span><button class="btn copy" type="button" aria-label="Copy config.toml"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-copy"/></svg>Copy</button></div><pre><code><span class="tk">[[peers]]</span>
+<span class="tk">id</span> = <span class="ts">&quot;hora-b&quot;</span>                                    <span class="tc"># the peer&#39;s [health].id</span>
+<span class="tk">name</span> = <span class="ts">&quot;Hora B (Paris)&quot;</span>
+<span class="tc"># OUT - I heartbeat the peer while I&#39;m healthy:</span>
+<span class="tk">ping_url</span> = <span class="ts">&quot;https://b.example/api/push/hora-a&quot;</span>
+<span class="tk">ping_token</span> = <span class="ts">&quot;${PEER_B_TOKEN}&quot;</span>                 <span class="tc"># sent as X-Push-Token</span>
+<span class="tc"># IN - I watch the peer and alert if it goes silent:</span>
+<span class="tk">expect_every_secs</span> = <span class="tb">90</span>
+<span class="tk">listen_token</span> = <span class="ts">&quot;${PEER_B_IN}&quot;</span>                    <span class="tc"># required from the peer&#39;s pings</span></code></pre></div>
+<aside class="aside tip" aria-label="Reloads live"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><p class="t">Reloads live</p><p><code>[health]</code> and <code>[[peers]]</code> reload live like everything else: edit, save, and the next tick uses the new mesh. No restart.</p></aside>
+<p>Watched peers appear in their own section on the status page. Their state does not roll into the overall badge: it tracks your services, not the surveillance mesh.</p>
+
+<h2 id="quorum">Quorum: outage or partition?<a class="anchor" href="#quorum" aria-label="Link to this section">#</a></h2>
+<p>With three or more nodes, set <code>quorum = true</code>: before alerting a peer down, the node asks the <em>other</em> peers' <code>/healthz</code> whether they still see it. If any does, it is a network partition between you two, reported as a degraded peer link, not a false "node down".</p>
+<aside class="aside note" aria-label="Note"><svg class="g info" aria-hidden="true"><use href="#g-info"/></svg><p class="t">Note</p><p>Quorum is a no-op with fewer than three nodes: with two, nobody else can witness.</p></aside>
+
+<h2 id="vantage">Multi-vantage confirmation<a class="anchor" href="#vantage" aria-label="Link to this section">#</a></h2>
+<p>The peers don't just watch <em>each other</em>: they can confirm <strong>your monitors' outages</strong> from their vantage point.</p>
+<div class="ec"><div class="ecbar"><span class="title">config.toml</span><button class="btn copy" type="button" aria-label="Copy config.toml"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-copy"/></svg>Copy</button></div><pre><code><span class="tk">[health]</span>
+<span class="tk">id</span> = <span class="ts">&quot;hora-a&quot;</span>
+<span class="tk">confirm_with_peers</span> = <span class="tb">true</span>   <span class="tc"># per-monitor override: confirm_with_peers = true/false</span></code></pre></div>
+<p>A monitor that confirms down locally triggers one concurrent round of probe requests to the peers before the alert goes out, and the alert carries the verdict:</p>
+<div class="verdicts">
+  <figure><svg class="owls " viewBox="0 0 146 62" width="320" role="img" aria-label="All three nodes see it down"><path class="branch" d="M0 45.5C44 43.5 102 47.5 146 44.5" /><svg class="owl" data-state="down" x="4" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="down" x="50" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="down" x="96" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><text class="olab" x="27" y="58" text-anchor="middle">hora-a</text><text class="olab" x="73" y="58" text-anchor="middle">hora-b</text><text class="olab" x="119" y="58" text-anchor="middle">hora-c</text></svg><figcaption><b style="color:var(--ink);font-weight:500">A real outage.</b><code>confirmed down from 3/3 vantage points</code></figcaption></figure>
+  <figure><svg class="owls " viewBox="0 0 146 62" width="320" role="img" aria-label="Only this node sees it down"><path class="branch" d="M0 45.5C44 43.5 102 47.5 146 44.5" /><svg class="owl" data-state="down" x="4" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="up" x="50" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="up" x="96" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><text class="olab" x="27" y="58" text-anchor="middle">hora-a</text><text class="olab" x="73" y="58" text-anchor="middle">hora-b</text><text class="olab" x="119" y="58" text-anchor="middle">hora-c</text></svg><figcaption><b style="color:var(--ink);font-weight:500">Probably your fibre, not the service.</b><code>seen UP by hora-b - down from 1/3 vantage points</code></figcaption></figure>
+</div>
+<aside class="aside caution" aria-label="Softened, never silenced"><svg class="g degraded" aria-hidden="true"><use href="#g-degraded"/></svg><p class="t">Softened, never silenced</p><p>A disputed down still alerts, with the softer wording. Geo-partial outages are real outages.</p></aside>
+<p>Two Raspberry Pi at two homes become a distributed Pingdom. The same round is available on demand from the terminal with <a href="#"><code>hora probe &lt;id&gt; --confirm</code></a>: it prints the verdict both ways, "down for everyone or just me?" when the target is down here, and "up from 3/3 vantage points" when it is up.</p>
+<div class="ec term"><div class="ecbar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="title">Terminal</span><button class="btn copy" type="button" aria-label="Copy Terminal"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-copy"/></svg>Copy</button></div><pre><code><span class="p">$ </span>hora probe api --confirm
+<span class="o">api  https://api.example.com/health</span>
+<span class="w">down here</span>  timeout after 10s
+<span class="o">asking 2 peers…</span>
+<span class="w">seen UP by hora-b</span> - down from 1/3 vantage points (network issue near this node?)</code></pre></div>
+
+<h3 id="probe">How a probe request works<a class="anchor" href="#probe" aria-label="Link to this section">#</a></h3>
+<p>The requester <code>POST</code>s to the peer's <code>/api/peer/probe</code> (derived from the origin of <code>ping_url</code>), authenticated with the same token pair as heartbeats: it presents its <code>ping_token</code>, which the responder checks against its <code>listen_token</code> for that peer.</p>
+<aside class="aside danger" aria-label="The token is required"><svg class="g down" aria-hidden="true"><use href="#g-down"/></svg><p class="t">The token is required</p><p>The id alone never authorizes a probe. The responder only probes targets present in its own configuration, matched on kind and target, so a leaked token cannot turn a peer into an SSRF relay. Both nodes must therefore know the monitor: share the config in git.</p></aside>
+
+<h3 id="failure">Failure behaviour<a class="anchor" href="#failure" aria-label="Link to this section">#</a></h3>
+<p>Strictly fail-open, by construction. The incident record is written before the peers are even consulted.</p>
+<div class="tbl"><table>
+<thead><tr><th scope="col">When the peers…</th><th scope="col">The alert</th></tr></thead>
+<tbody>
+<tr><td>all see it down</td><td><svg class="g down" aria-hidden="true"><use href="#g-down"/></svg><span class="word down">Sent</span> "confirmed down from 3/3 vantage points"</td></tr>
+<tr><td>see it up</td><td><svg class="g degraded" aria-hidden="true"><use href="#g-degraded"/></svg><span class="word degraded">Sent, softened</span> "seen UP by hora-b"</td></tr>
+<tr><td>are slow, unreachable, or behind a wrong token</td><td><svg class="g down" aria-hidden="true"><use href="#g-down"/></svg><span class="word down">Sent</span> without the vantage annotation, never later than 10 s</td></tr>
+<tr><td>don't know the target (404)</td><td><svg class="g none" aria-hidden="true"><use href="#g-none"/></svg><span class="word none">Counts for nothing</span> on either side</td></tr>
+</tbody></table></div>
+<p>The worst possible outcome is an alert <em>without</em> the vantage annotation: exactly what Hora sent before the feature.</p>
+
+<h2 id="external">External receivers<a class="anchor" href="#external" aria-label="Link to this section">#</a></h2>
+<ul>
+<li><strong>OUT-only peer</strong>: a plain dead-man to an external service.</li>
+</ul>
+<div class="ec"><div class="ecbar"><span class="title">config.toml</span><button class="btn copy" type="button" aria-label="Copy config.toml"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-copy"/></svg>Copy</button></div><pre><code><span class="tk">[[peers]]</span>
+<span class="tk">id</span> = <span class="ts">&quot;healthchecks&quot;</span>
+<span class="tk">name</span> = <span class="ts">&quot;healthchecks.io&quot;</span>
+<span class="tk">ping_url</span> = <span class="ts">&quot;https://hc-ping.com/&lt;uuid&gt;&quot;</span></code></pre></div>
+<ul>
+<li><strong>Be watched by UptimeRobot</strong>: point a keyword monitor at this node's <code>/healthz</code> and match the keyword <code>ok</code> (the top-level <code>status</code> field is <code>ok</code> only while the node is fully healthy). No peer entry needed.</li>
+</ul>
+</div>
+<div class="edit"><a href="#"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-gh"/></svg>Edit this page</a><span>Last updated: 2 Oct 2026</span></div>
+<nav class="pager" aria-label="Pagination">
+  <a class="prev" href="#"><span><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-arrow"/></svg>Previous</span><b>Per-group pages &amp; SLA reports</b></a>
+  <a class="next" href="#"><span>Next<svg class="" aria-hidden="true" width="16" height="16"><use href="#i-arrow"/></svg></span><b>Importing from Uptime Kuma</b></a>
+</nav>
+<footer class="sl-foot"><a class="watched" href="docs-home.html"><img src="assets/mark.svg" alt="" width="22" height="22"><span class="b">Hora</span></a><span>MIT licence · built with Starlight</span></footer>
+</main>
+</div>
+<aside class="toc" aria-label="On this page"><h2>On this page</h2><ul><li><a href="#heartbeat" class="">The outbound heartbeat</a></li><li><a href="#peers" class="">Peers: two independent halves</a></li><li><a href="#quorum" class="">Quorum: outage or partition?</a></li><li><a href="#vantage" class="" aria-current="true">Multi-vantage confirmation</a></li><li><a href="#probe" class="sub">How a probe request works</a></li><li><a href="#failure" class="sub">Failure behaviour</a></li><li><a href="#external" class="">External receivers</a></li></ul>
+<div class="meta"><a href="#"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-gh"/></svg>Edit this page</a><a href="#"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-arrow"/></svg>Back to top</a></div></aside>
+</div>
+
+</body>
+</html>

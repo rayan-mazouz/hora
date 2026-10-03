@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pelican status</title>
+<meta name="description" content="Is Pelican working? Live status of every Pelican service.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#F2F0EA" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151A21" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/CalSansVF.woff2" as="font" type="font/woff2" crossorigin>
+<script>
+/* theme: system by default; the button cycles auto, light, dark and remembers (per viewer) */
+(function () {
+  var d = document.documentElement, k = 'hora-theme';
+  try { var t = localStorage.getItem(k); if (t) d.dataset.theme = t; } catch (e) {}
+  addEventListener('click', function (e) {
+    var b = e.target.closest('.theme-btn'); if (!b) return;
+    var next = { '': 'light', light: 'dark', dark: '' }[d.dataset.theme || ''];
+    if (next) d.dataset.theme = next; else delete d.dataset.theme;
+    b.setAttribute('aria-label', 'Theme: ' + (next || 'auto') + '. Change theme');
+    try { next ? localStorage.setItem(k, next) : localStorage.removeItem(k); } catch (e) {}
+  });
+})();
+</script>
+<style>
+@font-face { font-family: 'Fraunces Variable'; src: url('fonts/Fraunces-VF.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: 'Cal Sans'; src: url('fonts/CalSansVF.woff2') format('woff2'); font-weight: 400 700; font-display: swap; }
+@font-face { font-family: 'Borel Display'; src: url('fonts/BorelDisplay-Regular.woff2') format('woff2'); font-display: swap; }
+@font-face { font-family: 'JetBrains Mono'; src: url('fonts/JetBrainsMono.woff2') format('woff2'); font-weight: 400 800; font-display: swap; }
+
+:root { color-scheme: light dark; }
+:root[data-theme='light'] { color-scheme: light; }
+:root[data-theme='dark'] { color-scheme: dark; }
+
+:root {
+  /* raw palette: synthe.se (2026-08-17), unchanged */
+  --raw-cloud: #f2f0ea; --raw-cloud-deep: #e7e4db; --raw-ink: #1b222c; --raw-ink-soft: #525a66;
+  --raw-night: #151a21; --raw-night-raised: #1e2530; --raw-paper-dark: #eae7e0; --raw-muted-dark: #a8aeb8;
+  --raw-petrol: #0e5e68; --raw-petrol-soft: #4e8a92; --raw-petrol-wash: #d8e4e2;
+  --raw-petrol-bright: #63c0cb; --raw-petrol-dim: #3e7a84; --raw-petrol-wash-dark: #1d2a31;
+  --raw-warn: #b4633f; --raw-warn-dark: #d89372; --raw-down: #a5372a; --raw-down-dark: #e07a63;
+  --raw-blush: #e6a49a;
+
+  /* semantic (Maison's tokens.css) */
+  --ground: light-dark(var(--raw-cloud), var(--raw-night));
+  --ground-raised: light-dark(var(--raw-cloud-deep), var(--raw-night-raised));
+  --surface: light-dark(#faf9f5, #1a2029);
+  --line: light-dark(#d6d2c6, #2e3744);
+  --ink: light-dark(var(--raw-ink), var(--raw-paper-dark));
+  --ink-muted: light-dark(var(--raw-ink-soft), var(--raw-muted-dark));
+  --accent: light-dark(var(--raw-petrol), var(--raw-petrol-bright));
+  --accent-soft: light-dark(var(--raw-petrol-soft), var(--raw-petrol-dim));
+  --accent-wash: light-dark(var(--raw-petrol-wash), var(--raw-petrol-wash-dark));
+  --on-accent: light-dark(var(--raw-cloud), var(--raw-night));
+  --warn-text: light-dark(#8f4b22, var(--raw-warn-dark));
+  --blocked-wash: light-dark(#f3e2dc, #33211f);
+
+  /* Hora: five states, each colour + shape + word (the colour is the least of the three) */
+  --st-up: light-dark(var(--raw-petrol-soft), var(--raw-petrol-dim));      /* graphics, 3:1+ */
+  --st-up-text: var(--accent);
+  --st-degraded: light-dark(var(--raw-warn), var(--raw-warn-dark));
+  --st-degraded-text: var(--warn-text);
+  --st-down: light-dark(var(--raw-down), var(--raw-down-dark));
+  --st-down-text: var(--st-down);
+  --st-maint: var(--ink-muted);
+  --st-none: light-dark(#87837a, #687180);
+  --wash-up: var(--accent-wash);
+  --wash-degraded: light-dark(#f5e7da, #30261e);
+  --wash-down: var(--blocked-wash);
+  --wash-maint: var(--ground-raised);
+  --blush: light-dark(var(--raw-blush), #b8776e);
+  /* the owl's body: surface, outlined in ink (ArianeFace's recipe) */
+  --owl-fill: var(--surface);
+  --owl-line: var(--ink);
+
+  --shadow-near: light-dark(rgb(27 34 44 / 6%), rgb(0 0 0 / 30%));
+  --shadow-far: light-dark(rgb(27 34 44 / 6%), rgb(0 0 0 / 25%));
+  --shadow: 0 1px 2px var(--shadow-near), 0 4px 14px var(--shadow-far);
+  --shadow-pop: 0 10px 30px rgb(27 34 44 / 18%);
+
+  --focus-ring: 3px solid var(--accent);
+  --focus-offset: 2px;
+
+  --font-display: 'Fraunces Variable', Georgia, serif;
+  --font-text: 'Cal Sans', system-ui, sans-serif;
+  --font-brand: 'Borel Display', var(--font-display);
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --t-hero: 500 clamp(1.75rem, 1.35rem + 1.8vw, 2.6rem)/1.15 var(--font-display);
+  --t-page: 500 1.75rem/2.125rem var(--font-display);
+  --t-group: 500 1.1875rem/1.625rem var(--font-display);
+  --t-body: 400 1rem/1.5rem var(--font-text);
+  --t-secondary: 400 0.875rem/1.25rem var(--font-text);
+  --t-label: 500 0.875rem/1.25rem var(--font-text);
+  --t-meta: 500 0.8125rem/1rem var(--font-text);
+  --t-tiny: 500 0.75rem/1rem var(--font-text);
+  --t-brand: 400 1.35rem/1 var(--font-brand);
+
+  --page-max: 2400px; --page-margin: 16px; --measure: 42rem; --measure-wide: 64rem;
+  --s-half: 2px; --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px; --s-7: 48px;
+  --control-h: 44px; --control-h-s: 36px; --control-h-xs: 32px; --control-h-l: 52px;
+  --radius-xs: 2px; --radius-s: 4px; --radius: 6px; --radius-m: 8px; --radius-l: 10px;
+  --radius-xl: 12px; --radius-2xl: 16px; --radius-pill: 999px;
+  --row-min: 48px; --header-h: 56px;
+  --glyph: 16px;          /* a state's shape beside its word */
+  --bar-day-h: 22px;      /* the 90-day bar */
+  --group-col: 26rem;     /* a group's column on wide screens */
+}
+@media (min-width: 600px) { :root { --page-margin: 24px; } }
+@media (min-width: 1600px) { :root { --page-margin: 32px; } }
+@media (max-width: 599px) { :root { --row-min: 56px; } }
+@media (pointer: coarse) { :root { --control-h-s: 44px; --control-h-xs: 44px; } }
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--ground); color: var(--ink); font: var(--t-body); font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+h1, h2, h3, p { margin: 0; }
+a { color: var(--accent); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); border-radius: var(--radius-s); }
+[hidden] { display: none !important; }
+code, pre, kbd { font-family: var(--font-mono); font-size: 0.875em; }
+.skip { position: absolute; left: var(--s-2); top: -100px; z-index: 9; background: var(--ink); color: var(--ground);
+  padding: var(--s-2) var(--s-3); border-radius: var(--radius); font: var(--t-label); }
+.skip:focus { top: var(--s-2); }
+.vh { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.page { width: 100%; max-width: var(--page-max); margin: 0 auto; padding: 0 var(--page-margin); }
+.measure { max-width: var(--measure); }
+.eyebrow { font: var(--t-meta); text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-muted); }
+.muted { color: var(--ink-muted); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* header: the operator's sign on the left, the live pill and the theme on the right */
+.top { border-bottom: 1px solid var(--line); background: var(--ground); }
+.top .page { min-height: var(--header-h); display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding-block: var(--s-2); }
+.sign { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; margin-right: auto; min-width: 0; }
+.sign .op-logo { width: 32px; height: 32px; border-radius: var(--radius-m); display: grid; place-items: center; flex: none;
+  background: var(--ink); color: var(--ground); font: 600 1rem/1 var(--font-display); }
+.sign b { font: 500 1.15rem/1.2 var(--font-display); white-space: nowrap; }
+.sign span { font: var(--t-secondary); color: var(--ink-muted); white-space: nowrap; }
+.sign.hora span.name { font: var(--t-brand); color: var(--ink); transform: translateY(0.16em); }
+.top nav { display: flex; gap: var(--s-1); }
+@media (max-width: 599px) {
+  .top .page { row-gap: 0; }
+  .top nav { order: 3; width: 100%; margin-inline: calc(-1 * var(--s-3)); }
+  .top .pill { display: none; }
+  .theme-btn .lbl { display: none; }
+  .theme-btn { padding: 0; width: var(--control-h-xs); }
+}
+.navlink { display: inline-flex; align-items: center; min-height: var(--control-h-s); padding: 0 var(--s-3); border-radius: var(--radius-pill);
+  color: var(--ink-muted); text-decoration: none; font: var(--t-label); }
+.navlink:hover { background: var(--ground-raised); color: var(--ink); }
+.navlink[aria-current='page'] { background: var(--accent-wash); color: var(--accent); }
+
+.pill { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-h-xs); padding: 0 var(--s-3);
+  border: 1px solid var(--line); border-radius: var(--radius-pill); font: var(--t-meta); color: var(--ink-muted); background: var(--surface); white-space: nowrap; }
+.pill .g { width: 10px; height: 10px; color: var(--st-up); }
+
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2); min-height: var(--control-h-s);
+  padding: 0 var(--s-4); border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font: var(--t-label); text-decoration: none; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--ink-muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--accent); padding: 0 var(--s-2); }
+.btn svg { width: 16px; height: 16px; flex: none; }
+.theme-btn { min-height: var(--control-h-xs); padding: 0 var(--s-3); font: var(--t-meta); border-radius: var(--radius-pill); }
+
+/* the state glyphs: shape + colour, always followed by the word */
+.g { width: var(--glyph); height: var(--glyph); flex: none; display: inline-block; vertical-align: -0.18em; }
+.g.up { color: var(--st-up); } .g.degraded { color: var(--st-degraded); } .g.down { color: var(--st-down); }
+.g.maint { color: var(--st-maint); } .g.none { color: var(--st-none); } .g.info { color: var(--accent); }
+.word { font: var(--t-label); }
+.g + .word { margin-left: 4px; }
+.word.up { color: var(--st-up-text); } .word.degraded { color: var(--st-degraded-text); } .word.down { color: var(--st-down-text); }
+.word.maint, .word.none { color: var(--ink-muted); }
+
+.chips { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.chip { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-h-xs); padding: 0 var(--s-3);
+  border-radius: var(--radius-pill); background: var(--ground-raised); color: var(--ink); font: var(--t-label); text-decoration: none; white-space: nowrap; }
+.chip.degraded { background: var(--wash-degraded); color: var(--st-degraded-text); }
+.chip.down { background: var(--wash-down); color: var(--st-down-text); }
+.chip.up { background: var(--wash-up); color: var(--st-up-text); }
+.chip.up .g { color: var(--accent); } /* 3.0:1 is too close on the wash: the up glyph goes text-grade there */
+.chip.maint { background: var(--wash-maint); color: var(--ink-muted); }
+a.chip:hover { box-shadow: inset 0 0 0 1px currentColor; }
+
+/* the hero: the owl calls the hour, the sentence says it, the line under it proves it */
+.hero { display: grid; grid-template-columns: auto 1fr; gap: var(--s-4) var(--s-5); align-items: center;
+  padding: var(--s-5); border-radius: var(--radius-2xl); background: var(--wash-up); margin-top: var(--s-5); }
+.hero.degraded { background: var(--wash-degraded); }
+.hero.down { background: var(--wash-down); }
+.hero.maint { background: var(--wash-maint); }
+.hero > .owl { width: clamp(64px, 12vw, 96px); height: auto; }
+.hero h1 { font: var(--t-hero); letter-spacing: -0.01em; text-wrap: balance; }
+.hero .sub { margin-top: var(--s-2); color: var(--ink-muted); font: var(--t-body); }
+.hero .sub b { color: var(--ink); font-weight: 500; }
+.hero .chips { grid-column: 1 / -1; }
+@media (min-width: 840px) { .hero { padding: var(--s-6); } .hero .chips { grid-column: 2; } }
+@media (max-width: 420px) { .hero { grid-template-columns: 1fr; } }
+
+.section { margin-top: var(--s-7); }
+.section-head { display: flex; align-items: baseline; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-3); }
+.section-head h2 { font: var(--t-group); }
+.section-head .fact { margin-left: auto; font: var(--t-secondary); color: var(--ink-muted); }
+
+/* callouts: announcements and maintenance; an icon and a word, a wash, never a coloured edge alone */
+.callout { display: grid; grid-template-columns: auto 1fr; gap: var(--s-1) var(--s-3); padding: var(--s-4); border-radius: var(--radius-l);
+  background: var(--accent-wash); margin-top: var(--s-4); }
+.callout > .g { margin-top: 3px; }
+.callout .k { font: var(--t-label); }
+.callout p { color: var(--ink); max-width: var(--measure); }
+.callout .when { font: var(--t-meta); color: var(--ink-muted); margin-top: var(--s-1); }
+.callout.warning { background: var(--wash-degraded); } .callout.warning .k { color: var(--st-degraded-text); }
+.callout.critical { background: var(--wash-down); } .callout.critical .k { color: var(--st-down-text); }
+.callout.maint { background: var(--wash-maint); }
+.callout.info .k { color: var(--accent); }
+
+/* groups as framed lists of rows (Maison); columns of whole groups on wide screens */
+.groups { display: grid; gap: var(--s-6) var(--s-5); grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--group-col)), 1fr)); align-items: start; }
+.group-head { display: flex; align-items: baseline; gap: var(--s-3); margin-bottom: var(--s-3); }
+.group-head h3 { font: var(--t-group); }
+.group-head .fact { margin-left: auto; font: var(--t-secondary); color: var(--ink-muted); white-space: nowrap; }
+.list { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); overflow: hidden; }
+.list > li + li { border-top: 1px solid var(--line); }
+.row { display: grid; grid-template-columns: var(--glyph) 1fr auto; column-gap: var(--s-3); row-gap: var(--s-2); align-items: center;
+  padding: var(--s-3) var(--s-4); min-height: var(--row-min); color: inherit; text-decoration: none; }
+a.row:hover { background: color-mix(in srgb, var(--ground-raised) 55%, transparent); }
+.row .name { font: var(--t-label); font-size: 0.9375rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .name small { font: var(--t-secondary); color: var(--ink-muted); margin-left: 6px; }
+.row .state { font: var(--t-secondary); text-align: right; white-space: nowrap; }
+.row .state .word { font: var(--t-label); }
+.row .bar { grid-column: 1 / -1; }
+.row .why { grid-column: 2 / -1; font: var(--t-secondary); color: var(--ink-muted); margin-top: -4px; }
+.row.down .why, .row.degraded .why { color: var(--ink); }
+.bar-legend { display: flex; justify-content: space-between; font: var(--t-tiny); color: var(--ink-muted); padding: var(--s-2) var(--s-4) var(--s-3); }
+.bar-legend .d30 { display: none; }
+@media (max-width: 599px) { .bar-legend .d90 { display: none; } .bar-legend .d30 { display: inline; } }
+
+/* the 90-day bar: ONE svg, a handful of run-length rects, gaps drawn by a mask (not 90 nodes) */
+.bar { display: block; overflow: hidden; height: calc(var(--bar-day-h) + 7px); }
+.bar svg { display: block; width: 100%; height: 100%; overflow: visible;
+  -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 calc(100% / 90 - 1.5px), transparent calc(100% / 90 - 1.5px) calc(100% / 90));
+  mask-image: repeating-linear-gradient(90deg, #000 0 calc(100% / 90 - 1.5px), transparent calc(100% / 90 - 1.5px) calc(100% / 90)); }
+.bar .u { fill: var(--st-up); } .bar .d { fill: var(--st-degraded); } .bar .x { fill: var(--st-down); }
+.bar .m { fill: var(--st-maint); } .bar .n { fill: var(--st-none); }
+/* a phone shows the last 30 days: the same svg, three times wider, its right end in view */
+@media (max-width: 599px) { .bar svg { width: 300%; margin-left: -200%; } }
+
+/* the legend: what each shape means, once per page */
+.legend { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); font: var(--t-secondary); color: var(--ink-muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend svg.cell { width: 8px; height: 24px; overflow: visible; }
+
+/* the footer: Hora signs the page, quietly */
+.foot { margin-top: var(--s-7); border-top: 1px solid var(--line); }
+.foot .page { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3) var(--s-5); padding-block: var(--s-5) var(--s-6); font: var(--t-secondary); color: var(--ink-muted); }
+.foot nav { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-4); }
+.foot a { color: var(--ink-muted); }
+.foot a:hover { color: var(--ink); }
+.watched { display: inline-flex; align-items: center; gap: var(--s-2); margin-left: auto; color: var(--ink-muted); text-decoration: none; }
+.watched img { width: 22px; height: 22px; border-radius: 5px; }
+.watched .b { font: 400 1.05rem/1 var(--font-brand); color: var(--ink); transform: translateY(0.14em); }
+
+/* the owl: pose = state; it moves only when the state changes, once */
+.owl { overflow: visible; flex: none; }
+.owl .ln { fill: var(--owl-fill); stroke: var(--owl-line); stroke-width: 1.5; stroke-linejoin: round; }
+.owl .tx { fill: none; stroke: var(--owl-line); stroke-width: 1; stroke-linecap: round; opacity: 0.2; }
+.owl .ft { fill: var(--owl-line); }
+.owl .ey path, .owl .ey line { fill: none; stroke: var(--owl-line); stroke-width: 1.8; stroke-linecap: round; }
+.owl .ey ellipse { fill: var(--owl-line); }
+.owl .ey .glint { fill: var(--owl-fill); }
+.owl .bk { fill: var(--accent); stroke: var(--accent); stroke-width: 0.9; stroke-linejoin: round; }
+.owl .ck { fill: var(--blush); opacity: 0.85; transition: opacity 0.3s; }
+.owl .tl, .owl .tr { transform-box: fill-box; transition: transform 0.35s cubic-bezier(.3,1.4,.6,1); }
+.owl .tl { transform-origin: 100% 100%; } .owl .tr { transform-origin: 0% 100%; }
+.owl .ey > g { transition: opacity 0.18s; opacity: 0; }
+.owl .bd { fill: var(--ground); }
+.owl .badge > g { opacity: 0; }
+.owl .badge { opacity: 0; transition: opacity 0.2s; }
+/* up: asleep, the tufts at rest. Nothing is wrong, so nothing moves. */
+.owl[data-state='up'] .shut-l, .owl[data-state='up'] .shut-r { opacity: 1; }
+.owl[data-state='up'] .tl { transform: rotate(-5deg); } .owl[data-state='up'] .tr { transform: rotate(5deg); }
+/* degraded: one eye open, one tuft up: half an eye on it */
+.owl[data-state='degraded'] .shut-l, .owl[data-state='degraded'] .open-r { opacity: 1; }
+.owl[data-state='degraded'] .tl { transform: rotate(-5deg); } .owl[data-state='degraded'] .tr { transform: rotate(-6deg); }
+/* down: awake, both eyes open, tufts up. Attentive, never alarmed, never sad. */
+.owl[data-state='down'] .open-l, .owl[data-state='down'] .open-r { opacity: 1; }
+.owl[data-state='down'] .tl { transform: rotate(3deg); } .owl[data-state='down'] .tr { transform: rotate(-3deg); }
+/* maintenance: a planned nap, tufts folded */
+.owl[data-state='maint'] .shut-l, .owl[data-state='maint'] .shut-r { opacity: 1; }
+.owl[data-state='maint'] .tl { transform: rotate(-22deg); } .owl[data-state='maint'] .tr { transform: rotate(22deg); }
+/* no data: it cannot see yet; two dashes, no blush */
+.owl[data-state='none'] .dash { opacity: 1; }
+.owl[data-state='none'] .ck { opacity: 0; }
+.owl[data-state='degraded'] .badge, .owl[data-state='down'] .badge, .owl[data-state='maint'] .badge, .owl[data-state='none'] .badge { opacity: 1; }
+.owl[data-state='degraded'] .b-degraded, .owl[data-state='down'] .b-down, .owl[data-state='maint'] .b-maint, .owl[data-state='none'] .b-none { opacity: 1; }
+.owl .b-degraded { color: var(--st-degraded); } .owl .b-down { color: var(--st-down); } .owl .b-maint { color: var(--st-maint); } .owl .b-none { color: var(--st-none); }
+/* waking: one perk of the tufts when the state turns to down, then still */
+.owl.woke .tl, .owl.woke .tr { animation: perk 0.6s ease-out 1; }
+@keyframes perk { 40% { translate: 0 -1.2px; } }
+@media (prefers-reduced-motion: reduce) {
+  .owl *, .owl { transition: none !important; animation: none !important; }
+}
+
+/* theme switch (the only script on a page, with the owl demo) */
+.theme-btn .lbl::before { content: 'Auto'; }
+:root[data-theme='light'] .theme-btn .lbl::before { content: 'Light'; }
+:root[data-theme='dark'] .theme-btn .lbl::before { content: 'Dark'; }
+
+.mock-note { margin: var(--s-6) 0 0; padding: var(--s-3) var(--s-4); border: 1px dashed var(--line); border-radius: var(--radius-l);
+  font: var(--t-secondary); color: var(--ink-muted); max-width: var(--measure-wide); }
+.mock-note b { color: var(--ink); font-weight: 500; }
+
+.owls { overflow: visible; display: block; max-width: 100%; height: auto; }
+.owls .branch { fill: none; stroke: var(--ink-muted); stroke-width: 1.4; stroke-linecap: round; opacity: 0.5; }
+.owls .olab { font: 500 5.2px var(--font-text); fill: var(--ink-muted); }
+/* where it is watched from: places, each with its own shape and word */
+.vantages { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: center; }
+.vchip { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 10px; border-radius: var(--radius-pill); background: var(--ground-raised); font: var(--t-meta); color: var(--ink); white-space: nowrap; }
+.vchip .g { width: 12px; height: 12px; }
+.vchip small { font: var(--t-meta); color: var(--ink-muted); }
+.vchip.down { background: var(--wash-down); } .vchip.degraded { background: var(--wash-degraded); }
+.watchers { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); font: var(--t-secondary); color: var(--ink-muted); }
+.watchers .owls { width: 92px; }
+
+main { padding-bottom: var(--s-4); }
+.when { font: var(--t-meta); color: var(--accent); letter-spacing: 0.02em; margin-bottom: var(--s-2); }
+.hero.degraded .when { color: var(--st-degraded-text); } .hero.down .when { color: var(--st-down-text); } .hero.maint .when { color: var(--ink-muted); }
+.follow { margin-left: auto; }
+.svc-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); margin-bottom: var(--s-4); }
+.svc-head h2 { font: var(--t-group); font-size: 1.375rem; }
+.svc-head .fact { font: var(--t-secondary); color: var(--ink-muted); }
+.density { margin-left: auto; display: inline-flex; padding: 3px; gap: 2px; border-radius: var(--radius-pill); background: var(--ground-raised); }
+.density input { position: absolute; opacity: 0; pointer-events: none; }
+.density label { min-height: 30px; padding: 0 var(--s-3); display: inline-flex; align-items: center; border-radius: var(--radius-pill); font: var(--t-meta); color: var(--ink-muted); cursor: pointer; }
+.density input:checked + label { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.density input:focus-visible + label { outline: var(--focus-ring); outline-offset: 1px; }
+.spark, .facts { display: none; }
+/* cards: the same rows, each in its own frame, with a response-time line (one path) */
+body:has(#dens-cards:checked) .list { background: none; border: 0; display: grid; gap: var(--s-3); overflow: visible; }
+body:has(#dens-cards:checked) .list > li { border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--surface); }
+body:has(#dens-cards:checked) .list > li + li { border-top: 1px solid var(--line); }
+body:has(#dens-cards:checked) .row { padding: var(--s-4); }
+body:has(#dens-cards:checked) .spark { display: block; grid-column: 1 / -1; height: 36px; width: 100%; }
+body:has(#dens-cards:checked) .facts { display: flex; flex-wrap: wrap; grid-column: 1 / -1; gap: var(--s-1) var(--s-4); font: var(--t-secondary); color: var(--ink-muted); }
+.facts b { color: var(--ink); font-weight: 500; }
+.spark path.l { fill: none; stroke: var(--accent-soft); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.spark path.a { fill: var(--accent-wash); opacity: 0.7; }
+.under { margin-top: var(--s-5); }
+.past { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); max-width: var(--measure-wide); }
+.past li { display: grid; grid-template-columns: 6.5rem 1fr auto; gap: var(--s-3); padding: var(--s-3) 0; border-bottom: 1px solid var(--line); align-items: baseline; }
+.past time { font: var(--t-meta); color: var(--ink-muted); }
+.past .t { font: var(--t-label); }
+.past .t a { color: var(--ink); text-decoration: none; }
+.past .t a:hover { text-decoration: underline; }
+.past .t small { display: block; font: var(--t-secondary); color: var(--ink-muted); margin-top: 2px; }
+.past .r { font: var(--t-meta); white-space: nowrap; display: inline-flex; gap: 6px; align-items: center; }
+@media (max-width: 599px) { .past li { grid-template-columns: 1fr auto; } .past time { grid-column: 1 / -1; } }
+.quiet-line { display: flex; align-items: center; gap: var(--s-3); color: var(--ink-muted); padding: var(--s-4) 0; }
+
+/* what's wrong now: the affected services, up front, with their story */
+.now { display: grid; gap: var(--s-3); }
+.now-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); padding: var(--s-4) var(--s-5); }
+.now-card .row { padding: 0; min-height: 0; }
+.now-card .row .name { font-size: 1.0625rem; }
+.now-card .story { margin-top: var(--s-3); display: grid; gap: var(--s-2); font: var(--t-secondary); color: var(--ink-muted); }
+.now-card .story b { color: var(--ink); font-weight: 500; }
+.updates { list-style: none; margin: var(--s-4) 0 0; padding: 0 0 0 var(--s-4); border-left: 2px solid var(--line); display: grid; gap: var(--s-3); }
+.updates li { position: relative; }
+.updates li::before { content: ''; position: absolute; left: calc(-1 * var(--s-4) - 6px); top: 6px; width: 10px; height: 10px; border-radius: 50%; background: var(--surface); border: 2px solid var(--ink-muted); }
+.updates li:first-child::before { border-color: var(--accent); background: var(--accent); }
+.updates .k { font: var(--t-label); }
+.updates time { font: var(--t-meta); color: var(--ink-muted); margin-left: var(--s-2); }
+.updates p { font: var(--t-secondary); color: var(--ink); margin-top: 2px; max-width: var(--measure); }
+.seen { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.seen .chip { min-height: 28px; font: var(--t-meta); }
+
+/* scale: groups as one summary row, a disclosure; only what is wrong is open */
+.filters { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: center; margin-bottom: var(--s-4); }
+.search { display: flex; align-items: center; gap: var(--s-2); min-height: var(--control-h); padding: 0 var(--s-3); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); flex: 1 1 16rem; max-width: 24rem; color: var(--ink-muted); }
+.search input { border: 0; background: none; font: var(--t-body); color: var(--ink); width: 100%; min-width: 0; outline: none; }
+.search:focus-within { outline: var(--focus-ring); outline-offset: var(--focus-offset); }
+.seg { display: inline-flex; gap: var(--s-1); flex-wrap: wrap; }
+.seg a { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-h-s); padding: 0 var(--s-3); border-radius: var(--radius-pill); font: var(--t-label); color: var(--ink-muted); text-decoration: none; border: 1px solid transparent; }
+.seg a[aria-current] { background: var(--surface); border-color: var(--line); color: var(--ink); }
+.seg a b { font-weight: 500; color: var(--ink-muted); }
+.gl { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); }
+.gl > li + li { border-top: 1px solid var(--line); }
+.gl details > summary { list-style: none; cursor: pointer; display: grid; grid-template-columns: 20px var(--glyph) minmax(0, 1fr) auto; gap: var(--s-3); align-items: center; padding: var(--s-3) var(--s-4); min-height: 60px; border-radius: var(--radius-xl); }
+.gl details > summary::-webkit-details-marker { display: none; }
+.gl details > summary:hover { background: color-mix(in srgb, var(--ground-raised) 55%, transparent); }
+.gl .chev { width: 16px; height: 16px; color: var(--ink-muted); transition: transform 0.2s; }
+.gl details[open] .chev { transform: rotate(90deg); }
+.gl .gname { font: var(--t-group); font-size: 1.0625rem; min-width: 0; }
+.gl .gname small { display: block; font: var(--t-secondary); color: var(--ink-muted); }
+.gl .gsum { text-align: right; font: var(--t-secondary); color: var(--ink-muted); white-space: nowrap; }
+.gl .gsum .word { font: var(--t-label); }
+@media (max-width: 599px) { .gl details > summary { grid-template-columns: 20px var(--glyph) minmax(0, 1fr); } .gl .gsum { grid-column: 3; text-align: left; } }
+.gl .inner { padding: 0 var(--s-4) var(--s-4); }
+.compact { list-style: none; margin: 0; padding: 0; columns: 3 20rem; column-gap: var(--s-5); }
+.compact li { break-inside: avoid; display: grid; grid-template-columns: var(--glyph) minmax(0, 1fr) auto; gap: var(--s-2); align-items: center; min-height: 40px; border-bottom: 1px solid var(--line); font: var(--t-secondary); }
+.compact li a { color: var(--ink); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.compact li a:hover { text-decoration: underline; }
+.compact li .pct { color: var(--ink-muted); }
+.compact li .g { width: 12px; height: 12px; }
+.more { display: flex; gap: var(--s-3); align-items: center; padding-top: var(--s-3); font: var(--t-secondary); color: var(--ink-muted); flex-wrap: wrap; }
+.bar.mini { height: 14px; margin-top: 8px; max-width: 22rem; }
+.bar.mini svg { width: 100%; margin: 0; -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 calc(100% / 90 - 1px), transparent calc(100% / 90 - 1px) calc(100% / 90)); mask-image: repeating-linear-gradient(90deg, #000 0 calc(100% / 90 - 1px), transparent calc(100% / 90 - 1px) calc(100% / 90)); }
+.weight { font: var(--t-meta); color: var(--ink-muted); }
+@media (max-width: 599px) { .gl .gsum .pctx { display: none; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+<symbol id="g-up" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="currentColor"/></symbol>
+<symbol id="g-degraded" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 2.6a5.4 5.4 0 0 0 0 10.8z" fill="currentColor"/></symbol>
+<symbol id="g-down" viewBox="0 0 16 16"><path d="M8 1.2 14.8 8 8 14.8 1.2 8Z" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/><path d="M8 4.9v3.6" stroke="var(--surface, #fff)" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="11" r=".95" fill="var(--surface, #fff)"/></symbol>
+<symbol id="g-maint" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 4.9V8l2.2 1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="g-none" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.4 2.0"/></symbol>
+<symbol id="g-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.4" fill="currentColor"/><path d="M8 7.3v4" stroke="var(--surface, #fff)" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="4.9" r=".95" fill="var(--surface, #fff)"/></symbol>
+<symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+<symbol id="i-feed" viewBox="0 0 16 16"><path d="M3 3.5a9.5 9.5 0 0 1 9.5 9.5M3 7.5A5.5 5.5 0 0 1 8.5 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="3.8" cy="12.2" r="1.3" fill="currentColor"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="i-copy" viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 2.8H4.4a1.6 1.6 0 0 0-1.6 1.6v6.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+<symbol id="i-pin" viewBox="0 0 16 16"><path d="M8 14.5s4.8-4.3 4.8-8a4.8 4.8 0 0 0-9.6 0c0 3.7 4.8 8 4.8 8Z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="6.5" r="1.6" fill="currentColor"/></symbol>
+<symbol id="i-lock" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.2 7V5a2.8 2.8 0 0 1 5.6 0v2" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+<symbol id="i-print" viewBox="0 0 16 16"><path d="M4.5 6V2.5h7V6M4.5 11.5H3a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v3.5a1 1 0 0 1-1 1h-1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><rect x="4.5" y="9.5" width="7" height="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+<symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+<symbol id="i-gh" viewBox="0 0 16 16"><path fill="currentColor" d="M8 .6a7.4 7.4 0 0 0-2.34 14.42c.37.07.5-.16.5-.36v-1.3c-2.06.45-2.5-.87-2.5-.87-.33-.86-.82-1.09-.82-1.09-.67-.46.05-.45.05-.45.74.05 1.13.76 1.13.76.66 1.13 1.73.8 2.15.61.07-.48.26-.8.47-.99-1.64-.19-3.37-.82-3.37-3.65 0-.8.29-1.46.76-1.98-.08-.19-.33-.94.07-1.95 0 0 .62-.2 2.03.76a7 7 0 0 1 3.7 0c1.41-.96 2.03-.76 2.03-.76.4 1.01.15 1.76.07 1.95.47.52.76 1.18.76 1.98 0 2.84-1.73 3.46-3.38 3.64.27.23.5.68.5 1.37v2.03c0 .2.13.43.5.36A7.4 7.4 0 0 0 8 .6Z"/></symbol>
+</svg>
+<header class="top"><div class="page"><a class="sign" href="status-ok.html"><span class="op-logo" aria-hidden="true">P</span><b>Pelican</b><span>Status</span></a><nav aria-label="Pages"><a class="navlink" href="status-ok.html" aria-current="page">Status</a><a class="navlink" href="monitor.html">History</a><a class="navlink" href="report.html">Report</a></nav><span class="pill" title="This page updates itself every 30 s"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg>Live · 12 s ago</span><button class="btn theme-btn" type="button" aria-label="Theme: auto. Change theme"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-sun"/></svg><span class="lbl" aria-hidden="true"></span></button></div></header>
+<main id="main" class="page">
+<section class="hero" aria-labelledby="h">
+  <svg class="owl hero-owl" data-state="up" viewBox="6 6 40 40" width="96" height="96" aria-hidden="true" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg>
+  <div>
+    <p class="when">Saturday 3 October, 14:32 UTC</p>
+    <h1 id="h">Everything is running.</h1>
+    <p class="sub">All <b>14 services</b> are up. Checked 12 s ago from 3 places.</p>
+  </div>
+  <div class="chips">
+    <span class="chip up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg>14 up</span>
+    <span class="chip">No incident in 15 days</span>
+    <a class="chip maint" href="status-maintenance.html"><svg class="g maint" aria-hidden="true"><use href="#g-maint"/></svg>Planned: Tue 7 Oct, 22:00 UTC</a>
+    <a class="btn quiet follow" href="#"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-feed"/></svg>Follow updates</a>
+  </div>
+</section>
+<section class="section" aria-labelledby="svc"><div class="svc-head"><h2 id="svc">Services</h2><span class="fact">14 services in 3 groups</span><fieldset class="density" style="border:0;margin:0 0 0 auto"><legend class="vh">Layout</legend><input type="radio" name="dens" id="dens-rows" checked><label for="dens-rows">Rows</label><input type="radio" name="dens" id="dens-cards"><label for="dens-cards">Cards</label></fieldset></div><div class="groups"><section class="grp" aria-labelledby="g-Peli"><div class="group-head"><h3 id="g-Peli">Pelican</h3><span class="fact">4 services</span></div><ul class="list"><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Website<small>pelican.app</small></span><span class="state"><span class="word up">Up</span> <span class="muted">· 100 %</span></span><a class="bar" href="monitor.html" aria-label="100 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="90" height="22"/></svg></a><span class="facts"><span>Paris <b>84 ms</b></span><span>Frankfurt <b>80 ms</b></span><span>Montréal <b>204 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 64.4 2.1 60.2 4.3 57.1 6.4 60.0 8.5 60.0 10.6 60.7 12.8 58.8 14.9 55.4 17.0 60.2 19.1 65.9 21.3 61.9 23.4 62.7 25.5 59.5 27.7 65.5 29.8 66.2 31.9 63.5 34.0 66.8 36.2 61.4 38.3 56.6 40.4 62.2 42.6 67.9 44.7 67.4 46.8 62.2 48.9 63.6 51.1 67.0 53.2 67.9 55.3 73.6 57.4 76.9 59.6 77.7 61.7 77.7 63.8 80.9 66.0 84.1 68.1 87.5 70.2 88.0 72.3 90.0 74.5 90.0 76.6 85.9 78.7 85.3 80.9 83.6 83.0 87.3 85.1 81.4 87.2 77.1 89.4 81.7 91.5 83.7 93.6 81.0 95.7 78.5 97.9 73.2 100.0 74.2 V100 H0Z"/><path class="l" d="M0.0 64.4 2.1 60.2 4.3 57.1 6.4 60.0 8.5 60.0 10.6 60.7 12.8 58.8 14.9 55.4 17.0 60.2 19.1 65.9 21.3 61.9 23.4 62.7 25.5 59.5 27.7 65.5 29.8 66.2 31.9 63.5 34.0 66.8 36.2 61.4 38.3 56.6 40.4 62.2 42.6 67.9 44.7 67.4 46.8 62.2 48.9 63.6 51.1 67.0 53.2 67.9 55.3 73.6 57.4 76.9 59.6 77.7 61.7 77.7 63.8 80.9 66.0 84.1 68.1 87.5 70.2 88.0 72.3 90.0 74.5 90.0 76.6 85.9 78.7 85.3 80.9 83.6 83.0 87.3 85.1 81.4 87.2 77.1 89.4 81.7 91.5 83.7 93.6 81.0 95.7 78.5 97.9 73.2 100.0 74.2"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Web app</span><span class="state"><span class="word up">Up</span> <span class="muted">· 99.99 %</span></span><a class="bar" href="monitor.html" aria-label="99.99 % up over 90 days, 1 slow day. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="61" height="22"/><rect class="d" x="61" y="7" width="1" height="15"/><rect class="u" x="62" y="0" width="28" height="22"/></svg></a><span class="facts"><span>Paris <b>112 ms</b></span><span>Frankfurt <b>105 ms</b></span><span>Montréal <b>249 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 54.5 2.1 49.2 4.3 54.5 6.4 59.5 8.5 55.4 10.6 52.6 12.8 50.6 14.9 52.9 17.0 51.6 19.1 50.3 21.3 49.3 23.4 53.4 25.5 54.3 27.7 55.5 29.8 52.9 31.9 46.9 34.0 41.5 36.2 41.0 38.3 41.7 40.4 44.5 42.6 50.0 44.7 55.7 46.8 56.1 48.9 58.3 51.1 59.7 53.2 55.0 55.3 54.7 57.4 54.0 59.6 57.2 61.7 62.9 63.8 65.0 66.0 69.3 68.1 69.2 70.2 63.2 72.3 61.1 74.5 64.9 76.6 60.2 78.7 56.7 80.9 53.9 83.0 49.0 85.1 45.8 87.2 42.3 89.4 44.1 91.5 38.3 93.6 32.8 95.7 36.8 97.9 33.8 100.0 31.2 V100 H0Z"/><path class="l" d="M0.0 54.5 2.1 49.2 4.3 54.5 6.4 59.5 8.5 55.4 10.6 52.6 12.8 50.6 14.9 52.9 17.0 51.6 19.1 50.3 21.3 49.3 23.4 53.4 25.5 54.3 27.7 55.5 29.8 52.9 31.9 46.9 34.0 41.5 36.2 41.0 38.3 41.7 40.4 44.5 42.6 50.0 44.7 55.7 46.8 56.1 48.9 58.3 51.1 59.7 53.2 55.0 55.3 54.7 57.4 54.0 59.6 57.2 61.7 62.9 63.8 65.0 66.0 69.3 68.1 69.2 70.2 63.2 72.3 61.1 74.5 64.9 76.6 60.2 78.7 56.7 80.9 53.9 83.0 49.0 85.1 45.8 87.2 42.3 89.4 44.1 91.5 38.3 93.6 32.8 95.7 36.8 97.9 33.8 100.0 31.2"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Public API</span><span class="state"><span class="word up">Up</span> <span class="muted">· 99.97 %</span></span><a class="bar" href="monitor.html" aria-label="99.97 % up over 90 days, 1 day with an outage. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="71" height="22"/><rect class="x" x="71" y="0" width="1" height="29"/><rect class="u" x="72" y="0" width="18" height="22"/></svg></a><span class="facts"><span>Paris <b>64 ms</b></span><span>Frankfurt <b>62 ms</b></span><span>Montréal <b>172 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 63.1 2.1 62.6 4.3 64.2 6.4 62.9 8.5 61.4 10.6 66.6 12.8 72.5 14.9 68.4 17.0 71.3 19.1 74.5 21.3 68.6 23.4 68.9 25.5 64.9 27.7 65.2 29.8 63.5 31.9 67.7 34.0 66.1 36.2 61.6 38.3 61.4 40.4 58.5 42.6 56.4 44.7 61.6 46.8 58.5 48.9 57.5 51.1 59.8 53.2 65.5 55.3 61.1 57.4 61.4 59.6 58.8 61.7 54.2 63.8 51.7 66.0 46.6 68.1 47.9 70.2 44.3 72.3 44.9 74.5 39.7 76.6 35.2 78.7 40.0 80.9 44.4 83.0 47.7 85.1 42.2 87.2 42.9 89.4 41.4 91.5 43.8 93.6 43.7 95.7 45.1 97.9 46.9 100.0 45.8 V100 H0Z"/><path class="l" d="M0.0 63.1 2.1 62.6 4.3 64.2 6.4 62.9 8.5 61.4 10.6 66.6 12.8 72.5 14.9 68.4 17.0 71.3 19.1 74.5 21.3 68.6 23.4 68.9 25.5 64.9 27.7 65.2 29.8 63.5 31.9 67.7 34.0 66.1 36.2 61.6 38.3 61.4 40.4 58.5 42.6 56.4 44.7 61.6 46.8 58.5 48.9 57.5 51.1 59.8 53.2 65.5 55.3 61.1 57.4 61.4 59.6 58.8 61.7 54.2 63.8 51.7 66.0 46.6 68.1 47.9 70.2 44.3 72.3 44.9 74.5 39.7 76.6 35.2 78.7 40.0 80.9 44.4 83.0 47.7 85.1 42.2 87.2 42.9 89.4 41.4 91.5 43.8 93.6 43.7 95.7 45.1 97.9 46.9 100.0 45.8"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Mobile sync</span><span class="state"><span class="word up">Up</span> <span class="muted">· 100 %</span></span><a class="bar" href="monitor.html" aria-label="100 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="90" height="22"/></svg></a><span class="facts"><span>Paris <b>71 ms</b></span><span>Frankfurt <b>68 ms</b></span><span>Montréal <b>184 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 63.2 2.1 67.9 4.3 69.2 6.4 73.3 8.5 78.5 10.6 79.7 12.8 74.7 14.9 71.1 17.0 67.9 19.1 71.2 21.3 70.8 23.4 73.5 25.5 77.4 27.7 82.1 29.8 85.6 31.9 80.4 34.0 76.5 36.2 72.8 38.3 69.2 40.4 72.9 42.6 75.2 44.7 73.6 46.8 70.8 48.9 66.6 51.1 62.0 53.2 67.0 55.3 65.7 57.4 63.7 59.6 63.6 61.7 67.5 63.8 67.8 66.0 72.7 68.1 67.5 70.2 63.1 72.3 62.5 74.5 64.9 76.6 60.0 78.7 59.1 80.9 54.6 83.0 50.4 85.1 50.3 87.2 51.3 89.4 50.1 91.5 51.0 93.6 55.0 95.7 57.4 97.9 53.6 100.0 59.1 V100 H0Z"/><path class="l" d="M0.0 63.2 2.1 67.9 4.3 69.2 6.4 73.3 8.5 78.5 10.6 79.7 12.8 74.7 14.9 71.1 17.0 67.9 19.1 71.2 21.3 70.8 23.4 73.5 25.5 77.4 27.7 82.1 29.8 85.6 31.9 80.4 34.0 76.5 36.2 72.8 38.3 69.2 40.4 72.9 42.6 75.2 44.7 73.6 46.8 70.8 48.9 66.6 51.1 62.0 53.2 67.0 55.3 65.7 57.4 63.7 59.6 63.6 61.7 67.5 63.8 67.8 66.0 72.7 68.1 67.5 70.2 63.1 72.3 62.5 74.5 64.9 76.6 60.0 78.7 59.1 80.9 54.6 83.0 50.4 85.1 50.3 87.2 51.3 89.4 50.1 91.5 51.0 93.6 55.0 95.7 57.4 97.9 53.6 100.0 59.1"/></svg></div></li></ul><div class="bar-legend" aria-hidden="true"><span class="d90">90 days ago</span><span class="d30">30 days ago</span><span>Today</span></div></section><section class="grp" aria-labelledby="g-Paym"><div class="group-head"><h3 id="g-Paym">Payments and email</h3><span class="fact">4 services</span></div><ul class="list"><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Card payments</span><span class="state"><span class="word up">Up</span> <span class="muted">· 100 %</span></span><a class="bar" href="monitor.html" aria-label="100 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="90" height="22"/></svg></a><span class="facts"><span>Paris <b>240 ms</b></span><span>Frankfurt <b>220 ms</b></span><span>Montréal <b>454 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 58.5 2.1 55.6 4.3 52.1 6.4 46.8 8.5 43.9 10.6 38.8 12.8 44.5 14.9 44.9 17.0 39.6 19.1 37.8 21.3 33.0 23.4 37.6 25.5 38.0 27.7 41.0 29.8 40.5 31.9 39.6 34.0 45.5 36.2 48.9 38.3 51.5 40.4 46.5 42.6 43.3 44.7 47.4 46.8 43.8 48.9 48.2 51.1 46.8 53.2 51.2 55.3 57.2 57.4 52.8 59.6 56.2 61.7 59.7 63.8 53.9 66.0 49.4 68.1 51.9 70.2 46.4 72.3 45.9 74.5 43.8 76.6 47.3 78.7 42.0 80.9 39.8 83.0 34.2 85.1 30.0 87.2 32.4 89.4 34.1 91.5 38.1 93.6 42.3 95.7 47.6 97.9 49.9 100.0 48.7 V100 H0Z"/><path class="l" d="M0.0 58.5 2.1 55.6 4.3 52.1 6.4 46.8 8.5 43.9 10.6 38.8 12.8 44.5 14.9 44.9 17.0 39.6 19.1 37.8 21.3 33.0 23.4 37.6 25.5 38.0 27.7 41.0 29.8 40.5 31.9 39.6 34.0 45.5 36.2 48.9 38.3 51.5 40.4 46.5 42.6 43.3 44.7 47.4 46.8 43.8 48.9 48.2 51.1 46.8 53.2 51.2 55.3 57.2 57.4 52.8 59.6 56.2 61.7 59.7 63.8 53.9 66.0 49.4 68.1 51.9 70.2 46.4 72.3 45.9 74.5 43.8 76.6 47.3 78.7 42.0 80.9 39.8 83.0 34.2 85.1 30.0 87.2 32.4 89.4 34.1 91.5 38.1 93.6 42.3 95.7 47.6 97.9 49.9 100.0 48.7"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Bank transfers (SEPA)</span><span class="state"><span class="word up">Up</span> <span class="muted">· 100 %</span></span><a class="bar" href="monitor.html" aria-label="100 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="90" height="22"/></svg></a><span class="facts"><span>Paris <b>310 ms</b></span><span>Frankfurt <b>283 ms</b></span><span>Montréal <b>566 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 56.5 2.1 52.6 4.3 52.8 6.4 55.7 8.5 61.7 10.6 59.7 12.8 60.1 14.9 56.9 17.0 58.5 19.1 55.2 21.3 57.9 23.4 54.3 25.5 51.6 27.7 52.6 29.8 52.1 31.9 50.0 34.0 53.6 36.2 53.0 38.3 49.3 40.4 52.1 42.6 48.5 44.7 46.3 46.8 42.1 48.9 44.1 51.1 49.0 53.2 45.4 55.3 41.7 57.4 42.4 59.6 47.3 61.7 50.9 63.8 49.3 66.0 51.8 68.1 46.4 70.2 45.3 72.3 48.9 74.5 47.0 76.6 48.7 78.7 43.5 80.9 38.6 83.0 38.4 85.1 36.7 87.2 34.3 89.4 30.7 91.5 30.0 93.6 35.7 95.7 37.3 97.9 36.1 100.0 38.4 V100 H0Z"/><path class="l" d="M0.0 56.5 2.1 52.6 4.3 52.8 6.4 55.7 8.5 61.7 10.6 59.7 12.8 60.1 14.9 56.9 17.0 58.5 19.1 55.2 21.3 57.9 23.4 54.3 25.5 51.6 27.7 52.6 29.8 52.1 31.9 50.0 34.0 53.6 36.2 53.0 38.3 49.3 40.4 52.1 42.6 48.5 44.7 46.3 46.8 42.1 48.9 44.1 51.1 49.0 53.2 45.4 55.3 41.7 57.4 42.4 59.6 47.3 61.7 50.9 63.8 49.3 66.0 51.8 68.1 46.4 70.2 45.3 72.3 48.9 74.5 47.0 76.6 48.7 78.7 43.5 80.9 38.6 83.0 38.4 85.1 36.7 87.2 34.3 89.4 30.7 91.5 30.0 93.6 35.7 95.7 37.3 97.9 36.1 100.0 38.4"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Invoice emails</span><span class="state"><span class="word up">Up</span> <span class="muted">· 99.98 %</span></span><a class="bar" href="monitor.html" aria-label="99.98 % up over 90 days, 1 slow day. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="72" height="22"/><rect class="d" x="72" y="7" width="1" height="15"/><rect class="u" x="73" y="0" width="17" height="22"/></svg></a><span class="facts"><span>Response <b>1.2 s</b></span><span>from 3 places</span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 62.1 2.1 66.3 4.3 64.5 6.4 69.6 8.5 69.2 10.6 70.8 12.8 76.1 14.9 76.0 17.0 81.6 19.1 82.4 21.3 87.5 23.4 90.0 25.5 90.0 27.7 86.1 29.8 90.0 31.9 90.0 34.0 88.5 36.2 83.1 38.3 82.2 40.4 83.4 42.6 77.7 44.7 83.1 46.8 78.8 48.9 81.4 51.1 85.6 53.2 90.0 55.3 90.0 57.4 86.2 59.6 90.0 61.7 89.0 63.8 87.4 66.0 88.9 68.1 88.3 70.2 90.0 72.3 90.0 74.5 90.0 76.6 87.8 78.7 88.7 80.9 90.0 83.0 89.0 85.1 89.5 87.2 90.0 89.4 86.5 91.5 84.1 93.6 87.2 95.7 86.3 97.9 86.0 100.0 81.5 V100 H0Z"/><path class="l" d="M0.0 62.1 2.1 66.3 4.3 64.5 6.4 69.6 8.5 69.2 10.6 70.8 12.8 76.1 14.9 76.0 17.0 81.6 19.1 82.4 21.3 87.5 23.4 90.0 25.5 90.0 27.7 86.1 29.8 90.0 31.9 90.0 34.0 88.5 36.2 83.1 38.3 82.2 40.4 83.4 42.6 77.7 44.7 83.1 46.8 78.8 48.9 81.4 51.1 85.6 53.2 90.0 55.3 90.0 57.4 86.2 59.6 90.0 61.7 89.0 63.8 87.4 66.0 88.9 68.1 88.3 70.2 90.0 72.3 90.0 74.5 90.0 76.6 87.8 78.7 88.7 80.9 90.0 83.0 89.0 85.1 89.5 87.2 90.0 89.4 86.5 91.5 84.1 93.6 87.2 95.7 86.3 97.9 86.0 100.0 81.5"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Webhooks</span><span class="state"><span class="word up">Up</span> <span class="muted">· 100 %</span></span><a class="bar" href="monitor.html" aria-label="100 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="90" height="22"/></svg></a><span class="facts"><span>Paris <b>95 ms</b></span><span>Frankfurt <b>90 ms</b></span><span>Montréal <b>222 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 63.3 2.1 57.7 4.3 62.2 6.4 59.8 8.5 64.7 10.6 67.8 12.8 61.8 14.9 65.3 17.0 63.6 19.1 64.1 21.3 64.6 23.4 64.7 25.5 68.4 27.7 64.4 29.8 69.3 31.9 72.5 34.0 78.3 36.2 81.1 38.3 82.2 40.4 77.4 42.6 78.8 44.7 83.4 46.8 86.3 48.9 80.4 51.1 85.7 53.2 84.2 55.3 85.7 57.4 83.8 59.6 85.7 61.7 83.4 63.8 83.5 66.0 81.7 68.1 76.8 70.2 75.9 72.3 80.2 74.5 85.4 76.6 80.0 78.7 80.2 80.9 83.8 83.0 78.5 85.1 77.5 87.2 74.8 89.4 70.2 91.5 72.8 93.6 74.5 95.7 70.0 97.9 74.4 100.0 71.2 V100 H0Z"/><path class="l" d="M0.0 63.3 2.1 57.7 4.3 62.2 6.4 59.8 8.5 64.7 10.6 67.8 12.8 61.8 14.9 65.3 17.0 63.6 19.1 64.1 21.3 64.6 23.4 64.7 25.5 68.4 27.7 64.4 29.8 69.3 31.9 72.5 34.0 78.3 36.2 81.1 38.3 82.2 40.4 77.4 42.6 78.8 44.7 83.4 46.8 86.3 48.9 80.4 51.1 85.7 53.2 84.2 55.3 85.7 57.4 83.8 59.6 85.7 61.7 83.4 63.8 83.5 66.0 81.7 68.1 76.8 70.2 75.9 72.3 80.2 74.5 85.4 76.6 80.0 78.7 80.2 80.9 83.8 83.0 78.5 85.1 77.5 87.2 74.8 89.4 70.2 91.5 72.8 93.6 74.5 95.7 70.0 97.9 74.4 100.0 71.2"/></svg></div></li></ul><div class="bar-legend" aria-hidden="true"><span class="d90">90 days ago</span><span class="d30">30 days ago</span><span>Today</span></div></section><section class="grp" aria-labelledby="g-Behi"><div class="group-head"><h3 id="g-Behi">Behind the scenes</h3><span class="fact">6 services</span></div><ul class="list"><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Database</span><span class="state"><span class="word up">Up</span> <span class="muted">· 100 %</span></span><a class="bar" href="monitor.html" aria-label="100 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="90" height="22"/></svg></a><span class="facts"><span>Paris <b>3 ms</b></span><span>Frankfurt <b>7 ms</b></span><span>Montréal <b>75 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 60.4 2.1 62.0 4.3 66.3 6.4 61.9 8.5 67.8 10.6 67.8 12.8 63.0 14.9 68.0 17.0 67.4 19.1 66.0 21.3 71.5 23.4 73.0 25.5 70.5 27.7 71.1 29.8 68.4 31.9 72.5 34.0 75.6 36.2 80.3 38.3 80.2 40.4 75.2 42.6 74.1 44.7 70.8 46.8 72.2 48.9 69.2 51.1 74.0 53.2 76.5 55.3 74.4 57.4 71.7 59.6 72.6 61.7 77.6 63.8 80.4 66.0 83.9 68.1 86.5 70.2 82.8 72.3 86.4 74.5 81.8 76.6 77.2 78.7 82.5 80.9 84.0 83.0 84.1 85.1 89.8 87.2 90.0 89.4 85.1 91.5 89.8 93.6 88.6 95.7 90.0 97.9 89.1 100.0 84.3 V100 H0Z"/><path class="l" d="M0.0 60.4 2.1 62.0 4.3 66.3 6.4 61.9 8.5 67.8 10.6 67.8 12.8 63.0 14.9 68.0 17.0 67.4 19.1 66.0 21.3 71.5 23.4 73.0 25.5 70.5 27.7 71.1 29.8 68.4 31.9 72.5 34.0 75.6 36.2 80.3 38.3 80.2 40.4 75.2 42.6 74.1 44.7 70.8 46.8 72.2 48.9 69.2 51.1 74.0 53.2 76.5 55.3 74.4 57.4 71.7 59.6 72.6 61.7 77.6 63.8 80.4 66.0 83.9 68.1 86.5 70.2 82.8 72.3 86.4 74.5 81.8 76.6 77.2 78.7 82.5 80.9 84.0 83.0 84.1 85.1 89.8 87.2 90.0 89.4 85.1 91.5 89.8 93.6 88.6 95.7 90.0 97.9 89.1 100.0 84.3"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">File storage</span><span class="state"><span class="word up">Up</span> <span class="muted">· 100 %</span></span><a class="bar" href="monitor.html" aria-label="100 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="90" height="22"/></svg></a><span class="facts"><span>Paris <b>48 ms</b></span><span>Frankfurt <b>47 ms</b></span><span>Montréal <b>147 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 59.1 2.1 60.0 4.3 59.1 6.4 62.6 8.5 58.8 10.6 54.9 12.8 53.1 14.9 57.2 17.0 56.9 19.1 59.0 21.3 62.0 23.4 56.6 25.5 50.6 27.7 56.1 29.8 51.7 31.9 50.5 34.0 51.9 36.2 54.5 38.3 52.4 40.4 52.9 42.6 50.7 44.7 48.8 46.8 53.2 48.9 50.0 51.1 44.2 53.2 38.5 55.3 37.2 57.4 42.7 59.6 48.6 61.7 53.0 63.8 47.7 66.0 50.1 68.1 51.7 70.2 46.9 72.3 49.1 74.5 48.5 76.6 49.3 78.7 54.5 80.9 53.5 83.0 49.4 85.1 53.5 87.2 56.8 89.4 57.9 91.5 63.4 93.6 63.5 95.7 59.6 97.9 57.7 100.0 57.3 V100 H0Z"/><path class="l" d="M0.0 59.1 2.1 60.0 4.3 59.1 6.4 62.6 8.5 58.8 10.6 54.9 12.8 53.1 14.9 57.2 17.0 56.9 19.1 59.0 21.3 62.0 23.4 56.6 25.5 50.6 27.7 56.1 29.8 51.7 31.9 50.5 34.0 51.9 36.2 54.5 38.3 52.4 40.4 52.9 42.6 50.7 44.7 48.8 46.8 53.2 48.9 50.0 51.1 44.2 53.2 38.5 55.3 37.2 57.4 42.7 59.6 48.6 61.7 53.0 63.8 47.7 66.0 50.1 68.1 51.7 70.2 46.9 72.3 49.1 74.5 48.5 76.6 49.3 78.7 54.5 80.9 53.5 83.0 49.4 85.1 53.5 87.2 56.8 89.4 57.9 91.5 63.4 93.6 63.5 95.7 59.6 97.9 57.7 100.0 57.3"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Search</span><span class="state"><span class="word up">Up</span> <span class="muted">· 99.99 %</span></span><a class="bar" href="monitor.html" aria-label="99.99 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="50" height="22"/><rect class="m" x="50" y="11" width="1" height="11"/><rect class="u" x="51" y="0" width="39" height="22"/></svg></a><span class="facts"><span>Paris <b>38 ms</b></span><span>Frankfurt <b>38 ms</b></span><span>Montréal <b>131 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 60.6 2.1 59.9 4.3 54.8 6.4 55.2 8.5 55.1 10.6 54.0 12.8 57.8 14.9 57.7 17.0 56.1 19.1 52.6 21.3 57.5 23.4 59.8 25.5 64.7 27.7 61.0 29.8 58.7 31.9 64.2 34.0 58.4 36.2 52.8 38.3 51.0 40.4 49.6 42.6 53.7 44.7 59.5 46.8 59.2 48.9 64.5 51.1 68.2 53.2 71.3 55.3 76.9 57.4 77.4 59.6 78.1 61.7 74.0 63.8 73.7 66.0 72.1 68.1 72.1 70.2 70.1 72.3 70.6 74.5 73.3 76.6 67.3 78.7 61.4 80.9 57.3 83.0 54.8 85.1 57.0 87.2 60.2 89.4 62.8 91.5 67.9 93.6 64.7 95.7 65.9 97.9 61.8 100.0 63.1 V100 H0Z"/><path class="l" d="M0.0 60.6 2.1 59.9 4.3 54.8 6.4 55.2 8.5 55.1 10.6 54.0 12.8 57.8 14.9 57.7 17.0 56.1 19.1 52.6 21.3 57.5 23.4 59.8 25.5 64.7 27.7 61.0 29.8 58.7 31.9 64.2 34.0 58.4 36.2 52.8 38.3 51.0 40.4 49.6 42.6 53.7 44.7 59.5 46.8 59.2 48.9 64.5 51.1 68.2 53.2 71.3 55.3 76.9 57.4 77.4 59.6 78.1 61.7 74.0 63.8 73.7 66.0 72.1 68.1 72.1 70.2 70.1 72.3 70.6 74.5 73.3 76.6 67.3 78.7 61.4 80.9 57.3 83.0 54.8 85.1 57.0 87.2 60.2 89.4 62.8 91.5 67.9 93.6 64.7 95.7 65.9 97.9 61.8 100.0 63.1"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Background jobs</span><span class="state"><span class="word up">Up</span> <span class="muted">· 100 %</span></span><a class="bar" href="monitor.html" aria-label="100 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="90" height="22"/></svg></a><span class="facts"><span>Response <b>heartbeat</b></span><span>from 3 places</span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 60.3 2.1 58.4 4.3 56.4 6.4 60.7 8.5 66.6 10.6 68.1 12.8 70.8 14.9 67.1 17.0 64.8 19.1 63.6 21.3 62.9 23.4 60.9 25.5 65.2 27.7 65.9 29.8 70.0 31.9 65.1 34.0 70.4 36.2 66.6 38.3 71.7 40.4 69.4 42.6 71.4 44.7 72.5 46.8 68.4 48.9 74.2 51.1 79.5 53.2 74.5 55.3 74.4 57.4 79.3 59.6 73.4 61.7 68.1 63.8 72.7 66.0 73.6 68.1 78.0 70.2 80.3 72.3 78.8 74.5 82.8 76.6 80.5 78.7 85.9 80.9 89.8 83.0 86.0 85.1 87.2 87.2 88.2 89.4 87.0 91.5 87.3 93.6 88.7 95.7 90.0 97.9 87.3 100.0 81.7 V100 H0Z"/><path class="l" d="M0.0 60.3 2.1 58.4 4.3 56.4 6.4 60.7 8.5 66.6 10.6 68.1 12.8 70.8 14.9 67.1 17.0 64.8 19.1 63.6 21.3 62.9 23.4 60.9 25.5 65.2 27.7 65.9 29.8 70.0 31.9 65.1 34.0 70.4 36.2 66.6 38.3 71.7 40.4 69.4 42.6 71.4 44.7 72.5 46.8 68.4 48.9 74.2 51.1 79.5 53.2 74.5 55.3 74.4 57.4 79.3 59.6 73.4 61.7 68.1 63.8 72.7 66.0 73.6 68.1 78.0 70.2 80.3 72.3 78.8 74.5 82.8 76.6 80.5 78.7 85.9 80.9 89.8 83.0 86.0 85.1 87.2 87.2 88.2 89.4 87.0 91.5 87.3 93.6 88.7 95.7 90.0 97.9 87.3 100.0 81.7"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">PDF rendering</span><span class="state"><span class="word up">Up</span> <span class="muted">· 99.95 %</span></span><a class="bar" href="monitor.html" aria-label="99.95 % up over 90 days, 2 slow days. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="u" x="0" y="0" width="30" height="22"/><rect class="d" x="30" y="7" width="2" height="15"/><rect class="u" x="32" y="0" width="58" height="22"/></svg></a><span class="facts"><span>Paris <b>620 ms</b></span><span>Frankfurt <b>562 ms</b></span><span>Montréal <b>1062 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 62.9 2.1 60.7 4.3 58.5 6.4 54.3 8.5 58.0 10.6 61.3 12.8 65.5 14.9 68.8 17.0 66.0 19.1 70.4 21.3 70.1 23.4 73.5 25.5 76.0 27.7 76.8 29.8 72.7 31.9 71.4 34.0 77.3 36.2 79.9 38.3 84.2 40.4 79.7 42.6 76.0 44.7 72.3 46.8 68.4 48.9 65.5 51.1 60.1 53.2 56.6 55.3 59.5 57.4 55.3 59.6 55.4 61.7 52.4 63.8 51.6 66.0 52.5 68.1 54.1 70.2 54.9 72.3 57.2 74.5 61.8 76.6 57.9 78.7 54.3 80.9 48.5 83.0 46.2 85.1 45.6 87.2 42.6 89.4 47.0 91.5 44.9 93.6 45.5 95.7 49.4 97.9 53.0 100.0 52.7 V100 H0Z"/><path class="l" d="M0.0 62.9 2.1 60.7 4.3 58.5 6.4 54.3 8.5 58.0 10.6 61.3 12.8 65.5 14.9 68.8 17.0 66.0 19.1 70.4 21.3 70.1 23.4 73.5 25.5 76.0 27.7 76.8 29.8 72.7 31.9 71.4 34.0 77.3 36.2 79.9 38.3 84.2 40.4 79.7 42.6 76.0 44.7 72.3 46.8 68.4 48.9 65.5 51.1 60.1 53.2 56.6 55.3 59.5 57.4 55.3 59.6 55.4 61.7 52.4 63.8 51.6 66.0 52.5 68.1 54.1 70.2 54.9 72.3 57.2 74.5 61.8 76.6 57.9 78.7 54.3 80.9 48.5 83.0 46.2 85.1 45.6 87.2 42.6 89.4 47.0 91.5 44.9 93.6 45.5 95.7 49.4 97.9 53.0 100.0 52.7"/></svg></div></li><li><div class="row up"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="name">Status page<small>since 14 Jul</small></span><span class="state"><span class="word up">Up</span> <span class="muted">· 100 %</span></span><a class="bar" href="monitor.html" aria-label="100 % up over 90 days, no incident. Open history"><svg viewBox="0 0 90 29" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="n" x="0" y="18" width="20" height="4"/><rect class="u" x="20" y="0" width="70" height="22"/></svg></a><span class="facts"><span>Paris <b>22 ms</b></span><span>Frankfurt <b>24 ms</b></span><span>Montréal <b>105 ms</b></span></span><svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="a" d="M0.0 64.7 2.1 62.3 4.3 60.5 6.4 55.2 8.5 57.9 10.6 60.9 12.8 58.0 14.9 56.1 17.0 58.5 19.1 56.3 21.3 57.5 23.4 54.2 25.5 58.8 27.7 62.1 29.8 57.3 31.9 59.0 34.0 61.9 36.2 58.2 38.3 56.6 40.4 60.8 42.6 60.2 44.7 58.3 46.8 62.3 48.9 60.5 51.1 65.0 53.2 66.9 55.3 71.9 57.4 75.5 59.6 69.7 61.7 70.9 63.8 65.0 66.0 65.8 68.1 64.5 70.2 60.0 72.3 57.8 74.5 62.4 76.6 61.3 78.7 59.7 80.9 63.6 83.0 68.4 85.1 63.9 87.2 63.8 89.4 67.4 91.5 68.0 93.6 71.4 95.7 67.8 97.9 67.8 100.0 72.6 V100 H0Z"/><path class="l" d="M0.0 64.7 2.1 62.3 4.3 60.5 6.4 55.2 8.5 57.9 10.6 60.9 12.8 58.0 14.9 56.1 17.0 58.5 19.1 56.3 21.3 57.5 23.4 54.2 25.5 58.8 27.7 62.1 29.8 57.3 31.9 59.0 34.0 61.9 36.2 58.2 38.3 56.6 40.4 60.8 42.6 60.2 44.7 58.3 46.8 62.3 48.9 60.5 51.1 65.0 53.2 66.9 55.3 71.9 57.4 75.5 59.6 69.7 61.7 70.9 63.8 65.0 66.0 65.8 68.1 64.5 70.2 60.0 72.3 57.8 74.5 62.4 76.6 61.3 78.7 59.7 80.9 63.6 83.0 68.4 85.1 63.9 87.2 63.8 89.4 67.4 91.5 68.0 93.6 71.4 95.7 67.8 97.9 67.8 100.0 72.6"/></svg></div></li></ul><div class="bar-legend" aria-hidden="true"><span class="d90">90 days ago</span><span class="d30">30 days ago</span><span>Today</span></div></section></div><details class="under"><summary class="btn quiet" style="display:inline-flex">How to read the bars</summary><div style="padding:var(--s-3) 0"><div class="legend" aria-label="How to read the bars"><span><svg class="cell" viewBox="0 0 4 29"><rect class="u" style="fill:var(--st-up)" width="4" height="22"/></svg>Up all day</span><span><svg class="cell" viewBox="0 0 4 29"><rect style="fill:var(--st-degraded)" y="7" width="4" height="15"/></svg>Slow at times (shorter)</span><span><svg class="cell" viewBox="0 0 4 29"><rect style="fill:var(--st-down)" width="4" height="29"/></svg>Outage (drops below the line)</span><span><svg class="cell" viewBox="0 0 4 29"><rect style="fill:var(--st-maint)" y="11" width="4" height="11"/></svg>Maintenance (half)</span><span><svg class="cell" viewBox="0 0 4 29"><rect style="fill:var(--st-none)" y="18" width="4" height="4"/></svg>No data</span></div></div></details></section>
+<section class="section" aria-labelledby="past"><div class="section-head"><h2 id="past">Recent incidents</h2><a class="fact" href="monitor.html">All history</a></div>
+<ul class="past">
+  <li><time datetime="2026-09-18">18 Sep</time><span class="t"><a href="incident.html">Public API was down for 41 minutes</a><small>The database ran out of connections. Fixed the same evening.</small></span><span class="r"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="word up">Resolved</span></span></li>
+  <li><time datetime="2026-09-12">12 Sep</time><span class="t"><a href="incident.html">Invoice emails were slow</a><small>Sending took up to 6 minutes for an hour.</small></span><span class="r"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg><span class="word up">Resolved</span></span></li>
+</ul></section>
+<section class="section" aria-labelledby="wt"><div class="section-head"><h2 id="wt">Who keeps watch</h2></div>
+<div class="watchers"><svg class="owls " viewBox="0 0 146 50" width="320" role="img" aria-label="Three owls asleep: all three places see every service up"><path class="branch" d="M0 45.5C44 43.5 102 47.5 146 44.5" /><svg class="owl" data-state="up" x="4" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="up" x="50" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="up" x="96" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg></svg><p style="max-width:40rem">Watched from <b style="color:var(--ink);font-weight:500">Paris, Frankfurt and Montréal</b>. Each place checks every service; a service counts as down only when two places agree, so a hiccup near one of them never shows here.</p></div></section>
+</main>
+<footer class="foot"><div class="page"><nav aria-label="More"><a href="monitor.html">Incident history</a><a href="incident.html">Timeline</a><a href="report.html">Monthly report</a><a href="#">Atom feed</a><a href="#">JSON</a></nav><a class="watched" href="docs-home.html"><img src="assets/mark.svg" alt="" width="22" height="22"><span>Watched over by</span><span class="b">Hora</span></a></div></footer>
+
+</body>
+</html>

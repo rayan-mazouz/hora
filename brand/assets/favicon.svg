@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- Hora at 16 px: tile, owl, tufts, two shut eyes. Everything else is dropped. -->
+  <rect width="16" height="16" rx="3.6" fill="#0E5E68"/>
+  <path d="M5.2 5.3 3.6 2.6 6.9 4.1ZM10.8 5.3 12.4 2.6 9.1 4.1Z" fill="#F2F0EA" stroke="#F2F0EA" stroke-width=".9" stroke-linejoin="round"/>
+  <ellipse cx="8" cy="8.9" rx="4.5" ry="4.9" fill="#F2F0EA"/>
+  <path d="M4.9 8.3a1.15 1.15 0 0 0 2.3 0M8.8 8.3a1.15 1.15 0 0 0 2.3 0" fill="none" stroke="#0E5E68" stroke-width="1.05" stroke-linecap="round"/>
+</svg>

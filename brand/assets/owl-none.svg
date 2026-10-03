@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="6 6 42 42" width="168" height="168" role="img" aria-label="Hora's owl, no data">
+  <!-- No data: two dashes, no blush. It cannot see yet. The word beside it always says the same thing. -->
+  <style>
+  .ln { fill: #FAF9F5; stroke: #1B222C; stroke-width: 1.5; stroke-linejoin: round; }
+  .tx { fill: none; stroke: #1B222C; stroke-width: 1; stroke-linecap: round; opacity: .2; }
+  .ft, .eo { fill: #1B222C; } .gl { fill: #FAF9F5; }
+  .ey { fill: none; stroke: #1B222C; stroke-width: 1.8; stroke-linecap: round; }
+  .bk { fill: #0E5E68; stroke: #0E5E68; stroke-width: .9; stroke-linejoin: round; }
+  .ck { fill: #E6A49A; opacity: .85; }
+  .bd { fill: #F2F0EA; } .s-degraded { fill: #B4633F; } .r-degraded { stroke: #B4633F; } .s-down { fill: #A5372A; } .s-maint, .s-none { stroke: #525A66; }
+  .cut { fill: #F2F0EA; stroke: #F2F0EA; }
+  @media (prefers-color-scheme: dark) {
+    .ln { fill: #1A2029; stroke: #EAE7E0; } .tx, .ey { stroke: #EAE7E0; } .ft, .eo { fill: #EAE7E0; } .gl { fill: #1A2029; }
+    .bk { fill: #63C0CB; stroke: #63C0CB; } .ck { fill: #B8776E; }
+    .bd, .cut { fill: #151A21; stroke: #151A21; } .s-degraded { fill: #D89372; } .r-degraded { stroke: #D89372; } .s-down { fill: #E07A63; } .s-maint, .s-none { stroke: #A8AEB8; }
+  }
+</style>
+  <path class="ln" transform="rotate(0 20.4 16.8)" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+  <path class="ln" transform="rotate(0 27.6 16.8)" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+  <ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+  <path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+  <g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+  <path class="ey" d="M16.9 24.8h4M27.1 24.8h4"/>
+  <path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+  
+  <circle class="bd" cx="39.5" cy="38.5" r="7.2"/><circle cx="39.5" cy="38.5" r="4.6" fill="none" class="s-none" stroke-width="1.5" stroke-dasharray="2.1 1.8"/>
+</svg>

@@ -1,0 +1,1068 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hora · brand and mockups</title>
+<meta name="description" content="The Hora brand: a little owl who keeps the hours. Concept, mark, palette, states, voice and mockups.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#F2F0EA" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151A21" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/CalSansVF.woff2" as="font" type="font/woff2" crossorigin>
+<script>
+/* theme: system by default; the button cycles auto, light, dark and remembers (per viewer) */
+(function () {
+  var d = document.documentElement, k = 'hora-theme';
+  try { var t = localStorage.getItem(k); if (t) d.dataset.theme = t; } catch (e) {}
+  addEventListener('click', function (e) {
+    var b = e.target.closest('.theme-btn'); if (!b) return;
+    var next = { '': 'light', light: 'dark', dark: '' }[d.dataset.theme || ''];
+    if (next) d.dataset.theme = next; else delete d.dataset.theme;
+    b.setAttribute('aria-label', 'Theme: ' + (next || 'auto') + '. Change theme');
+    try { next ? localStorage.setItem(k, next) : localStorage.removeItem(k); } catch (e) {}
+  });
+})();
+</script>
+<style>
+@font-face { font-family: 'Fraunces Variable'; src: url('fonts/Fraunces-VF.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: 'Cal Sans'; src: url('fonts/CalSansVF.woff2') format('woff2'); font-weight: 400 700; font-display: swap; }
+@font-face { font-family: 'Borel Display'; src: url('fonts/BorelDisplay-Regular.woff2') format('woff2'); font-display: swap; }
+@font-face { font-family: 'JetBrains Mono'; src: url('fonts/JetBrainsMono.woff2') format('woff2'); font-weight: 400 800; font-display: swap; }
+
+:root { color-scheme: light dark; }
+:root[data-theme='light'] { color-scheme: light; }
+:root[data-theme='dark'] { color-scheme: dark; }
+
+:root {
+  /* raw palette: synthe.se (2026-08-17), unchanged */
+  --raw-cloud: #f2f0ea; --raw-cloud-deep: #e7e4db; --raw-ink: #1b222c; --raw-ink-soft: #525a66;
+  --raw-night: #151a21; --raw-night-raised: #1e2530; --raw-paper-dark: #eae7e0; --raw-muted-dark: #a8aeb8;
+  --raw-petrol: #0e5e68; --raw-petrol-soft: #4e8a92; --raw-petrol-wash: #d8e4e2;
+  --raw-petrol-bright: #63c0cb; --raw-petrol-dim: #3e7a84; --raw-petrol-wash-dark: #1d2a31;
+  --raw-warn: #b4633f; --raw-warn-dark: #d89372; --raw-down: #a5372a; --raw-down-dark: #e07a63;
+  --raw-blush: #e6a49a;
+
+  /* semantic (Maison's tokens.css) */
+  --ground: light-dark(var(--raw-cloud), var(--raw-night));
+  --ground-raised: light-dark(var(--raw-cloud-deep), var(--raw-night-raised));
+  --surface: light-dark(#faf9f5, #1a2029);
+  --line: light-dark(#d6d2c6, #2e3744);
+  --ink: light-dark(var(--raw-ink), var(--raw-paper-dark));
+  --ink-muted: light-dark(var(--raw-ink-soft), var(--raw-muted-dark));
+  --accent: light-dark(var(--raw-petrol), var(--raw-petrol-bright));
+  --accent-soft: light-dark(var(--raw-petrol-soft), var(--raw-petrol-dim));
+  --accent-wash: light-dark(var(--raw-petrol-wash), var(--raw-petrol-wash-dark));
+  --on-accent: light-dark(var(--raw-cloud), var(--raw-night));
+  --warn-text: light-dark(#8f4b22, var(--raw-warn-dark));
+  --blocked-wash: light-dark(#f3e2dc, #33211f);
+
+  /* Hora: five states, each colour + shape + word (the colour is the least of the three) */
+  --st-up: light-dark(var(--raw-petrol-soft), var(--raw-petrol-dim));      /* graphics, 3:1+ */
+  --st-up-text: var(--accent);
+  --st-degraded: light-dark(var(--raw-warn), var(--raw-warn-dark));
+  --st-degraded-text: var(--warn-text);
+  --st-down: light-dark(var(--raw-down), var(--raw-down-dark));
+  --st-down-text: var(--st-down);
+  --st-maint: var(--ink-muted);
+  --st-none: light-dark(#87837a, #687180);
+  --wash-up: var(--accent-wash);
+  --wash-degraded: light-dark(#f5e7da, #30261e);
+  --wash-down: var(--blocked-wash);
+  --wash-maint: var(--ground-raised);
+  --blush: light-dark(var(--raw-blush), #b8776e);
+  /* the owl's body: surface, outlined in ink (ArianeFace's recipe) */
+  --owl-fill: var(--surface);
+  --owl-line: var(--ink);
+
+  --shadow-near: light-dark(rgb(27 34 44 / 6%), rgb(0 0 0 / 30%));
+  --shadow-far: light-dark(rgb(27 34 44 / 6%), rgb(0 0 0 / 25%));
+  --shadow: 0 1px 2px var(--shadow-near), 0 4px 14px var(--shadow-far);
+  --shadow-pop: 0 10px 30px rgb(27 34 44 / 18%);
+
+  --focus-ring: 3px solid var(--accent);
+  --focus-offset: 2px;
+
+  --font-display: 'Fraunces Variable', Georgia, serif;
+  --font-text: 'Cal Sans', system-ui, sans-serif;
+  --font-brand: 'Borel Display', var(--font-display);
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --t-hero: 500 clamp(1.75rem, 1.35rem + 1.8vw, 2.6rem)/1.15 var(--font-display);
+  --t-page: 500 1.75rem/2.125rem var(--font-display);
+  --t-group: 500 1.1875rem/1.625rem var(--font-display);
+  --t-body: 400 1rem/1.5rem var(--font-text);
+  --t-secondary: 400 0.875rem/1.25rem var(--font-text);
+  --t-label: 500 0.875rem/1.25rem var(--font-text);
+  --t-meta: 500 0.8125rem/1rem var(--font-text);
+  --t-tiny: 500 0.75rem/1rem var(--font-text);
+  --t-brand: 400 1.35rem/1 var(--font-brand);
+
+  --page-max: 2400px; --page-margin: 16px; --measure: 42rem; --measure-wide: 64rem;
+  --s-half: 2px; --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px; --s-7: 48px;
+  --control-h: 44px; --control-h-s: 36px; --control-h-xs: 32px; --control-h-l: 52px;
+  --radius-xs: 2px; --radius-s: 4px; --radius: 6px; --radius-m: 8px; --radius-l: 10px;
+  --radius-xl: 12px; --radius-2xl: 16px; --radius-pill: 999px;
+  --row-min: 48px; --header-h: 56px;
+  --glyph: 16px;          /* a state's shape beside its word */
+  --bar-day-h: 22px;      /* the 90-day bar */
+  --group-col: 26rem;     /* a group's column on wide screens */
+}
+@media (min-width: 600px) { :root { --page-margin: 24px; } }
+@media (min-width: 1600px) { :root { --page-margin: 32px; } }
+@media (max-width: 599px) { :root { --row-min: 56px; } }
+@media (pointer: coarse) { :root { --control-h-s: 44px; --control-h-xs: 44px; } }
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--ground); color: var(--ink); font: var(--t-body); font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+h1, h2, h3, p { margin: 0; }
+a { color: var(--accent); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); border-radius: var(--radius-s); }
+[hidden] { display: none !important; }
+code, pre, kbd { font-family: var(--font-mono); font-size: 0.875em; }
+.skip { position: absolute; left: var(--s-2); top: -100px; z-index: 9; background: var(--ink); color: var(--ground);
+  padding: var(--s-2) var(--s-3); border-radius: var(--radius); font: var(--t-label); }
+.skip:focus { top: var(--s-2); }
+.vh { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.page { width: 100%; max-width: var(--page-max); margin: 0 auto; padding: 0 var(--page-margin); }
+.measure { max-width: var(--measure); }
+.eyebrow { font: var(--t-meta); text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-muted); }
+.muted { color: var(--ink-muted); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* header: the operator's sign on the left, the live pill and the theme on the right */
+.top { border-bottom: 1px solid var(--line); background: var(--ground); }
+.top .page { min-height: var(--header-h); display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding-block: var(--s-2); }
+.sign { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; margin-right: auto; min-width: 0; }
+.sign .op-logo { width: 32px; height: 32px; border-radius: var(--radius-m); display: grid; place-items: center; flex: none;
+  background: var(--ink); color: var(--ground); font: 600 1rem/1 var(--font-display); }
+.sign b { font: 500 1.15rem/1.2 var(--font-display); white-space: nowrap; }
+.sign span { font: var(--t-secondary); color: var(--ink-muted); white-space: nowrap; }
+.sign.hora span.name { font: var(--t-brand); color: var(--ink); transform: translateY(0.16em); }
+.top nav { display: flex; gap: var(--s-1); }
+@media (max-width: 599px) {
+  .top .page { row-gap: 0; }
+  .top nav { order: 3; width: 100%; margin-inline: calc(-1 * var(--s-3)); }
+  .top .pill { display: none; }
+  .theme-btn .lbl { display: none; }
+  .theme-btn { padding: 0; width: var(--control-h-xs); }
+}
+.navlink { display: inline-flex; align-items: center; min-height: var(--control-h-s); padding: 0 var(--s-3); border-radius: var(--radius-pill);
+  color: var(--ink-muted); text-decoration: none; font: var(--t-label); }
+.navlink:hover { background: var(--ground-raised); color: var(--ink); }
+.navlink[aria-current='page'] { background: var(--accent-wash); color: var(--accent); }
+
+.pill { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-h-xs); padding: 0 var(--s-3);
+  border: 1px solid var(--line); border-radius: var(--radius-pill); font: var(--t-meta); color: var(--ink-muted); background: var(--surface); white-space: nowrap; }
+.pill .g { width: 10px; height: 10px; color: var(--st-up); }
+
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2); min-height: var(--control-h-s);
+  padding: 0 var(--s-4); border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font: var(--t-label); text-decoration: none; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--ink-muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--accent); padding: 0 var(--s-2); }
+.btn svg { width: 16px; height: 16px; flex: none; }
+.theme-btn { min-height: var(--control-h-xs); padding: 0 var(--s-3); font: var(--t-meta); border-radius: var(--radius-pill); }
+
+/* the state glyphs: shape + colour, always followed by the word */
+.g { width: var(--glyph); height: var(--glyph); flex: none; display: inline-block; vertical-align: -0.18em; }
+.g.up { color: var(--st-up); } .g.degraded { color: var(--st-degraded); } .g.down { color: var(--st-down); }
+.g.maint { color: var(--st-maint); } .g.none { color: var(--st-none); } .g.info { color: var(--accent); }
+.word { font: var(--t-label); }
+.g + .word { margin-left: 4px; }
+.word.up { color: var(--st-up-text); } .word.degraded { color: var(--st-degraded-text); } .word.down { color: var(--st-down-text); }
+.word.maint, .word.none { color: var(--ink-muted); }
+
+.chips { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.chip { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-h-xs); padding: 0 var(--s-3);
+  border-radius: var(--radius-pill); background: var(--ground-raised); color: var(--ink); font: var(--t-label); text-decoration: none; white-space: nowrap; }
+.chip.degraded { background: var(--wash-degraded); color: var(--st-degraded-text); }
+.chip.down { background: var(--wash-down); color: var(--st-down-text); }
+.chip.up { background: var(--wash-up); color: var(--st-up-text); }
+.chip.up .g { color: var(--accent); } /* 3.0:1 is too close on the wash: the up glyph goes text-grade there */
+.chip.maint { background: var(--wash-maint); color: var(--ink-muted); }
+a.chip:hover { box-shadow: inset 0 0 0 1px currentColor; }
+
+/* the hero: the owl calls the hour, the sentence says it, the line under it proves it */
+.hero { display: grid; grid-template-columns: auto 1fr; gap: var(--s-4) var(--s-5); align-items: center;
+  padding: var(--s-5); border-radius: var(--radius-2xl); background: var(--wash-up); margin-top: var(--s-5); }
+.hero.degraded { background: var(--wash-degraded); }
+.hero.down { background: var(--wash-down); }
+.hero.maint { background: var(--wash-maint); }
+.hero > .owl { width: clamp(64px, 12vw, 96px); height: auto; }
+.hero h1 { font: var(--t-hero); letter-spacing: -0.01em; text-wrap: balance; }
+.hero .sub { margin-top: var(--s-2); color: var(--ink-muted); font: var(--t-body); }
+.hero .sub b { color: var(--ink); font-weight: 500; }
+.hero .chips { grid-column: 1 / -1; }
+@media (min-width: 840px) { .hero { padding: var(--s-6); } .hero .chips { grid-column: 2; } }
+@media (max-width: 420px) { .hero { grid-template-columns: 1fr; } }
+
+.section { margin-top: var(--s-7); }
+.section-head { display: flex; align-items: baseline; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-3); }
+.section-head h2 { font: var(--t-group); }
+.section-head .fact { margin-left: auto; font: var(--t-secondary); color: var(--ink-muted); }
+
+/* callouts: announcements and maintenance; an icon and a word, a wash, never a coloured edge alone */
+.callout { display: grid; grid-template-columns: auto 1fr; gap: var(--s-1) var(--s-3); padding: var(--s-4); border-radius: var(--radius-l);
+  background: var(--accent-wash); margin-top: var(--s-4); }
+.callout > .g { margin-top: 3px; }
+.callout .k { font: var(--t-label); }
+.callout p { color: var(--ink); max-width: var(--measure); }
+.callout .when { font: var(--t-meta); color: var(--ink-muted); margin-top: var(--s-1); }
+.callout.warning { background: var(--wash-degraded); } .callout.warning .k { color: var(--st-degraded-text); }
+.callout.critical { background: var(--wash-down); } .callout.critical .k { color: var(--st-down-text); }
+.callout.maint { background: var(--wash-maint); }
+.callout.info .k { color: var(--accent); }
+
+/* groups as framed lists of rows (Maison); columns of whole groups on wide screens */
+.groups { display: grid; gap: var(--s-6) var(--s-5); grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--group-col)), 1fr)); align-items: start; }
+.group-head { display: flex; align-items: baseline; gap: var(--s-3); margin-bottom: var(--s-3); }
+.group-head h3 { font: var(--t-group); }
+.group-head .fact { margin-left: auto; font: var(--t-secondary); color: var(--ink-muted); white-space: nowrap; }
+.list { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); overflow: hidden; }
+.list > li + li { border-top: 1px solid var(--line); }
+.row { display: grid; grid-template-columns: var(--glyph) 1fr auto; column-gap: var(--s-3); row-gap: var(--s-2); align-items: center;
+  padding: var(--s-3) var(--s-4); min-height: var(--row-min); color: inherit; text-decoration: none; }
+a.row:hover { background: color-mix(in srgb, var(--ground-raised) 55%, transparent); }
+.row .name { font: var(--t-label); font-size: 0.9375rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .name small { font: var(--t-secondary); color: var(--ink-muted); margin-left: 6px; }
+.row .state { font: var(--t-secondary); text-align: right; white-space: nowrap; }
+.row .state .word { font: var(--t-label); }
+.row .bar { grid-column: 1 / -1; }
+.row .why { grid-column: 2 / -1; font: var(--t-secondary); color: var(--ink-muted); margin-top: -4px; }
+.row.down .why, .row.degraded .why { color: var(--ink); }
+.bar-legend { display: flex; justify-content: space-between; font: var(--t-tiny); color: var(--ink-muted); padding: var(--s-2) var(--s-4) var(--s-3); }
+.bar-legend .d30 { display: none; }
+@media (max-width: 599px) { .bar-legend .d90 { display: none; } .bar-legend .d30 { display: inline; } }
+
+/* the 90-day bar: ONE svg, a handful of run-length rects, gaps drawn by a mask (not 90 nodes) */
+.bar { display: block; overflow: hidden; height: calc(var(--bar-day-h) + 7px); }
+.bar svg { display: block; width: 100%; height: 100%; overflow: visible;
+  -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 calc(100% / 90 - 1.5px), transparent calc(100% / 90 - 1.5px) calc(100% / 90));
+  mask-image: repeating-linear-gradient(90deg, #000 0 calc(100% / 90 - 1.5px), transparent calc(100% / 90 - 1.5px) calc(100% / 90)); }
+.bar .u { fill: var(--st-up); } .bar .d { fill: var(--st-degraded); } .bar .x { fill: var(--st-down); }
+.bar .m { fill: var(--st-maint); } .bar .n { fill: var(--st-none); }
+/* a phone shows the last 30 days: the same svg, three times wider, its right end in view */
+@media (max-width: 599px) { .bar svg { width: 300%; margin-left: -200%; } }
+
+/* the legend: what each shape means, once per page */
+.legend { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); font: var(--t-secondary); color: var(--ink-muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend svg.cell { width: 8px; height: 24px; overflow: visible; }
+
+/* the footer: Hora signs the page, quietly */
+.foot { margin-top: var(--s-7); border-top: 1px solid var(--line); }
+.foot .page { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3) var(--s-5); padding-block: var(--s-5) var(--s-6); font: var(--t-secondary); color: var(--ink-muted); }
+.foot nav { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-4); }
+.foot a { color: var(--ink-muted); }
+.foot a:hover { color: var(--ink); }
+.watched { display: inline-flex; align-items: center; gap: var(--s-2); margin-left: auto; color: var(--ink-muted); text-decoration: none; }
+.watched img { width: 22px; height: 22px; border-radius: 5px; }
+.watched .b { font: 400 1.05rem/1 var(--font-brand); color: var(--ink); transform: translateY(0.14em); }
+
+/* the owl: pose = state; it moves only when the state changes, once */
+.owl { overflow: visible; flex: none; }
+.owl .ln { fill: var(--owl-fill); stroke: var(--owl-line); stroke-width: 1.5; stroke-linejoin: round; }
+.owl .tx { fill: none; stroke: var(--owl-line); stroke-width: 1; stroke-linecap: round; opacity: 0.2; }
+.owl .ft { fill: var(--owl-line); }
+.owl .ey path, .owl .ey line { fill: none; stroke: var(--owl-line); stroke-width: 1.8; stroke-linecap: round; }
+.owl .ey ellipse { fill: var(--owl-line); }
+.owl .ey .glint { fill: var(--owl-fill); }
+.owl .bk { fill: var(--accent); stroke: var(--accent); stroke-width: 0.9; stroke-linejoin: round; }
+.owl .ck { fill: var(--blush); opacity: 0.85; transition: opacity 0.3s; }
+.owl .tl, .owl .tr { transform-box: fill-box; transition: transform 0.35s cubic-bezier(.3,1.4,.6,1); }
+.owl .tl { transform-origin: 100% 100%; } .owl .tr { transform-origin: 0% 100%; }
+.owl .ey > g { transition: opacity 0.18s; opacity: 0; }
+.owl .bd { fill: var(--ground); }
+.owl .badge > g { opacity: 0; }
+.owl .badge { opacity: 0; transition: opacity 0.2s; }
+/* up: asleep, the tufts at rest. Nothing is wrong, so nothing moves. */
+.owl[data-state='up'] .shut-l, .owl[data-state='up'] .shut-r { opacity: 1; }
+.owl[data-state='up'] .tl { transform: rotate(-5deg); } .owl[data-state='up'] .tr { transform: rotate(5deg); }
+/* degraded: one eye open, one tuft up: half an eye on it */
+.owl[data-state='degraded'] .shut-l, .owl[data-state='degraded'] .open-r { opacity: 1; }
+.owl[data-state='degraded'] .tl { transform: rotate(-5deg); } .owl[data-state='degraded'] .tr { transform: rotate(-6deg); }
+/* down: awake, both eyes open, tufts up. Attentive, never alarmed, never sad. */
+.owl[data-state='down'] .open-l, .owl[data-state='down'] .open-r { opacity: 1; }
+.owl[data-state='down'] .tl { transform: rotate(3deg); } .owl[data-state='down'] .tr { transform: rotate(-3deg); }
+/* maintenance: a planned nap, tufts folded */
+.owl[data-state='maint'] .shut-l, .owl[data-state='maint'] .shut-r { opacity: 1; }
+.owl[data-state='maint'] .tl { transform: rotate(-22deg); } .owl[data-state='maint'] .tr { transform: rotate(22deg); }
+/* no data: it cannot see yet; two dashes, no blush */
+.owl[data-state='none'] .dash { opacity: 1; }
+.owl[data-state='none'] .ck { opacity: 0; }
+.owl[data-state='degraded'] .badge, .owl[data-state='down'] .badge, .owl[data-state='maint'] .badge, .owl[data-state='none'] .badge { opacity: 1; }
+.owl[data-state='degraded'] .b-degraded, .owl[data-state='down'] .b-down, .owl[data-state='maint'] .b-maint, .owl[data-state='none'] .b-none { opacity: 1; }
+.owl .b-degraded { color: var(--st-degraded); } .owl .b-down { color: var(--st-down); } .owl .b-maint { color: var(--st-maint); } .owl .b-none { color: var(--st-none); }
+/* waking: one perk of the tufts when the state turns to down, then still */
+.owl.woke .tl, .owl.woke .tr { animation: perk 0.6s ease-out 1; }
+@keyframes perk { 40% { translate: 0 -1.2px; } }
+@media (prefers-reduced-motion: reduce) {
+  .owl *, .owl { transition: none !important; animation: none !important; }
+}
+
+/* theme switch (the only script on a page, with the owl demo) */
+.theme-btn .lbl::before { content: 'Auto'; }
+:root[data-theme='light'] .theme-btn .lbl::before { content: 'Light'; }
+:root[data-theme='dark'] .theme-btn .lbl::before { content: 'Dark'; }
+
+.mock-note { margin: var(--s-6) 0 0; padding: var(--s-3) var(--s-4); border: 1px dashed var(--line); border-radius: var(--radius-l);
+  font: var(--t-secondary); color: var(--ink-muted); max-width: var(--measure-wide); }
+.mock-note b { color: var(--ink); font-weight: 500; }
+
+.owls { overflow: visible; display: block; max-width: 100%; height: auto; }
+.owls .branch { fill: none; stroke: var(--ink-muted); stroke-width: 1.4; stroke-linecap: round; opacity: 0.5; }
+.owls .olab { font: 500 5.2px var(--font-text); fill: var(--ink-muted); }
+/* where it is watched from: places, each with its own shape and word */
+.vantages { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: center; }
+.vchip { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 10px; border-radius: var(--radius-pill); background: var(--ground-raised); font: var(--t-meta); color: var(--ink); white-space: nowrap; }
+.vchip .g { width: 12px; height: 12px; }
+.vchip small { font: var(--t-meta); color: var(--ink-muted); }
+.vchip.down { background: var(--wash-down); } .vchip.degraded { background: var(--wash-degraded); }
+.watchers { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); font: var(--t-secondary); color: var(--ink-muted); }
+.watchers .owls { width: 92px; }
+
+.g-top .page { gap: var(--s-3); }
+.g-top .sub { font: var(--t-secondary); color: var(--ink-muted); }
+.top nav.toc { display: none; gap: var(--s-1); }
+@media (min-width: 1100px) { .top nav.toc { display: flex; } }
+.intro { display: grid; gap: var(--s-6); align-items: center; padding-block: var(--s-7) var(--s-6); grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 960px) { .intro { grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr); } }
+.intro .eyebrow { color: var(--accent); }
+.intro h1 { font: 500 clamp(2.4rem, 1.6rem + 3.4vw, 4.4rem)/1.04 var(--font-display); letter-spacing: -0.02em; margin-top: var(--s-3); text-wrap: balance; }
+.intro h1 em { font-style: normal; font-family: var(--font-brand); font-weight: 400; color: var(--accent); font-size: 0.92em; }
+.intro .lead { font: 400 1.1875rem/1.65 var(--font-text); color: var(--ink-muted); margin-top: var(--s-4); max-width: 38rem; }
+.intro .lead b { color: var(--ink); font-weight: 500; }
+.demo { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-2xl); padding: var(--s-5); display: grid; gap: var(--s-4); justify-items: center; box-shadow: var(--shadow); }
+.demo .stagebox { width: 100%; display: grid; place-items: center; padding: var(--s-5) 0 var(--s-3); border-radius: var(--radius-xl); background: var(--wash-up); transition: background 0.3s; position: relative; overflow: hidden; }
+.demo[data-s='degraded'] .stagebox { background: var(--wash-degraded); }
+.demo[data-s='down'] .stagebox { background: var(--wash-down); }
+.demo[data-s='maint'] .stagebox, .demo[data-s='none'] .stagebox { background: var(--wash-maint); }
+.demo .stagebox > .owl { width: min(56%, 200px); height: auto; }
+.demo .said { font: 500 1.5rem/1.2 var(--font-display); text-align: center; margin-top: var(--s-3); min-height: 1.8rem; }
+.demo .pose { font: var(--t-secondary); color: var(--ink-muted); text-align: center; max-width: 24rem; min-height: 2.5rem; }
+.seg5 { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--s-1); padding: 4px; border-radius: var(--radius-pill); background: var(--ground-raised); }
+.seg5 button { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-h-s); padding: 0 var(--s-3); border-radius: var(--radius-pill); font: var(--t-meta); color: var(--ink-muted); cursor: pointer; }
+.seg5 button[aria-pressed='true'] { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.seg5 button:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.seg5 .g { width: 12px; height: 12px; }
+.chap { margin-top: var(--s-7); padding-top: var(--s-6); border-top: 1px solid var(--line); }
+.chap > header { display: grid; gap: var(--s-2); margin-bottom: var(--s-5); max-width: 46rem; }
+.chap > header .n { font: 600 0.875rem/1 var(--font-display); color: var(--accent); letter-spacing: 0.04em; }
+.chap > header h2 { font: 500 clamp(1.75rem, 1.4rem + 1.4vw, 2.5rem)/1.12 var(--font-display); letter-spacing: -0.01em; }
+.chap > header p { color: var(--ink-muted); font-size: 1.0625rem; line-height: 1.6; }
+.cols { display: grid; gap: var(--s-4); grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); }
+.box { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); padding: var(--s-5); }
+.box h3 { font: var(--t-group); margin-bottom: var(--s-2); }
+.box p, .box li { color: var(--ink-muted); font: var(--t-secondary); font-size: 0.9375rem; line-height: 1.55; }
+.box ul { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; }
+.box b { color: var(--ink); font-weight: 500; }
+.quote { font: 400 clamp(1.25rem, 1.1rem + 0.7vw, 1.6rem)/1.45 var(--font-display); max-width: 44rem; border-left: 3px solid var(--accent-soft); padding-left: var(--s-5); margin: var(--s-5) 0; }
+.quote small { display: block; font: var(--t-secondary); color: var(--ink-muted); margin-top: var(--s-2); }
+.states { display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fill, minmax(min(100%, 13rem), 1fr)); }
+.st { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); padding: var(--s-4); display: grid; gap: var(--s-2); justify-items: start; }
+.st .ow { width: 100%; display: grid; place-items: center; border-radius: var(--radius-l); padding: var(--s-3); }
+.st .ow .owl { width: 96px; height: 96px; }
+.st h3 { display: flex; gap: 6px; align-items: center; font: var(--t-label); font-size: 1rem; }
+.st p { font: var(--t-secondary); color: var(--ink-muted); }
+.st code { font-size: 0.75rem; color: var(--ink-muted); }
+.rules { display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); margin-top: var(--s-4); }
+.rule { padding: var(--s-4); border-radius: var(--radius-l); background: var(--accent-wash); }
+.rule b { display: block; font: var(--t-label); margin-bottom: 4px; }
+.rule p { font: var(--t-secondary); color: var(--ink); }
+.marks { display: grid; gap: var(--s-4); grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr)); }
+.markbox { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); overflow: hidden; display: grid; }
+.markbox .art { min-height: 200px; display: flex; gap: var(--s-4); align-items: end; justify-content: center; padding: var(--s-5); flex-wrap: wrap; }
+.markbox .art.petrol { background: var(--raw-petrol); }
+.markbox .art.ground { background: var(--ground); }
+.markbox .art.check { background-color: var(--ground-raised); background-image: linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%), linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%); background-size: 16px 16px; background-position: 0 0, 8px 8px; }
+.markbox .cap { padding: var(--s-3) var(--s-4); border-top: 1px solid var(--line); font: var(--t-secondary); color: var(--ink-muted); display: flex; justify-content: space-between; gap: var(--s-3); flex-wrap: wrap; }
+.markbox .cap b { color: var(--ink); font-weight: 500; }
+.markbox .sz { display: grid; gap: 6px; justify-items: center; font: var(--t-tiny); color: var(--ink-muted); }
+.markbox .art.petrol .sz { color: var(--raw-cloud); }
+.swatches { display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fill, minmax(min(100%, 11.5rem), 1fr)); }
+.sw { border-radius: var(--radius-xl); overflow: hidden; border: 1px solid var(--line); background: var(--surface); }
+.sw .chipc { height: 76px; display: grid; grid-template-columns: 1fr 1fr; }
+.sw .chipc span { display: grid; place-items: end start; padding: 6px 8px; font: var(--t-tiny); }
+.sw .meta { padding: var(--s-3); display: grid; gap: 2px; font: var(--t-secondary); }
+.sw .meta b { font: var(--t-label); }
+.sw .meta code { font-size: 0.75rem; color: var(--ink-muted); }
+.ctable { width: 100%; border-collapse: collapse; font: var(--t-secondary); min-width: 44rem; }
+.ctable th, .ctable td { padding: var(--s-2) var(--s-3); border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+.ctable thead th { font: var(--t-meta); color: var(--ink-muted); }
+.ctable td.r { text-align: right; font-variant-numeric: tabular-nums; }
+.ctable td .dot { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 6px; border: 1px solid var(--line); }
+.tw { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); padding: var(--s-2) var(--s-4); }
+.ss { width: 100%; border-collapse: collapse; font: var(--t-secondary); min-width: 40rem; }
+.ss th, .ss td { padding: var(--s-3); border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+.ss thead th { font: var(--t-meta); color: var(--ink-muted); }
+.ss td svg.cell { width: 10px; height: 28px; overflow: visible; }
+.ss .owl { width: 40px; height: 40px; }
+.type { display: grid; gap: var(--s-4); grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); }
+.spec { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); padding: var(--s-5); display: grid; gap: var(--s-2); }
+.spec .big { line-height: 1.1; color: var(--ink); }
+.spec .who { font: var(--t-meta); color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.spec p { font: var(--t-secondary); color: var(--ink-muted); }
+.scale-row { display: flex; flex-wrap: wrap; gap: var(--s-4); align-items: end; margin-top: var(--s-4); }
+.scale-row div { display: grid; gap: 6px; justify-items: center; font: var(--t-tiny); color: var(--ink-muted); }
+.scale-row i { display: block; background: var(--accent-soft); }
+.voice { display: grid; gap: var(--s-3); }
+.vrow { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s-2); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl); padding: var(--s-4) var(--s-5); }
+@media (min-width: 840px) { .vrow { grid-template-columns: 10rem 1fr 1fr 1fr; align-items: baseline; gap: var(--s-4); } }
+.vrow .k { font: var(--t-meta); color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.vrow .no { color: var(--ink-muted); text-decoration: line-through; text-decoration-color: var(--st-down); }
+.vrow .yes { font: 500 1.0625rem/1.4 var(--font-display); }
+.vrow .fr { font: 500 1.0625rem/1.4 var(--font-display); color: var(--ink-muted); }
+.taglines { display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); }
+.tag { border-radius: var(--radius-xl); padding: var(--s-5); background: var(--raw-petrol); color: var(--raw-cloud); display: grid; gap: var(--s-2); }
+.tag b { font: 500 1.5rem/1.25 var(--font-display); }
+.tag span { opacity: 0.85; font: var(--t-secondary); }
+.mocks { display: grid; gap: var(--s-5); grid-template-columns: repeat(auto-fill, minmax(min(100%, 24rem), 1fr)); }
+.mock { display: grid; gap: var(--s-3); align-content: start; color: inherit; text-decoration: none; }
+.mock .frames { position: relative; border-radius: var(--radius-xl); overflow: hidden; border: 1px solid var(--line); background: var(--ground-raised); aspect-ratio: 16 / 10; box-shadow: var(--shadow); transition: transform 0.2s, box-shadow 0.2s; }
+.mock .frames img.d { width: 100%; height: 100%; object-fit: cover; object-position: top left; display: block; }
+.mock .frames img.p { position: absolute; right: 12px; bottom: -40px; width: 24%; border-radius: 10px; box-shadow: 0 0 0 4px var(--raw-ink), var(--shadow-pop); transition: bottom 0.2s; }
+.mock:hover .frames { transform: translateY(-2px); box-shadow: var(--shadow-pop); }
+.mock:hover .frames img.p { bottom: -24px; }
+.mock:focus-visible { outline: none; }
+.mock:focus-visible .frames { outline: var(--focus-ring); outline-offset: 3px; }
+.mock h3 { font: var(--t-group); display: flex; gap: var(--s-2); align-items: baseline; flex-wrap: wrap; }
+.mock h3 code { font: 400 0.75rem/1 var(--font-mono); color: var(--ink-muted); }
+.mock p { font: var(--t-secondary); color: var(--ink-muted); font-size: 0.9375rem; line-height: 1.55; }
+.mock .new { font: var(--t-tiny); color: var(--accent); background: var(--accent-wash); border-radius: 999px; padding: 2px 8px; }
+.niche { display: grid; gap: var(--s-4); grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); }
+.niche .box h3 { display: flex; gap: 8px; align-items: center; }
+.files { columns: 2 18rem; column-gap: var(--s-6); font: var(--t-secondary); }
+.files li { break-inside: avoid; padding: 6px 0; border-bottom: 1px solid var(--line); list-style: none; display: flex; gap: var(--s-2); justify-content: space-between; }
+.files ul { margin: 0; padding: 0; }
+.files span { color: var(--ink-muted); }
+.og { width: 100%; height: auto; border-radius: var(--radius-xl); display: block; box-shadow: var(--shadow); }
+.mesh-row { display: grid; gap: var(--s-4); grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); margin-top: var(--s-4); }
+.mesh-row .box { display: grid; gap: var(--s-3); justify-items: center; text-align: center; }
+.mesh-row .owls { width: 100%; max-width: 240px; }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+<symbol id="g-up" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="currentColor"/></symbol>
+<symbol id="g-degraded" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 2.6a5.4 5.4 0 0 0 0 10.8z" fill="currentColor"/></symbol>
+<symbol id="g-down" viewBox="0 0 16 16"><path d="M8 1.2 14.8 8 8 14.8 1.2 8Z" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/><path d="M8 4.9v3.6" stroke="var(--surface, #fff)" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="11" r=".95" fill="var(--surface, #fff)"/></symbol>
+<symbol id="g-maint" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 4.9V8l2.2 1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="g-none" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.4 2.0"/></symbol>
+<symbol id="g-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.4" fill="currentColor"/><path d="M8 7.3v4" stroke="var(--surface, #fff)" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="4.9" r=".95" fill="var(--surface, #fff)"/></symbol>
+<symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+<symbol id="i-feed" viewBox="0 0 16 16"><path d="M3 3.5a9.5 9.5 0 0 1 9.5 9.5M3 7.5A5.5 5.5 0 0 1 8.5 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="3.8" cy="12.2" r="1.3" fill="currentColor"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="i-copy" viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 2.8H4.4a1.6 1.6 0 0 0-1.6 1.6v6.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+<symbol id="i-pin" viewBox="0 0 16 16"><path d="M8 14.5s4.8-4.3 4.8-8a4.8 4.8 0 0 0-9.6 0c0 3.7 4.8 8 4.8 8Z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="6.5" r="1.6" fill="currentColor"/></symbol>
+<symbol id="i-lock" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.2 7V5a2.8 2.8 0 0 1 5.6 0v2" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+<symbol id="i-print" viewBox="0 0 16 16"><path d="M4.5 6V2.5h7V6M4.5 11.5H3a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v3.5a1 1 0 0 1-1 1h-1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><rect x="4.5" y="9.5" width="7" height="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+<symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m10.5 10.5 3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+<symbol id="i-gh" viewBox="0 0 16 16"><path fill="currentColor" d="M8 .6a7.4 7.4 0 0 0-2.34 14.42c.37.07.5-.16.5-.36v-1.3c-2.06.45-2.5-.87-2.5-.87-.33-.86-.82-1.09-.82-1.09-.67-.46.05-.45.05-.45.74.05 1.13.76 1.13.76.66 1.13 1.73.8 2.15.61.07-.48.26-.8.47-.99-1.64-.19-3.37-.82-3.37-3.65 0-.8.29-1.46.76-1.98-.08-.19-.33-.94.07-1.95 0 0 .62-.2 2.03.76a7 7 0 0 1 3.7 0c1.41-.96 2.03-.76 2.03-.76.4 1.01.15 1.76.07 1.95.47.52.76 1.18.76 1.98 0 2.84-1.73 3.46-3.38 3.64.27.23.5.68.5 1.37v2.03c0 .2.13.43.5.36A7.4 7.4 0 0 0 8 .6Z"/></symbol>
+</svg>
+<header class="top g-top"><div class="page">
+<a class="sign hora" href="#top"><img src="assets/mark.svg" alt="" width="32" height="32" style="border-radius:8px"><span class="name">Hora</span></a>
+<span class="sub">Brand and mockups · October 2026</span>
+<nav class="toc" aria-label="Chapters"><a class="navlink" href="#concept">Concept</a><a class="navlink" href="#owl">The owl</a><a class="navlink" href="#mark">Mark</a><a class="navlink" href="#colour">Colour</a><a class="navlink" href="#states">States</a><a class="navlink" href="#type">Type</a><a class="navlink" href="#voice">Voice</a><a class="navlink" href="#mockups">Mockups</a></nav>
+<button class="btn theme-btn" type="button" aria-label="Theme: auto. Change theme"><svg class="" aria-hidden="true" width="16" height="16"><use href="#i-sun"/></svg><span class="lbl" aria-hidden="true"></span></button></div></header>
+<main id="main" class="page">
+<span id="top"></span>
+<section class="intro" aria-labelledby="h">
+  <div>
+    <p class="eyebrow">The third sibling, after Ariane and Maison</p>
+    <h1 id="h"><em>Hora</em>, the night watch.</h1>
+    <p class="lead">Night watchmen used to walk the town and call the hours: <b>"Ten o'clock, and all is well."</b> Hora is that watcher, as a little owl. It dozes while everything runs, opens one eye when something is slow, and wakes only for a real outage. <b>Flapping never wakes it, so it never wakes you.</b></p>
+    <div class="chips" style="margin-top:var(--s-5)"><a class="btn primary" href="#mockups">See the mockups <svg class="" aria-hidden="true" width="16" height="16"><use href="#i-arrow"/></svg></a><a class="btn" href="brand.md">Read brand.md</a></div>
+  </div>
+  <div class="demo" data-s="up">
+    <div class="stagebox"><svg class="owl " data-state="up" viewBox="6 6 40 40" width="200" height="200" role="img" aria-label="Hora's owl: Everything is running." ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg></div>
+    <p class="said" aria-live="polite">Everything is running.</p>
+    <p class="pose">Asleep. Nothing is wrong, so nothing moves.</p>
+    <div class="seg5" role="group" aria-label="Try a state">
+      <button type="button" data-s="up" aria-pressed="true"><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg>Up</button>
+      <button type="button" data-s="degraded" aria-pressed="false"><svg class="g degraded" aria-hidden="true"><use href="#g-degraded"/></svg>Slow</button>
+      <button type="button" data-s="down" aria-pressed="false"><svg class="g down" aria-hidden="true"><use href="#g-down"/></svg>Down</button>
+      <button type="button" data-s="maint" aria-pressed="false"><svg class="g maint" aria-hidden="true"><use href="#g-maint"/></svg>Maintenance</button>
+      <button type="button" data-s="none" aria-pressed="false"><svg class="g none" aria-hidden="true"><use href="#g-none"/></svg>No data</button>
+    </div>
+  </div>
+</section>
+
+<section class="chap" id="concept" aria-labelledby="c1"><header><span class="n">01</span><h2 id="c1">Who keeps watch</h2>
+<p>Hora means "hours". The Horai kept the hours and the gates of Olympus. The night watch kept the hours of a town and said, every hour, that all was well. A status page does exactly that.</p></header>
+<div class="cols">
+  <div class="box"><h3>Why an owl</h3><p>The animal of the night watch, and Athena's little owl (<i>Athene noctua</i>), Greek like the Horai. Its tufts are Maison's ears, its round body is Ariane's ball of yarn: <b>the same family drawing.</b></p></div>
+  <div class="box"><h3>Why asleep</h3><p>The promise is "flapping never wakes you up". An owl dozing in front of an all-green page says it better than any badge: <b>calm is the normal state</b>, and a closed eye is earned by retries, quorum and root-cause grouping.</p></div>
+  <div class="box"><h3>Why several</h3><p>One owl can mishear. Hora nodes watch from several places and ask each other before they hoot: an outage is called when two agree. <b>A group of owls is a parliament</b>; this one votes before it wakes you.</p></div>
+  <div class="box"><h3>Why cute, and still serious</h3><p>The owl lives in one place per page, at the size of a sentence's companion. Everything else is plain: Fraunces, Cal Sans, tabular numbers, words for every state. <b>Cute in the corner, precise in the table.</b></p></div>
+</div>
+<p class="quote">"Saturday 14:32. Everything is running."<small>The hero of every status page is the watchman's call: the hour, then the state, in one sentence.</small></p>
+<div class="mesh-row">
+  <div class="box"><svg class="owls " viewBox="0 0 146 62" width="320" role="img" aria-label="Three owls asleep: all is well everywhere"><path class="branch" d="M0 45.5C44 43.5 102 47.5 146 44.5" /><svg class="owl" data-state="up" x="4" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="up" x="50" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="up" x="96" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><text class="olab" x="27" y="58" text-anchor="middle">Paris</text><text class="olab" x="73" y="58" text-anchor="middle">Frankfurt</text><text class="olab" x="119" y="58" text-anchor="middle">Montréal</text></svg><p><b>All well.</b> Three places, three owls asleep.</p></div>
+  <div class="box"><svg class="owls " viewBox="0 0 146 62" width="320" role="img" aria-label="Only Paris awake: a local problem"><path class="branch" d="M0 45.5C44 43.5 102 47.5 146 44.5" /><svg class="owl" data-state="down" x="4" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="up" x="50" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="up" x="96" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><text class="olab" x="27" y="58" text-anchor="middle">Paris</text><text class="olab" x="73" y="58" text-anchor="middle">Frankfurt</text><text class="olab" x="119" y="58" text-anchor="middle">Montréal</text></svg><p><b>Local only.</b> Paris wakes, asks, the others see it up: a notice, not a page.</p></div>
+  <div class="box"><svg class="owls " viewBox="0 0 146 62" width="320" role="img" aria-label="All three awake: a real outage"><path class="branch" d="M0 45.5C44 43.5 102 47.5 146 44.5" /><svg class="owl" data-state="down" x="4" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="down" x="50" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><svg class="owl" data-state="down" x="96" y="0" width="46" height="46" viewBox="6 6 40 40"><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg><text class="olab" x="27" y="58" text-anchor="middle">Paris</text><text class="olab" x="73" y="58" text-anchor="middle">Frankfurt</text><text class="olab" x="119" y="58" text-anchor="middle">Montréal</text></svg><p><b>Confirmed.</b> All three see it down: one alert, with the cause.</p></div>
+</div>
+</section>
+
+<section class="chap" id="owl" aria-labelledby="c2"><header><span class="n">02</span><h2 id="c2">The owl and its states</h2>
+<p>The pose is the overall state of the page. The badge repeats the state's shape, and the words beside it always say the same thing.</p></header>
+<div class="states"><div class="st"><div class="ow" style="background:var(--wash-up)"><svg class="owl " data-state="up" viewBox="6 6 40 40" width="96" height="96" aria-hidden="true" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg></div><h3><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg>All up</h3><p>Asleep. Nothing is wrong, so nothing moves.</p><code>assets/owl-up.svg</code></div><div class="st"><div class="ow" style="background:var(--wash-degraded)"><svg class="owl " data-state="degraded" viewBox="6 6 40 40" width="96" height="96" aria-hidden="true" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg></div><h3><svg class="g degraded" aria-hidden="true"><use href="#g-degraded"/></svg>Slow</h3><p>One eye open, one tuft up: an eye on it. Badge: half disc.</p><code>assets/owl-degraded.svg</code></div><div class="st"><div class="ow" style="background:var(--wash-down)"><svg class="owl " data-state="down" viewBox="6 6 40 40" width="96" height="96" aria-hidden="true" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg></div><h3><svg class="g down" aria-hidden="true"><use href="#g-down"/></svg>Down</h3><p>Awake, tufts up. Attentive, never alarmed. Badge: diamond.</p><code>assets/owl-down.svg</code></div><div class="st"><div class="ow" style="background:var(--wash-maint)"><svg class="owl " data-state="maint" viewBox="6 6 40 40" width="96" height="96" aria-hidden="true" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg></div><h3><svg class="g maint" aria-hidden="true"><use href="#g-maint"/></svg>Maintenance</h3><p>A planned nap, tufts folded. Badge: clock.</p><code>assets/owl-maint.svg</code></div><div class="st"><div class="ow" style="background:var(--wash-maint)"><svg class="owl " data-state="none" viewBox="6 6 40 40" width="96" height="96" aria-hidden="true" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg></div><h3><svg class="g none" aria-hidden="true"><use href="#g-none"/></svg>No data</h3><p>Two dashes, no blush; it cannot see yet. Badge: dashed ring.</p><code>assets/owl-none.svg</code></div></div>
+<div class="rules">
+  <div class="rule"><b>Never sad, never scared</b><p>No mouth, no tears, no frown. Down is "awake and attentive". It shows what Hora is doing, not how it feels about you.</p></div>
+  <div class="rule"><b>Moves only in answer</b><p>No idle loop. It moves once when the state changes (the tufts perk on waking), then stays still.</p></div>
+  <div class="rule"><b>Never alone</b><p>Always next to the sentence that says the state, with the state's shape in its badge. The owl is decoration for anyone who can't see it.</p></div>
+  <div class="rule"><b>Reduced motion</b><p>Poses stay; transitions and the perk are dropped. A screen reader hears the sentence, not "owl".</p></div>
+  <div class="rule"><b>One per page</b><p>In the hero, the door or an empty state. Never in rows, tables or charts. The mesh view is the one place where several perch together.</p></div>
+  <div class="rule"><b>Can be turned off</b><p>Operators who want a neutral page set <code>[page] mascot = false</code> (proposal): the sentence and the shapes carry everything anyway.</p></div>
+</div>
+</section>
+
+<section class="chap" id="mark" aria-labelledby="c3"><header><span class="n">03</span><h2 id="c3">Mark, wordmark, favicon</h2>
+<p>The family recipe, unchanged: a petrol tile (48, radius 11), a cream character, a sleepy face without a mouth, the blush. The faint rings are the owl's facial disc, at the same 0.28 opacity as Ariane's yarn.</p></header>
+<div class="marks">
+  <div class="markbox"><div class="art ground"><div class="sz"><img src="assets/favicon.svg" width="16" height="16" alt="Favicon at 16 px">16</div><div class="sz"><img src="assets/favicon.svg" width="32" height="32" alt="">32</div><div class="sz"><img src="assets/mark.svg" width="48" height="48" alt="">48</div><div class="sz"><img src="assets/mark.svg" width="96" height="96" alt="Hora mark">96</div></div><div class="cap"><b>Mark and favicon</b><span>favicon.svg is redrawn on a 16 grid: no texture, no beak</span></div></div>
+  <div class="markbox"><div class="art ground" style="align-items:center"><img src="assets/wordmark.svg" height="72" alt="Hora wordmark"></div><div class="cap"><b>The sign</b><span>Mark, then the name in Borel Display, set as outlines</span></div></div>
+  <div class="markbox"><div class="art petrol" style="align-items:center"><img src="assets/wordmark-on-petrol.svg" height="84" alt="Hora wordmark on petrol"></div><div class="cap"><b>On the brand's petrol</b><span>The door, the social card: a faint cloud ring around the tile</span></div></div>
+  <div class="markbox"><div class="art check" style="align-items:center"><img src="assets/mark-maskable.svg" width="96" height="96" alt="Maskable icon" style="border-radius:50%"><img src="assets/mark-maskable.svg" width="96" height="96" alt="" style="border-radius:22px"></div><div class="cap"><b>Maskable</b><span>Full-bleed petrol, owl in the 80 % safe zone</span></div></div>
+  <div class="markbox"><div class="art ground" style="align-items:center"><img src="assets/family/ariane.svg" width="64" height="64" alt="Ariane"><img src="assets/family/maison.svg" width="64" height="64" alt="Maison"><img src="assets/mark.svg" width="64" height="64" alt="Hora"></div><div class="cap"><b>The family</b><span>Ariane, Maison, Hora (copies of the siblings' marks)</span></div></div>
+  <div class="markbox"><div class="art ground" style="align-items:center"><img src="assets/variant-b-clock.svg" width="88" height="88" alt="Variant B: alarm clock"><img src="assets/variant-c-lantern.svg" width="88" height="88" alt="Variant C: lantern"></div><div class="cap"><b>Explored, not chosen</b><span>B: the alarm clock that does not ring. C: the watchman's lantern.</span></div></div>
+</div>
+<img class="og" src="assets/og-card.svg" alt="Social card: the owl asleep inside twelve hour ticks, Hora in Borel, 'Hora keeps the hours, so you can sleep.'" style="margin-top:var(--s-5)" width="1200" height="630">
+</section>
+
+<section class="chap" id="colour" aria-labelledby="c4"><header><span class="n">04</span><h2 id="c4">Colour: the family's, plus five states</h2>
+<p>Ground, ink and one hue (petrol) in two steps and a wash, exactly as in synthe.se, Ariane and Maison. Up is petrol, not green: Hora looks like nobody else's status page, and the brand colour means "all is well".</p></header>
+<div class="swatches">
+  <div class="sw"><div class="chipc"><span style="background:#F2F0EA;color:#1B222C">light</span><span style="background:#151A21;color:#EAE7E0">dark</span></div><div class="meta"><b>Cloud</b><code>--ground</code><code>#F2F0EA · #151A21</code><span class="muted">page ground</span></div></div>
+  <div class="sw"><div class="chipc"><span style="background:#FAF9F5;color:#1B222C">light</span><span style="background:#1A2029;color:#EAE7E0">dark</span></div><div class="meta"><b>Surface</b><code>--surface</code><code>#FAF9F5 · #1A2029</code><span class="muted">cards, rows</span></div></div>
+  <div class="sw"><div class="chipc"><span style="background:#E7E4DB;color:#1B222C">light</span><span style="background:#1E2530;color:#EAE7E0">dark</span></div><div class="meta"><b>Raised</b><code>--ground-raised</code><code>#E7E4DB · #1E2530</code><span class="muted">chips, code, tracks</span></div></div>
+  <div class="sw"><div class="chipc"><span style="background:#D6D2C6;color:#1B222C">light</span><span style="background:#2E3744;color:#EAE7E0">dark</span></div><div class="meta"><b>Line</b><code>--line</code><code>#D6D2C6 · #2E3744</code><span class="muted">hairlines only</span></div></div>
+  <div class="sw"><div class="chipc"><span style="background:#1B222C;color:#F2F0EA">light</span><span style="background:#EAE7E0;color:#151A21">dark</span></div><div class="meta"><b>Ink</b><code>--ink</code><code>#1B222C · #EAE7E0</code><span class="muted">14.05:1 · 14.15:1</span></div></div>
+  <div class="sw"><div class="chipc"><span style="background:#525A66;color:#F2F0EA">light</span><span style="background:#A8AEB8;color:#151A21">dark</span></div><div class="meta"><b>Ink muted</b><code>--ink-muted</code><code>#525A66 · #A8AEB8</code><span class="muted">6.12:1 · 7.83:1</span></div></div>
+  <div class="sw"><div class="chipc"><span style="background:#0E5E68;color:#F2F0EA">light</span><span style="background:#63C0CB;color:#151A21">dark</span></div><div class="meta"><b>Petrol</b><code>--accent</code><code>#0E5E68 · #63C0CB</code><span class="muted">6.54:1 · 8.27:1</span></div></div>
+  <div class="sw"><div class="chipc"><span style="background:#4E8A92;color:#F2F0EA">light</span><span style="background:#3E7A84;color:#151A21">dark</span></div><div class="meta"><b>Petrol soft</b><code>--accent-soft</code><code>#4E8A92 · #3E7A84</code><span class="muted">3.43:1 · 3.60:1, graphics</span></div></div>
+  <div class="sw"><div class="chipc"><span style="background:#D8E4E2;color:#1B222C">light</span><span style="background:#1D2A31;color:#EAE7E0">dark</span></div><div class="meta"><b>Wash</b><code>--accent-wash</code><code>#D8E4E2 · #1D2A31</code><span class="muted">ink on it 12.29:1 · 11.91:1</span></div></div>
+  <div class="sw"><div class="chipc"><span style="background:#B4633F;color:#F2F0EA">light</span><span style="background:#D89372;color:#151A21">dark</span></div><div class="meta"><b>Amber</b><code>--st-degraded</code><code>#B4633F · #D89372</code><span class="muted">text grade #8F4B22: 5.76:1</span></div></div>
+  <div class="sw"><div class="chipc"><span style="background:#A5372A;color:#F2F0EA">light</span><span style="background:#E07A63;color:#151A21">dark</span></div><div class="meta"><b>Brick</b><code>--st-down</code><code>#A5372A · #E07A63</code><span class="muted">5.80:1 · 5.94:1</span></div></div>
+  <div class="sw"><div class="chipc"><span style="background:#87837A;color:#F2F0EA">light</span><span style="background:#687180;color:#151A21">dark</span></div><div class="meta"><b>Stone</b><code>--st-none</code><code>#87837A · #687180</code><span class="muted">no data, 3.32:1 · 3.55:1</span></div></div>
+</div>
+<div class="tw" style="margin-top:var(--s-5)"><table class="ctable">
+<caption class="vh">Contrast ratios, WCAG 2.x</caption>
+<thead><tr><th scope="col">Pair</th><th scope="col">Light</th><th scope="col" class="r">on ground</th><th scope="col" class="r">on surface</th><th scope="col">Dark</th><th scope="col" class="r">on ground</th><th scope="col" class="r">on surface</th><th scope="col">Use</th></tr></thead>
+<tbody>
+<tr><td>Ink</td><td><span class="dot" style="background:#1B222C"></span>#1B222C</td><td class="r">14.05</td><td class="r">15.20</td><td><span class="dot" style="background:#EAE7E0"></span>#EAE7E0</td><td class="r">14.15</td><td class="r">13.26</td><td>AAA body</td></tr>
+<tr><td>Ink muted</td><td><span class="dot" style="background:#525A66"></span>#525A66</td><td class="r">6.12</td><td class="r">6.62</td><td><span class="dot" style="background:#A8AEB8"></span>#A8AEB8</td><td class="r">7.83</td><td class="r">7.34</td><td>AA secondary</td></tr>
+<tr><td>Petrol (up, text)</td><td><span class="dot" style="background:#0E5E68"></span>#0E5E68</td><td class="r">6.54</td><td class="r">7.07</td><td><span class="dot" style="background:#63C0CB"></span>#63C0CB</td><td class="r">8.27</td><td class="r">7.74</td><td>AA text, links</td></tr>
+<tr><td>Petrol soft (up, graphic)</td><td><span class="dot" style="background:#4E8A92"></span>#4E8A92</td><td class="r">3.43</td><td class="r">3.71</td><td><span class="dot" style="background:#3E7A84"></span>#3E7A84</td><td class="r">3.60</td><td class="r">3.37</td><td>bars, glyphs (3:1)</td></tr>
+<tr><td>Amber (slow, graphic)</td><td><span class="dot" style="background:#B4633F"></span>#B4633F</td><td class="r">3.84</td><td class="r">4.16</td><td><span class="dot" style="background:#D89372"></span>#D89372</td><td class="r">6.94</td><td class="r">6.50</td><td>bars, glyphs</td></tr>
+<tr><td>Amber (slow, text)</td><td><span class="dot" style="background:#8F4B22"></span>#8F4B22</td><td class="r">5.76</td><td class="r">6.23</td><td><span class="dot" style="background:#D89372"></span>#D89372</td><td class="r">6.94</td><td class="r">6.50</td><td>AA text</td></tr>
+<tr><td>Brick (down)</td><td><span class="dot" style="background:#A5372A"></span>#A5372A</td><td class="r">5.80</td><td class="r">6.27</td><td><span class="dot" style="background:#E07A63"></span>#E07A63</td><td class="r">5.94</td><td class="r">5.56</td><td>AA text and graphics</td></tr>
+<tr><td>Maintenance</td><td><span class="dot" style="background:#525A66"></span>#525A66</td><td class="r">6.12</td><td class="r">6.62</td><td><span class="dot" style="background:#A8AEB8"></span>#A8AEB8</td><td class="r">7.83</td><td class="r">7.34</td><td>= ink muted</td></tr>
+<tr><td>No data</td><td><span class="dot" style="background:#87837A"></span>#87837A</td><td class="r">3.32</td><td class="r">3.59</td><td><span class="dot" style="background:#687180"></span>#687180</td><td class="r">3.55</td><td class="r">3.32</td><td>graphics only</td></tr>
+</tbody></table></div>
+<p class="mock-note"><b>On the washes.</b> Every state word keeps 5:1 or more on its own wash (petrol on wash-up 5.72, amber text on wash-slow 5.42, brick on wash-down 5.26; dark side 5.18 or more). The up glyph would only reach 3.0:1 on the up wash, so there it takes the text-grade petrol. Full table in brand.md.</p>
+</section>
+
+<section class="chap" id="states" aria-labelledby="c5"><header><span class="n">05</span><h2 id="c5">State: colour + shape + word</h2>
+<p>Take the colour away and every state is still readable. Print the page in grey, use it colour-blind, read it aloud: same answer.</p></header>
+<div class="tw"><table class="ss"><thead><tr><th scope="col">State</th><th scope="col">Shape</th><th scope="col">Day in the 90-day bar</th><th scope="col">Word (EN · FR)</th><th scope="col">Owl</th><th scope="col">Hero wash</th></tr></thead>
+<tbody>
+<tr><td>Up</td><td><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg> filled disc</td><td><svg class="cell" viewBox="0 0 4 29" aria-hidden="true"><rect style="fill:var(--st-up)" y="0" width="4" height="22"/></svg> full height</td><td>Up · Opérationnel</td><td><svg class="owl " data-state="up" viewBox="6 6 40 40" width="40" height="40" aria-hidden="true" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg></td><td>petrol wash</td></tr>
+<tr><td>Degraded</td><td><svg class="g degraded" aria-hidden="true"><use href="#g-degraded"/></svg> half disc</td><td><svg class="cell" viewBox="0 0 4 29" aria-hidden="true"><rect style="fill:var(--st-degraded)" y="7" width="4" height="15"/></svg> shorter</td><td>Slow · Lent</td><td><svg class="owl " data-state="degraded" viewBox="6 6 40 40" width="40" height="40" aria-hidden="true" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg></td><td>amber wash</td></tr>
+<tr><td>Down</td><td><svg class="g down" aria-hidden="true"><use href="#g-down"/></svg> diamond, !</td><td><svg class="cell" viewBox="0 0 4 29" aria-hidden="true"><rect style="fill:var(--st-down)" y="0" width="4" height="29"/></svg> drops below the line</td><td>Down · En panne</td><td><svg class="owl " data-state="down" viewBox="6 6 40 40" width="40" height="40" aria-hidden="true" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg></td><td>brick wash</td></tr>
+<tr><td>Maintenance</td><td><svg class="g maint" aria-hidden="true"><use href="#g-maint"/></svg> clock</td><td><svg class="cell" viewBox="0 0 4 29" aria-hidden="true"><rect style="fill:var(--st-maint)" y="11" width="4" height="11"/></svg> half</td><td>Maintenance · Maintenance</td><td><svg class="owl " data-state="maint" viewBox="6 6 40 40" width="40" height="40" aria-hidden="true" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg></td><td>raised</td></tr>
+<tr><td>No data</td><td><svg class="g none" aria-hidden="true"><use href="#g-none"/></svg> dashed ring</td><td><svg class="cell" viewBox="0 0 4 29" aria-hidden="true"><rect style="fill:var(--st-none)" y="18" width="4" height="4"/></svg> a stub</td><td>No data · Pas de données</td><td><svg class="owl " data-state="none" viewBox="6 6 40 40" width="40" height="40" aria-hidden="true" ><path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>
+<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>
+<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>
+<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>
+<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>
+<g class="ey">
+<g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>
+<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>
+<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>
+<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g>
+</g>
+<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>
+<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>
+<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>
+<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>
+<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>
+<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>
+<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g>
+</g></svg></td><td>raised</td></tr>
+</tbody></table></div>
+</section>
+
+<section class="chap" id="type" aria-labelledby="c6"><header><span class="n">06</span><h2 id="c6">Type, spacing, corners</h2>
+<p>The family's locked pairing, self-hosted: Fraunces for what you read first, Cal Sans 2 for everything else, Borel Display for the name only. Spacing on 4, one radius scale, 44 px targets.</p></header>
+<div class="type">
+  <div class="spec"><span class="who">Display · Fraunces Variable 500</span><span class="big" style="font:500 2.6rem/1.1 var(--font-display)">Everything is running.</span><p>Page titles, the hero sentence, group names, big numbers (lining, tabular).</p></div>
+  <div class="spec"><span class="who">Text · Cal Sans 2 VF 400 to 600</span><span class="big" style="font:400 1.25rem/1.45 var(--font-text)">Since 14:02 UTC (38 min). The other 12 services are up. 99.97 %</span><p>Body 16/24, secondary 14/20, meta 13/16, never under 12 px. Tabular figures everywhere.</p></div>
+  <div class="spec"><span class="who">Name only · Borel Display</span><span class="big" style="font:400 3rem/1.3 var(--font-brand)">Hora</span><p>Beside the mark, nowhere else. Nudged down 0.16 em for its tall loops.</p></div>
+  <div class="spec"><span class="who">Code · JetBrains Mono</span><span class="big" style="font:400 0.95rem/1.6 var(--font-mono)">hora probe api --confirm<br>up from 3/3 vantage points</span><p>Config, CLI, captured answers.</p></div>
+</div>
+<div class="scale-row" aria-label="Spacing scale">
+  <div><i style="width:4px;height:4px"></i>4</div><div><i style="width:8px;height:8px"></i>8</div><div><i style="width:12px;height:12px"></i>12</div><div><i style="width:16px;height:16px"></i>16</div><div><i style="width:24px;height:24px"></i>24</div><div><i style="width:32px;height:32px"></i>32</div><div><i style="width:48px;height:48px"></i>48</div>
+  <span style="width:var(--s-5)"></span>
+  <div><i style="width:40px;height:40px;border-radius:2px"></i>2</div><div><i style="width:40px;height:40px;border-radius:6px"></i>6</div><div><i style="width:40px;height:40px;border-radius:8px"></i>8</div><div><i style="width:40px;height:40px;border-radius:10px"></i>10</div><div><i style="width:40px;height:40px;border-radius:12px"></i>12</div><div><i style="width:40px;height:40px;border-radius:16px"></i>16</div><div><i style="width:40px;height:40px;border-radius:999px"></i>pill</div>
+</div>
+</section>
+
+<section class="chap" id="voice" aria-labelledby="c7"><header><span class="n">07</span><h2 id="c7">Voice</h2>
+<p>Calm, plain, factual, a little warm. The state in words, the time, what you will notice. Jargon goes behind "For operators".</p></header>
+<div class="voice">
+  <div class="vrow"><span class="k">All up</span><span class="no">All Systems Operational</span><span class="yes">Everything is running.</span><span class="fr">Tout fonctionne.</span></div>
+  <div class="vrow"><span class="k">Outage</span><span class="no">Major outage detected on payments-api</span><span class="yes">Card payments are down since 14:02.</span><span class="fr">Les paiements par carte sont en panne depuis 14 h 02.</span></div>
+  <div class="vrow"><span class="k">Slow</span><span class="no">Degraded performance (p95 &gt; SLO)</span><span class="yes">Invoice emails arrive about 4 minutes late.</span><span class="fr">Les e-mails de facture arrivent avec 4 minutes de retard.</span></div>
+  <div class="vrow"><span class="k">Local only</span><span class="no">Vantage disagreement: 1/3</span><span class="yes">Our Paris checkpoint can't reach it; the others can. Not an outage.</span><span class="fr">Notre point de contrôle de Paris ne le joint plus ; les autres oui. Pas une panne.</span></div>
+  <div class="vrow"><span class="k">Budget</span><span class="no">Error budget: 31m remaining (72 %)</span><span class="yes">31 min of allowed downtime left this month.</span><span class="fr">Encore 31 min d'interruption possible ce mois-ci.</span></div>
+  <div class="vrow"><span class="k">Empty</span><span class="no">No monitors configured.</span><span class="yes">Nothing to watch yet.</span><span class="fr">Rien à surveiller pour l'instant.</span></div>
+</div>
+<div class="taglines" style="margin-top:var(--s-5)">
+  <div class="tag"><b>Hora keeps the hours, so you can sleep.</b><span>Main line. Docs, README, the door.</span></div>
+  <div class="tag"><b>Hora veille, vous dormez.</b><span>French main line.</span></div>
+  <div class="tag"><b>It only wakes you for real.</b><span>Feature line, for alerting. FR: « Elle ne vous réveille que pour de vrai. »</span></div>
+</div>
+</section>
+
+<section class="chap" id="niche" aria-labelledby="c8"><header><span class="n">08</span><h2 id="c8">What the niche taught us</h2>
+<p>From Atlassian Statuspage, Instatus, Better Stack, OpenStatus, Hyperping, incident.io, Uptime Kuma, Gatus and Cachet (from knowledge of these products; not re-checked online for this pass).</p></header>
+<div class="niche">
+  <div class="box"><h3><svg class="g up" aria-hidden="true"><use href="#g-up"/></svg>Kept</h3><ul><li><b>One headline sentence</b> for the whole page (Statuspage, incident.io).</li><li><b>90-day bars</b> with uptime % per service, 30 days on phones (Statuspage).</li><li><b>Incident updates</b> as a short, dated, newest-first timeline (Statuspage, Instatus).</li><li><b>Follow updates</b> near the headline (feed, JSON, badges).</li><li><b>"What you'll notice"</b> impact wording (incident.io, Better Stack).</li></ul></div>
+  <div class="box"><h3><svg class="g down" aria-hidden="true"><use href="#g-down"/></svg>Avoided</h3><ul><li><b>Colour-only state</b>: green/red dots, bars with no shape (most of them).</li><li><b>Operator jargon</b> on public pages: p95, SLO, "heartbeating" (Uptime Kuma, Gatus).</li><li><b>Noisy grids</b>: hundreds of equal cards, every bar drawn as 90 nodes.</li><li><b>Hover-only details</b> that touch and keyboard users never reach.</li><li><b>Full-page refresh</b> that loses scroll and focus.</li></ul></div>
+  <div class="box"><h3><svg class="g info" aria-hidden="true"><use href="#g-info"/></svg>Hora's own</h3><ul><li><b>Only what is wrong, up front</b>: "Needs attention", then groups folded with a summary.</li><li><b>Shapes in the bar</b>: shorter is slow, a drop below the line is down.</li><li><b>Checked from several places</b>, and a calm public sentence when they disagree.</li><li><b>The watchman's call</b>: the hour, then the state.</li><li><b>A face, with rules</b>: the owl never carries the state alone.</li></ul></div>
+</div>
+</section>
+
+<section class="chap" id="mockups" aria-labelledby="c9"><header><span class="n">09</span><h2 id="c9">Mockups</h2>
+<p>Plain HTML and CSS, light and dark (system, or the toggle), checked at 320, 360, 1440 and 2560 px without sideways scroll. Thumbnails: desktop light, phone dark.</p></header>
+<div class="mocks">
+  <a class="mock" href="status-ok.html"><div class="frames"><img class="d" src="shots/thumb-status-ok-desk.jpg" alt=""><img class="p" src="shots/thumb-status-ok-phone.jpg" alt=""></div><h3>All up <code>status-ok.html</code></h3><p>The hero is the watchman's call. Groups as columns of framed rows; Rows or Cards (cards add per-place response times and a one-path chart). "Who keeps watch" closes the page.</p></a>
+  <a class="mock" href="status-incident.html"><div class="frames"><img class="d" src="shots/thumb-status-incident-desk.jpg" alt=""><img class="p" src="shots/thumb-status-incident-phone.jpg" alt=""></div><h3>Outage, slow service, announcement <code>status-incident.html</code></h3><p>Brick wash, awake owl, one sentence with the time. "Right now" puts the story first: what you'll notice, confirmed from 3 places, dated updates.</p></a>
+  <a class="mock" href="status-local.html"><div class="frames"><img class="d" src="shots/thumb-status-local-desk.jpg" alt=""><img class="p" src="shots/thumb-status-local-phone.jpg" alt=""></div><h3>Local only: not an outage <code>status-local.html</code><span class="new">added for the mesh</span></h3><p>Paris can't reach the API, Frankfurt and Montréal can. Visitors read "Everything is running" and one calm note; operators open "Why nobody was woken".</p></a>
+  <a class="mock" href="status-maintenance.html"><div class="frames"><img class="d" src="shots/thumb-status-maintenance-desk.jpg" alt=""><img class="p" src="shots/thumb-status-maintenance-phone.jpg" alt=""></div><h3>Planned maintenance <code>status-maintenance.html</code></h3><p>The owl naps, the clock shape marks what is paused, a progress bar shows the window. The next maintenance is announced below.</p></a>
+  <a class="mock" href="status-scale.html"><div class="frames"><img class="d" src="shots/thumb-status-scale-desk.jpg" alt=""><img class="p" src="shots/thumb-status-scale-phone.jpg" alt=""></div><h3>712 monitors <code>status-scale.html</code></h3><p>What is wrong first, then 7 groups folded with counts and one group bar each. The open group lists 24 compact rows, paged. 16 KB of content.</p></a>
+  <a class="mock" href="monitor.html"><div class="frames"><img class="d" src="shots/thumb-monitor-desk.jpg" alt=""><img class="p" src="shots/thumb-monitor-phone.jpg" alt=""></div><h3>A monitor's history <code>monitor.html</code></h3><p>Plain-language tiles, a chart with HTML labels, 90 focusable days with tooltips that work on touch, an hour-by-hour week, each place's view; percentiles behind "For operators".</p></a>
+  <a class="mock" href="incident.html"><div class="frames"><img class="d" src="shots/thumb-incident-desk.jpg" alt=""><img class="p" src="shots/thumb-incident-phone.jpg" alt=""></div><h3>Post-mortem <code>incident.html</code></h3><p>Title says what happened and how long. Timeline with state shapes, "seen down from 3 of 3", the captured answer, Copy as Markdown.</p></a>
+  <a class="mock" href="watchers.html"><div class="frames"><img class="d" src="shots/thumb-watchers-desk.jpg" alt=""><img class="p" src="shots/thumb-watchers-phone.jpg" alt=""></div><h3>Watchers (operators) <code>watchers.html</code><span class="new">added for the mesh</span></h3><p>The mesh: heartbeats, a link split reported as a split, confirmations over 30 days, each service from each place.</p></a>
+  <a class="mock" href="report.html"><div class="frames"><img class="d" src="shots/thumb-report-desk.jpg" alt=""><img class="p" src="shots/thumb-report-phone.jpg" alt=""></div><h3>Monthly report <code>report.html</code></h3><p>An A4 sheet on screen, print-ready: five headline numbers, a table per group with the target met or missed in words, how it is counted.</p></a>
+  <a class="mock" href="empty.html"><div class="frames"><img class="d" src="shots/thumb-empty-desk.jpg" alt=""><img class="p" src="shots/thumb-empty-phone.jpg" alt=""></div><h3>Empty and private <code>empty.html</code></h3><p>First run with a copyable snippet, the door for a private page (Maison's AuthShell), a monitor waiting for its first check.</p></a>
+  <a class="mock" href="docs-page.html"><div class="frames"><img class="d" src="shots/thumb-docs-page-desk.jpg" alt=""><img class="p" src="shots/thumb-docs-page-phone.jpg" alt=""></div><h3>A docs page <code>docs-page.html</code><span class="new">added for the docs</span></h3><p>Every docs page wears the brand: wordmark, search, sidebar with the current page, "On this page", Fraunces headings, TOML and shell blocks with Copy, a table, and the four asides on the state system. Real content: the peers guide.</p></a>
+  <a class="mock" href="docs-home.html"><div class="frames"><img class="d" src="shots/thumb-docs-home-desk.jpg" alt=""><img class="p" src="shots/thumb-docs-home-phone.jpg" alt=""></div><h3>Docs and README <code>docs-home.html</code></h3><p>Starlight splash re-themed: tagline, install, the owl on the dial of hours, the blip-to-alert flow, a comparison table and the README header.</p></a>
+</div>
+</section>
+
+<section class="chap" id="files" aria-labelledby="c10"><header><span class="n">10</span><h2 id="c10">Files</h2></header>
+<div class="files"><ul>
+<li><a href="brand.md">brand.md</a><span>the brand book</span></li>
+<li><a href="assets/mark.svg">assets/mark.svg</a><span>48 tile</span></li>
+<li><a href="assets/mark-maskable.svg">assets/mark-maskable.svg</a><span>PWA</span></li>
+<li><a href="assets/favicon.svg">assets/favicon.svg</a><span>16 grid</span></li>
+<li><a href="assets/wordmark.svg">assets/wordmark.svg</a><span>auto dark</span></li>
+<li><a href="assets/wordmark-on-petrol.svg">assets/wordmark-on-petrol.svg</a><span>on petrol</span></li>
+<li><a href="assets/og-card.svg">assets/og-card.svg</a><span>1200 × 630</span></li>
+<li><a href="assets/owl-up.svg">assets/owl-up.svg</a><span>+ degraded, down, maint, none</span></li>
+<li><a href="assets/variant-b-clock.svg">assets/variant-b-clock.svg</a><span>alternative</span></li>
+<li><a href="assets/variant-c-lantern.svg">assets/variant-c-lantern.svg</a><span>alternative</span></li>
+<li><a href="fonts/">fonts/</a><span>Fraunces, Cal Sans 2, Borel, JetBrains Mono (OFL)</span></li>
+<li><a href="brand.md">brand.md §12</a><span>Starlight custom.css, ready to paste</span></li>
+<li><a href="src/">src/</a><span>the Python that writes every page</span></li>
+</ul></div>
+</section>
+</main>
+<footer class="foot"><div class="page"><span>Hora brand, proposal for Léonard · built on the synthe.se tokens shared with Ariane and Maison</span><span class="watched"><img src="assets/mark.svg" alt="" width="22" height="22"><span class="b">Hora</span></span></div></footer>
+<script>
+/* the owl demo: pressing a state changes the pose, the sentence and the wash together (never the owl alone) */
+(function () {
+  var demo = document.querySelector('.demo'); if (!demo) return;
+  var owl = demo.querySelector('.stagebox > .owl'), said = demo.querySelector('.said'), pose = demo.querySelector('.pose');
+  var T = {
+    up: ['Everything is running.', 'Asleep. Nothing is wrong, so nothing moves.'],
+    degraded: ['Invoice emails are slow.', 'One eye open, one tuft up: it keeps an eye on it.'],
+    down: ['Card payments are down.', 'Awake, both eyes open, tufts up. Attentive, never alarmed, never sad. One perk of the tufts on waking, then still.'],
+    maint: ['Planned maintenance, until 23:30.', 'A planned nap: eyes shut, tufts folded.'],
+    none: ['Nothing to watch yet.', 'Two dashes, no blush: it cannot see yet.']
+  };
+  demo.addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-s]'); if (!b) return;
+    var s = b.dataset.s;
+    demo.querySelectorAll('button[data-s]').forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+    owl.classList.remove('woke'); owl.dataset.state = s; demo.dataset.s = s;
+    if (s === 'down') { void owl.getBoundingClientRect(); owl.classList.add('woke'); }
+    owl.setAttribute('aria-label', "Hora's owl: " + T[s][0]);
+    said.textContent = T[s][0]; pose.textContent = T[s][1];
+  });
+})();
+</script>
+</body>
+</html>
