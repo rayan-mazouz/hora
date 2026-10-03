@@ -32,7 +32,8 @@ const MAX_MESSAGE_CHARS: usize = 300;
 /// How long the output is still read once the plugin has exited. A
 /// descendant it left running (daemonized, or backgrounded with `&`) may hold
 /// the pipes open forever; the plugin's verdict is its exit code, so the probe
-/// stops waiting for the pipes to close shortly after it.
+/// stops waiting for the pipes to close shortly after it - and kills the
+/// process group still holding them.
 const OUTPUT_GRACE: Duration = Duration::from_millis(500);
 
 /// Run one exec probe. Every failure mode - missing or non-executable file,
@@ -102,11 +103,16 @@ pub(crate) async fn run(exec_dir: &Path, monitor: &Monitor, spec: &ExecSpec) -> 
         .await;
         let latency = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
         if matches!(waited, Ok(Ok(_))) {
-            // Reaped: from here on the group id may be reused.
-            group.disarm();
-            if !drained {
-                let _ = tokio::time::timeout(OUTPUT_GRACE, readers).await;
+            // Pipes still open after the grace: a descendant the plugin left
+            // behind holds them (`sleep 30 &`), and would outlive every probe
+            // - one more per interval. Kill the group. Its id is still the
+            // group's: a pid stays reserved while it names a process group
+            // with members, and one of them holds our pipes. A descendant
+            // that closed them (a proper daemon) is left alone.
+            if !drained && tokio::time::timeout(OUTPUT_GRACE, readers).await.is_err() {
+                group.kill();
             }
+            group.disarm();
         }
         (waited, latency)
     };
@@ -430,11 +436,35 @@ mod tests {
         let fixture = Fixture::new("linger");
         // Exits 0 at once, but a backgrounded child inherits stdout and keeps
         // the pipe open far past the timeout.
-        fixture.script("daemonizes", "sleep 30 &\necho \"all good\"\nexit 0");
+        let pidfile = fixture.dir.join("lingering.pid");
+        fixture.script(
+            "daemonizes",
+            &format!(
+                "sleep 30 &\necho $! > {}\necho \"all good\"\nexit 0",
+                pidfile.display()
+            ),
+        );
         let started = std::time::Instant::now();
         let outcome = run_exec(&fixture.dir, &exec_monitor(&["daemonizes"], 5)).await;
         assert!(outcome.is_up(), "{:?}", outcome.error);
         assert!(started.elapsed().as_secs() < 3, "waited for the pipe");
+
+        // And it does not outlive the probe: one leaked `sleep` per interval
+        // adds up.
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("pid written")
+            .trim()
+            .parse()
+            .expect("numeric pid");
+        let pid = nix::unistd::Pid::from_raw(pid);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while nix::sys::signal::kill(pid, None).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lingering descendant survived the probe"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     #[tokio::test]
