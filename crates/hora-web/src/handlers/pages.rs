@@ -1,7 +1,9 @@
 //! The server-rendered pages: status (whole and per group), history and its
 //! Atom feed, incidents, the timeline and the monthly report.
 
+use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
 
 use askama::Template;
 use axum::body::Bytes;
@@ -18,7 +20,7 @@ use crate::AppState;
 use crate::auth::Viewer;
 use crate::error::AppError;
 use crate::history;
-use crate::layout::Chrome;
+use crate::layout::{Chrome, Spliced};
 use crate::snapshot::Body;
 use crate::status_page;
 use crate::summary::{StatusTemplate, Summary};
@@ -176,8 +178,14 @@ pub(crate) async fn monitor_page(
         .cloned()
         .ok_or(AppError::NotFound("unknown monitor"))?;
 
-    let mut incidents = visible_incidents(&state.pool, &visibility, 200).await?;
-    incidents.retain(|incident| incident.monitor_id == id);
+    // Its own incidents over the bar's days (the figures and the days
+    // read them), from its index - not the newest of every monitor.
+    let since =
+        Utc::now().timestamp() - i64::from(config.page.history_days) * hora_core::SECONDS_PER_DAY;
+    let mut incidents = db::monitor_incidents(&state.pool, &id, since, 500).await?;
+    for incident in &mut incidents {
+        visibility.sanitize_incident(incident);
+    }
 
     // The heatmap, inlined so the stylesheet themes it; cached like the image.
     let heatmap = if monitor.kind == Kind::Push {
@@ -259,7 +267,7 @@ pub(crate) async fn report_page(
     viewer: Viewer,
     chrome: Chrome,
     Query(query): Query<ReportQuery>,
-) -> Result<Html<String>, AppError> {
+) -> Result<Response, AppError> {
     let config = &viewer.config;
     // Validate the month *before* building, so a malformed path is a clean
     // 400 and never reaches the database.
@@ -292,21 +300,70 @@ pub(crate) async fn report_page(
             hora_core::report::build(&state.pool, config, &month),
         )
         .await?;
-    let shown = |row: &hora_core::report::MonitorMonth| {
-        visibility.can_see(&row.id)
-            && query
-                .group
-                .as_deref()
-                .is_none_or(|group| row.group.as_deref() == Some(group))
+    // The rendered page depends on the report, the audience and the group
+    // only, so it is rendered once per built report (a minute) and shared;
+    // the viewer's own link parts are spliced in per request, as on the
+    // status pages (see `crate::layout`).
+    let key = (month.clone(), audience.clone(), query.group.clone());
+    let cached = report_pages(&state)
+        .get(&key)
+        .filter(|(built, _)| Arc::ptr_eq(built, &report))
+        .map(|(_, page)| Arc::clone(page));
+    let page = if let Some(page) = cached {
+        page
+    } else {
+        let html = render_report(
+            &report,
+            config,
+            &visibility,
+            &audience,
+            query.group.as_deref(),
+            &chrome,
+        )?;
+        let page = Arc::new(Spliced::new(html));
+        report_pages(&state).insert(key, (Arc::clone(&report), Arc::clone(&page)));
+        page
     };
-    let groups = crate::report::group_rows(&report, &config.maintenance, shown);
-    let kpis = crate::report::kpis(&report, shown);
+    Ok(Html(page.serve(&chrome.req)).into_response())
+}
+
+/// Rendered report pages, by month, audience and `?group=`, each with the
+/// built report it was rendered from: an entry is reused only while that
+/// report is the memo's current one. Bounded by the keys a viewer can
+/// reach: retained months, audiences, and groups with something to show
+/// (a group that 404s is never stored).
+pub(crate) type ReportPages = HashMap<
+    (String, Audience, Option<String>),
+    (Arc<hora_core::report::MonthReport>, Arc<Spliced>),
+>;
+
+fn report_pages(state: &AppState) -> std::sync::MutexGuard<'_, ReportPages> {
+    state
+        .report_pages
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Render a report page for an audience, its per-request parts left as holes.
+fn render_report(
+    report: &hora_core::report::MonthReport,
+    config: &hora_core::config::Config,
+    visibility: &Visibility<'_>,
+    audience: &Audience,
+    group: Option<&str>,
+    chrome: &Chrome,
+) -> Result<String, AppError> {
+    let shown = |row: &hora_core::report::MonitorMonth| {
+        visibility.can_see(&row.id) && group.is_none_or(|group| row.group.as_deref() == Some(group))
+    };
+    let groups = crate::report::group_rows(report, &config.maintenance, shown);
+    let kpis = crate::report::kpis(report, shown);
     // A scoped report with nothing visible answers like the group page: 404,
     // revealing neither the group's existence nor its members.
-    if groups.is_empty() && query.group.is_some() {
+    if groups.is_empty() && group.is_some() {
         return Err(AppError::NotFound("unknown group"));
     }
-    let title = match &query.group {
+    let title = match group {
         Some(group) => format!("{} · {group}", config.page.title),
         None => config.page.title.clone(),
     };
@@ -316,21 +373,16 @@ pub(crate) async fn report_page(
         .sum::<usize>();
     let lede = format!(
         "{}, times in UTC. {services} service{}.",
-        crate::report::span(&month),
+        crate::report::span(&report.month),
         if services == 1 { "" } else { "s" }
     );
-    let (prev, next) = crate::report::neighbours(&month);
-    let month_query = match (&query.group, chrome.req.q.is_empty()) {
-        (Some(group), true) => format!("?group={}", hora_core::fmt::percent_encode(group)),
-        (Some(group), false) => format!(
-            "{}&group={}",
-            chrome.req.q,
-            hora_core::fmt::percent_encode(group)
-        ),
-        (None, _) => chrome.req.q.clone(),
-    };
+    let (prev, next) = crate::report::neighbours(&report.month);
     let html = crate::report::ReportTemplate {
-        chrome: chrome.at("report").operator(viewer.is_operator()),
+        chrome: chrome
+            .clone()
+            .cached()
+            .at("report")
+            .operator(*audience == Audience::Operator),
         title,
         label: report.label.clone(),
         lede,
@@ -339,10 +391,12 @@ pub(crate) async fn report_page(
         groups,
         prev,
         next,
-        month_query,
+        group_query: group
+            .map(|group| format!("?group={}", hora_core::fmt::percent_encode(group)))
+            .unwrap_or_default(),
     }
     .render()?;
-    Ok(Html(html))
+    Ok(html)
 }
 
 /// The most rows a visibility-filtered list scans to fill its page: the

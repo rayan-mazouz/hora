@@ -506,6 +506,19 @@ async fn incident_marks_give_the_last_end_and_the_open_start() {
     assert_eq!(marks["down"], mark(Some(20), Some(50)));
     assert_eq!(marks["first"], mark(None, Some(70)));
     assert!(!marks.contains_key("never"));
+
+    // One monitor's own incidents, newest first, from `since`.
+    let starts: Vec<i64> = super::monitor_incidents(&pool, "calm", 20, 10)
+        .await
+        .unwrap()
+        .iter()
+        .map(|incident| incident.started_at)
+        .collect();
+    assert_eq!(starts, [30]);
+    assert_eq!(
+        super::monitor_incidents(&pool, "down", 0, 1).await.unwrap()[0].started_at,
+        50
+    );
 }
 
 #[tokio::test]

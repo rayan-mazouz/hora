@@ -131,6 +131,31 @@ pub async fn recent_incidents(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec
     .await
 }
 
+/// One monitor's incidents started since `since`, newest first, at most
+/// `limit` (its own page: an indexed read of its rows only).
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn monitor_incidents(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    since: i64,
+    limit: i64,
+) -> sqlx::Result<Vec<Incident>> {
+    sqlx::query_as::<_, Incident>(concat!(
+        "SELECT ",
+        incident_columns!(),
+        " FROM incidents WHERE monitor_id = ? AND started_at >= ? \
+         ORDER BY started_at DESC, id DESC LIMIT ?"
+    ))
+    .bind(monitor_id)
+    .bind(since)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
 /// Where a monitor stands in its incident log: when its last finished
 /// incident ended, and since when it is down if an incident is open.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
