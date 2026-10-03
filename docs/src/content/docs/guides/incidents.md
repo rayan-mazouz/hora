@@ -81,8 +81,8 @@ curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
   "https://status.example.com/api/event?title=deploy+api+v2.3"
 ```
 
-A marker shows as a dashed line on the latency charts and a line on
-`/history` (for you, not for visitors). When a monitor confirms down within
+A marker shows as a dashed line on each monitor's response-time chart
+(`/monitor/{id}`) and a line on `/history` (for you, not for visitors). When a monitor confirms down within
 the hour after a marker, the alert and the incident record say so: *"recent
 change: deploy api v2.3, 3m before"*.
 
@@ -111,16 +111,15 @@ only.
 
 ## Latency heatmaps
 
-Below the incidents, `/history` offers a smokeping-style **heatmap per
-monitor**: hours by days over the last 28 days, each cell coloured by how
+Each monitor's page (`/monitor/{id}`) shows a smokeping-style **heatmap**:
+hours by days over the last 28 days, each cell coloured by how
 slow that hour was *relative to the monitor's own median*. A weekly pattern -
 "slow every Monday at 9 a.m." - shows up as a horizontal stripe rhythm, with
 no threshold to tune and zero false-positive risk (it never alerts).
 
-Heatmaps are collapsed by default and load lazily from
-`GET /api/monitors/{id}/heatmap.svg`, with the same visibility rules as the
-latency endpoint. Each cell's tooltip carries the exact hour and average
-latency.
+The same heatmap is an image at `GET /api/monitors/{id}/heatmap.svg`, with
+the same visibility rules as the latency endpoint. Each cell's tooltip
+carries the exact hour and average latency.
 
 ## Retention
 

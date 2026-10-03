@@ -141,7 +141,8 @@ group_window_secs = 30   # 0 restores one-alert-per-monitor
 ## Maintenance windows
 
 Scheduled windows mute alerts for the affected monitors; checks keep being
-recorded and the card shows a "maintenance" badge:
+recorded, and the status page shows them in maintenance (and the day in
+their daily bar):
 
 ```toml
 [[maintenance]]

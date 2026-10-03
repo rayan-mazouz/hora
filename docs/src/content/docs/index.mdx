@@ -53,17 +53,20 @@ The whole path, with the settings behind each step, is in [Concepts](./concepts/
 
 ## The status page
 
-{/* TODO(ui): replace with fresh light and dark screenshots of the new status page
-    once it ships (brand/status-ok.html is the target). Export both at 1400 px wide
-    to public/screenshot-light.webp and public/screenshot-dark.webp, then swap the
-    single <img> below for one per theme (.light-only / .dark-only). */}
-
 <div class="hora-shot">
 	<img
-		src="/hora/screenshot.webp"
+		class="light-only"
+		src="/hora/screenshot-light.webp"
 		width="1400"
-		height="979"
-		alt="The Hora status page: monitors grouped in cards, each with its daily uptime bar, latency chart and p95 and p99."
+		height="980"
+		alt="The Hora status page in light: the hour and one sentence, Everything is running, the counts, then the services by group, each with its uptime and its daily bar."
+	/>
+	<img
+		class="dark-only"
+		src="/hora/screenshot-dark.webp"
+		width="1400"
+		height="980"
+		alt="The Hora status page in dark: the hour and one sentence, Everything is running, the counts, then the services by group, each with its uptime and its daily bar."
 	/>
 </div>
 

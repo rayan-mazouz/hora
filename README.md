@@ -14,8 +14,10 @@ something has really broken. A failed check is retried, an outage needs
 several failures in a row, peers in other places can confirm it, and ten
 services down behind one database send one alert: the cause.
 
-![The Hora status page](docs/public/screenshot.webp)
-<!-- TODO(ui): replace with a fresh screenshot of the new status page. -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/public/screenshot-dark.webp">
+  <img alt="The Hora status page: the hour and one sentence, then the services by group with their daily bars" src="docs/public/screenshot-light.webp">
+</picture>
 
 Named after the Horai, the Greek keepers of the hours. Its owl dozes while
 all is well.
