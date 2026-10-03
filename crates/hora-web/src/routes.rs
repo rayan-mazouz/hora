@@ -14,6 +14,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::auth::deprecate_query_token;
 use crate::handlers::{
     announce, announce_clear, favicon, font, group_page, healthz, heatmap_svg, history_atom,
     history_page, incident_page, latency_json, metrics_prometheus, openapi, page, peer_monitors,
@@ -41,16 +42,21 @@ pub fn router(state: AppState) -> Router {
     let refill = Duration::from_secs(config.server.rate_limit_refill_secs.max(1));
     let burst = config.server.rate_limit_burst.max(1);
 
-    let api = Router::new()
-        .route("/api/summary", get(summary_json))
-        .route("/api/monitors/{id}/latency", get(latency_json))
+    // Writes still take `?token=` but flag it as deprecated (see
+    // `deprecate_query_token`); the read-only views keep it first-class.
+    let writes = Router::new()
         .route("/api/monitors/{id}/alert", post(post_alert))
         .route("/api/push/{id}", post(push))
         .route("/api/silence", post(silence))
         .route("/api/announce", post(announce).delete(announce_clear))
         .route("/api/event", post(post_event))
+        .route_layer(middleware::from_fn(deprecate_query_token));
+    let api = Router::new()
+        .route("/api/summary", get(summary_json))
+        .route("/api/monitors/{id}/latency", get(latency_json))
         .route("/api/peer/probe", post(peer_probe))
-        .route("/api/peer/monitors", get(peer_monitors));
+        .route("/api/peer/monitors", get(peer_monitors))
+        .merge(writes);
     let api = rate_limited(api, refill, burst, key.clone());
 
     // Every other dynamic route reads the database (the report and heatmaps
@@ -462,6 +468,100 @@ mod tests {
             builder = builder.header("authorization", format!("Bearer {token}"));
         }
         builder.body(Body::from(body.to_owned())).expect("request")
+    }
+
+    fn deprecated(res: &axum::response::Response) -> bool {
+        let deprecation = res.headers().get("deprecation");
+        let link = res.headers().get(header::LINK);
+        match (deprecation, link) {
+            (Some(deprecation), Some(link)) => {
+                assert_eq!(deprecation, "true");
+                assert_eq!(
+                    link,
+                    "<https://uplg.github.io/hora/reference/api/#authentication>; \
+                     rel=\"deprecation\""
+                );
+                true
+            }
+            (None, None) => false,
+            other => panic!("Deprecation and Link go together: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn query_tokens_on_writes_are_flagged_deprecated() {
+        // Writes authenticated by ?token= still work, flagged as deprecated.
+        for (request, expected) in [
+            (push("/api/push/beat?token=s3cret"), StatusCode::OK),
+            (
+                push("/api/event?title=deploy&token=0123456789abcdef"),
+                StatusCode::OK,
+            ),
+            (
+                push("/api/silence?monitors=web&duration=10m&token=0123456789abcdef"),
+                StatusCode::OK,
+            ),
+            (
+                alert(
+                    "/api/monitors/web/alert?token=0123456789abcdef",
+                    r#"{"title":"deploy started"}"#,
+                    None,
+                    None,
+                ),
+                StatusCode::ACCEPTED,
+            ),
+            // A bad body after a query-token auth is still told to move it.
+            (
+                push("/api/announce?title=x&severity=panic&token=0123456789abcdef"),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let uri = request.uri().to_string();
+            let res = test_app().await.oneshot(request).await.unwrap();
+            assert_eq!(res.status(), expected, "{uri}");
+            assert!(deprecated(&res), "{uri}");
+        }
+
+        // The same writes through headers: no deprecation.
+        let mut header_push = push("/api/push/beat");
+        header_push
+            .headers_mut()
+            .insert("x-push-token", HeaderValue::from_static("s3cret"));
+        let mut bearer_event = push("/api/event?title=deploy");
+        bearer_event.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer 0123456789abcdef"),
+        );
+        for request in [
+            header_push,
+            bearer_event,
+            alert(
+                "/api/monitors/beat/alert",
+                r#"{"title":"t"}"#,
+                Some("s3cret"),
+                None,
+            ),
+        ] {
+            let uri = request.uri().to_string();
+            let res = test_app().await.oneshot(request).await.unwrap();
+            assert!(!deprecated(&res), "{uri}");
+        }
+
+        // A refused write is not flagged, and read-only views keep ?token=.
+        let res = test_app()
+            .await
+            .oneshot(push("/api/event?title=x&token=wrong"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert!(!deprecated(&res));
+        let res = test_app()
+            .await
+            .oneshot(get("/api/summary?token=0123456789abcdef"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!deprecated(&res));
     }
 
     #[tokio::test]
@@ -1896,15 +1996,24 @@ mod tests {
 
     #[tokio::test]
     async fn openapi_and_page_render() {
-        assert_eq!(
-            test_app()
-                .await
-                .oneshot(get("/api/openapi.json"))
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::OK
-        );
+        let res = test_app()
+            .await
+            .oneshot(get("/api/openapi.json"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        // ?token= is marked deprecated on the writes, not on the reads.
+        let doc: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+        let token_param = |path: &str, method: &str| {
+            doc["paths"][path][method]["parameters"]
+                .as_array()
+                .and_then(|params| params.iter().find(|p| p["name"] == "token"))
+                .cloned()
+        };
+        let push = token_param("/api/push/{id}", "post").expect("push token param");
+        assert_eq!(push["deprecated"], true, "{push}");
+        let silence = token_param("/api/silence", "post").expect("silence token param");
+        assert_eq!(silence["deprecated"], true, "{silence}");
         assert_eq!(
             test_app().await.oneshot(get("/")).await.unwrap().status(),
             StatusCode::OK

@@ -19,7 +19,7 @@ use hora_core::db::{self, Point};
 use hora_core::notifications::{AlertSeverity, Event};
 use hora_core::peer::{HealthReport, PeerSeen};
 
-use crate::auth::{Operator, Viewer, authorize_peer, ct_eq, push_token};
+use crate::auth::{Operator, QueryTokenAuth, Viewer, authorize_peer, ct_eq, push_token};
 use crate::error::AppError;
 use crate::flood;
 use crate::history;
@@ -275,7 +275,7 @@ pub(crate) struct AnnounceResponse {
         ("body" = Option<String>, Query, description = "Banner body"),
         ("severity" = Option<String>, Query, description = "info (default), warning, critical or resolved"),
         ("until" = Option<String>, Query, description = "Auto-expiry: a duration (e.g. 4h) or the next occurrence of a UTC time (HH:MM, e.g. 18:00)"),
-        ("token" = Option<String>, Query, description = "Viewer token (prefer Authorization: Bearer)")
+        ("token" = Option<String>, Query, deprecated, description = "Viewer token; deprecated on this endpoint (answered with a Deprecation header): use Authorization: Bearer")
     ),
     security(("bearer" = [])),
     responses(
@@ -329,7 +329,7 @@ pub(crate) struct AnnounceClearResponse {
 #[utoipa::path(
     delete,
     path = "/api/announce",
-    params(("token" = Option<String>, Query, description = "Viewer token (prefer Authorization: Bearer)")),
+    params(("token" = Option<String>, Query, deprecated, description = "Viewer token; deprecated on this endpoint (answered with a Deprecation header): use Authorization: Bearer")),
     security(("bearer" = [])),
     responses(
         (status = 200, description = "Every ad-hoc announcement removed", body = AnnounceClearResponse),
@@ -362,7 +362,7 @@ pub(crate) struct EventResponse {
     path = "/api/event",
     params(
         ("title" = String, Query, description = "Event title, e.g. `deploy api v2.3`"),
-        ("token" = Option<String>, Query, description = "Viewer token (prefer Authorization: Bearer)")
+        ("token" = Option<String>, Query, deprecated, description = "Viewer token; deprecated on this endpoint (answered with a Deprecation header): use Authorization: Bearer")
     ),
     security(("bearer" = [])),
     responses(
@@ -957,7 +957,7 @@ pub(crate) struct PushQuery {
     path = "/api/push/{id}",
     params(
         ("id" = String, Path, description = "Push monitor id"),
-        ("token" = Option<String>, Query, description = "Push token, if the monitor sets one (prefer X-Push-Token)"),
+        ("token" = Option<String>, Query, deprecated, description = "Push token, if the monitor sets one; deprecated (answered with a Deprecation header): use X-Push-Token"),
         ("status" = Option<String>, Query, description = "up (default), down or degraded"),
         ("msg" = Option<String>, Query, description = "Optional detail recorded with the heartbeat"),
         ("ping" = Option<i64>, Query, description = "Optional round-trip latency in ms (>= 0)")
@@ -973,6 +973,7 @@ pub(crate) struct PushQuery {
 pub(crate) async fn push(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    query_auth: QueryTokenAuth,
     Query(query): Query<PushQuery>,
     headers: HeaderMap,
 ) -> Result<&'static str, AppError> {
@@ -998,9 +999,13 @@ pub(crate) async fn push(
     // A configured token is required; without one, the id alone authorizes. Prefer
     // the `X-Push-Token` header (kept out of access logs) over the `?token=` query.
     if let Some(expected) = expected_token {
-        let provided = push_token(&headers).or(query.token.as_deref());
+        let header = push_token(&headers);
+        let provided = header.or(query.token.as_deref());
         if !provided.is_some_and(|token| ct_eq(token, expected.as_ref())) {
             return Err(AppError::Unauthorized("invalid push token"));
+        }
+        if header.is_none() {
+            query_auth.mark();
         }
     }
 
@@ -1074,7 +1079,7 @@ pub(crate) struct AlertResponse {
     path = "/api/monitors/{id}/alert",
     params(
         ("id" = String, Path, description = "Monitor id the alert is attached to"),
-        ("token" = Option<String>, Query, description = "server.auth_token (prefer Authorization: Bearer)")
+        ("token" = Option<String>, Query, deprecated, description = "server.auth_token; deprecated (answered with a Deprecation header): use Authorization: Bearer or X-Push-Token")
     ),
     request_body = AlertRequest,
     security(("push_token" = []), ("bearer" = [])),
@@ -1110,6 +1115,9 @@ pub(crate) async fn post_alert(
         return Err(AppError::Unauthorized(
             "alerting requires the monitor's push_token (X-Push-Token) or server.auth_token",
         ));
+    }
+    if !item_token_ok {
+        viewer.note_operator_write();
     }
     let monitor = monitor.ok_or(AppError::NotFound("unknown monitor"))?;
 
@@ -1268,7 +1276,7 @@ pub(crate) struct SilenceResponse {
         ("monitors" = String, Query, description = "Comma-separated monitor ids, or `all`"),
         ("duration" = String, Query, description = "How long to mute (e.g. 10m, 1h30m; max 7d)"),
         ("reason" = Option<String>, Query, description = "Optional note recorded with the silence"),
-        ("token" = Option<String>, Query, description = "Viewer token (prefer Authorization: Bearer)")
+        ("token" = Option<String>, Query, deprecated, description = "Viewer token; deprecated on this endpoint (answered with a Deprecation header): use Authorization: Bearer")
     ),
     security(("bearer" = [])),
     responses(
