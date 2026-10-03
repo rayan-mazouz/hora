@@ -4,6 +4,7 @@ pub mod announce;
 pub mod cert;
 pub mod coalesce;
 pub mod config;
+mod connect;
 pub mod db;
 pub mod digest;
 pub mod doctor;
