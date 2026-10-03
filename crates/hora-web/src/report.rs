@@ -3,7 +3,8 @@
 //! error-budget consumption. Pre-formatted here; Askama does the escaping.
 
 use askama::Template;
-use hora_core::report::{MonitorMonth, MonthReport, format_bp, format_secs};
+use hora_core::fmt;
+use hora_core::report::{MonitorMonth, MonthReport};
 
 #[derive(Template)]
 #[template(path = "report.html")]
@@ -61,11 +62,8 @@ pub(crate) fn group_rows(
                     t + row.up + row.down + row.degraded,
                 )
             });
-            let uptime = if total > 0 {
-                format_bp((available * 10_000 + total / 2) / total)
-            } else {
-                "no data".to_owned()
-            };
+            let uptime = fmt::basis_points(available, total)
+                .map_or_else(|| "no data".to_owned(), fmt::pct_bp);
             ReportGroup {
                 name,
                 uptime,
@@ -81,12 +79,12 @@ fn format_row(row: &MonitorMonth) -> ReportRow {
         (Some(slo_bp), Some(met)) => (
             format!(
                 "{} \u{b7} {}",
-                format_bp(i64::from(slo_bp)),
+                fmt::pct_bp(i64::from(slo_bp)),
                 if met { "met" } else { "missed" }
             ),
             if met { "met" } else { "missed" },
         ),
-        (Some(slo_bp), None) => (format_bp(i64::from(slo_bp)), "none"),
+        (Some(slo_bp), None) => (fmt::pct_bp(i64::from(slo_bp)), "none"),
         _ => (dash(), "none"),
     };
     let budget = match (row.budget_consumed_minutes, row.budget_minutes) {
@@ -97,18 +95,18 @@ fn format_row(row: &MonitorMonth) -> ReportRow {
         name: row.name.clone(),
         uptime: row
             .uptime_bp
-            .map_or_else(|| "no data".to_owned(), format_bp),
+            .map_or_else(|| "no data".to_owned(), fmt::pct_bp),
         incidents: if row.incidents > 0 {
             row.incidents.to_string()
         } else {
             dash()
         },
         downtime: if row.downtime_secs > 0 {
-            format_secs(row.downtime_secs)
+            fmt::duration(row.downtime_secs)
         } else {
             dash()
         },
-        mttr: row.mttr_secs.map_or_else(dash, format_secs),
+        mttr: row.mttr_secs.map_or_else(dash, fmt::duration),
         slo,
         slo_state,
         budget,

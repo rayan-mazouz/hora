@@ -650,7 +650,7 @@ pub(crate) fn build_monitor_view(
         }),
         last_checked: latest.and_then(|l| iso(l.time)),
         uptime_permille,
-        uptime_label: uptime_permille.map(format_permille),
+        uptime_label: uptime_permille.map(hora_core::fmt::permille),
         p50_ms: pct.map(|p| p.p50),
         p95_ms: pct.map(|p| p.p95),
         p99_ms: pct.map(|p| p.p99),
@@ -908,12 +908,6 @@ pub(crate) fn cert_label(days: i64) -> String {
     }
 }
 
-/// Format permille (0..=1000) as a percentage with one decimal, e.g. `99.9%`.
-pub(crate) fn format_permille(permille: i64) -> String {
-    let permille = permille.clamp(0, 1000);
-    format!("{}.{}%", permille / 10, permille % 10)
-}
-
 pub(crate) fn iso(timestamp: i64) -> Option<String> {
     DateTime::from_timestamp(timestamp, 0).map(|dt| dt.to_rfc3339())
 }
@@ -962,7 +956,7 @@ pub(crate) fn day_cell(date: String, row: &DayRow) -> DayCell {
     } else {
         "down"
     };
-    let title = format!("{date}: {}", format_permille(permille));
+    let title = format!("{date}: {}", hora_core::fmt::permille(permille));
     DayCell { date, state, title }
 }
 
@@ -978,13 +972,6 @@ mod tests {
             error: None,
         }
     }
-    #[test]
-    fn permille_formats_one_decimal() {
-        assert_eq!(format_permille(1000), "100.0%");
-        assert_eq!(format_permille(999), "99.9%");
-        assert_eq!(format_permille(0), "0.0%");
-    }
-
     #[test]
     fn worse_picks_higher_severity() {
         assert_eq!(worse("up", "degraded"), "degraded");

@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use askama::Template;
 use chrono::DateTime;
 use hora_core::db::{EventMarker, Incident, PushedAlert};
+use hora_core::fmt::{self, xml_escape};
 
 /// The `/history` page; rows are pre-formatted [`IncidentRow`]s, Askama does
 /// the escaping.
@@ -37,24 +38,6 @@ pub(crate) struct HistoryTemplate {
 pub(crate) struct HeatmapRef {
     pub(crate) id: String,
     pub(crate) name: String,
-}
-
-/// Percent-encode `value` for safe embedding in a query string (RFC 3986
-/// unreserved characters pass through).
-pub(crate) fn url_encode(value: &str) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(value.len());
-    for &byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => {
-                let _ = write!(out, "%{byte:02X}");
-            }
-        }
-    }
-    out
 }
 
 /// One incident, formatted for display.
@@ -89,7 +72,7 @@ pub(crate) fn event_rows(events: &[EventMarker]) -> Vec<EventRow> {
         .iter()
         .map(|event| EventRow {
             title: event.title.clone(),
-            at: format_utc(event.created_at),
+            at: fmt::utc(event.created_at),
         })
         .collect()
 }
@@ -135,7 +118,7 @@ pub(crate) fn timeline_rows(entries: &[hora_core::timeline::Entry]) -> Vec<Timel
     entries
         .iter()
         .map(|entry| TimelineRow {
-            at: format_utc(entry.at),
+            at: fmt::utc(entry.at),
             kind: entry.kind.as_str(),
             title: entry.title.clone(),
             detail: entry.detail.clone(),
@@ -170,7 +153,7 @@ pub(crate) fn alert_rows(
             severity: alert.severity.clone(),
             title: alert.title.clone(),
             message: (!alert.message.is_empty()).then(|| alert.message.clone()),
-            at: format_utc(alert.created_at),
+            at: fmt::utc(alert.created_at),
         })
         .collect()
 }
@@ -190,9 +173,9 @@ pub(crate) fn incident_rows(
                 .unwrap_or(&incident.monitor_id)
                 .clone(),
             resolved: incident.ended_at.is_some(),
-            started: format_utc(incident.started_at),
-            ended: incident.ended_at.map(format_utc),
-            duration: incident.duration_s.map(format_duration),
+            started: fmt::utc(incident.started_at),
+            ended: incident.ended_at.map(fmt::utc),
+            duration: incident.duration_s.map(fmt::duration),
             error: incident.error.clone(),
             cause: incident.cause.clone(),
             impacted: incident
@@ -317,7 +300,7 @@ fn entry_html(incident: &Incident) -> String {
         let _ = write!(
             content,
             "<p><strong>Duration:</strong> {}</p>",
-            format_duration(duration_s)
+            fmt::duration(duration_s)
         );
     }
     if let Some(note) = &incident.note {
@@ -330,40 +313,9 @@ fn entry_html(incident: &Incident) -> String {
     content
 }
 
-fn format_utc(timestamp: i64) -> String {
-    DateTime::from_timestamp(timestamp, 0).map_or_else(String::new, |dt| {
-        dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
-    })
-}
-
-fn format_duration(seconds: i64) -> String {
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3600 {
-        format!("{}m {}s", seconds / 60, seconds % 60)
-    } else {
-        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
-    }
-}
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn durations_format_humanely() {
-        assert_eq!(format_duration(42), "42s");
-        assert_eq!(format_duration(90), "1m 30s");
-        assert_eq!(format_duration(3720), "1h 2m");
-    }
 
     #[test]
     fn atom_escapes_host_derived_base_url() {
@@ -418,14 +370,6 @@ mod tests {
             "{xml}"
         );
         assert!(!xml.contains("/incidents/"), "{xml}");
-    }
-
-    #[test]
-    fn escapes_xml() {
-        assert_eq!(
-            xml_escape("<b>&\"x'\"</b>"),
-            "&lt;b&gt;&amp;&quot;x&apos;&quot;&lt;/b&gt;"
-        );
     }
 
     #[test]

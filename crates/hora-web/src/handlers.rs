@@ -26,7 +26,7 @@ use crate::history;
 use crate::metrics;
 use crate::render::{badge, status_color, svg_response, uptime_color};
 use crate::summary::{
-    DayCell, IncidentView, MaintenanceView, MonitorView, StatusTemplate, Summary, format_permille,
+    DayCell, IncidentView, MaintenanceView, MonitorView, StatusTemplate, Summary,
 };
 use crate::text;
 use crate::visibility::{Audience, Visibility};
@@ -1423,7 +1423,7 @@ pub(crate) async fn uptime_badge(
     let (available, total) = db::availability(&state.pool, &id, since).await?;
     let permille = (total > 0).then(|| available.saturating_mul(1000) / total);
     let (message, color) = match permille {
-        Some(permille) => (format_permille(permille), uptime_color(permille)),
+        Some(permille) => (hora_core::fmt::permille(permille), uptime_color(permille)),
         None => ("n/a".to_owned(), "#9f9f9f"),
     };
     Ok(svg_response(badge(

@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use chrono::DateTime;
 
-use crate::render::xml_escape;
+use hora_core::fmt::xml_escape;
 
 /// The window rendered: four full weeks, so each weekday appears four times
 /// and a weekly pattern is visible as a horizontal stripe rhythm.

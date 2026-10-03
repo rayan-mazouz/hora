@@ -62,7 +62,7 @@ pub(crate) fn render(summary: &Summary) -> String {
             for monitor in &group.monitors {
                 let uptime = monitor
                     .uptime_permille
-                    .map_or_else(|| "-".to_owned(), crate::summary::format_permille);
+                    .map_or_else(|| "-".to_owned(), hora_core::fmt::permille);
                 let latency = monitor
                     .last_latency_ms
                     .map_or_else(|| "-".to_owned(), |ms| format!("{ms}ms"));

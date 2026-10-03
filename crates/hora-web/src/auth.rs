@@ -89,7 +89,7 @@ impl Viewer {
         let token_query = query_token
             .as_deref()
             .filter(|_| by_query)
-            .map(|token| format!("?token={}", crate::history::url_encode(token)))
+            .map(|token| format!("?token={}", hora_core::fmt::percent_encode(token)))
             .unwrap_or_default();
         Self {
             config,

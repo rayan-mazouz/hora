@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use hora_core::config;
+use hora_core::{config, fmt};
 
 mod top;
 use tokio::sync::watch;
@@ -404,7 +404,7 @@ async fn announce(args: &[String]) -> Result<(), CliError> {
             for item in pinned {
                 let until = item.until.map_or_else(
                     || "until cleared".to_owned(),
-                    |ts| format!("until {}", format_epoch(ts)),
+                    |ts| format!("until {}", fmt::utc(ts)),
                 );
                 println!("#{} [{}] {} ({until})", item.id, item.severity, item.title);
                 if !item.body.is_empty() {
@@ -436,7 +436,7 @@ async fn pin_announcement(args: &[String]) -> anyhow::Result<()> {
     hora_core::db::insert_announcement(&pool, &title, &body, severity, until).await?;
     let expiry = until.map_or_else(
         || "until `hora announce clear`".to_owned(),
-        |ts| format!("until {}", format_epoch(ts)),
+        |ts| format!("until {}", fmt::utc(ts)),
     );
     println!("Pinned [{severity}] {title:?} ({expiry}).");
     Ok(())
@@ -579,7 +579,7 @@ async fn report(month: Option<&str>) -> Result<(), CliError> {
         }
         let uptime = row
             .uptime_bp
-            .map_or_else(|| "no data".to_owned(), hora_core::report::format_bp);
+            .map_or_else(|| "no data".to_owned(), fmt::pct_bp);
         let mut line = format!("  {}: {uptime}", row.name);
         if row.incidents > 0 {
             let plural = if row.incidents > 1 { "s" } else { "" };
@@ -587,17 +587,17 @@ async fn report(month: Option<&str>) -> Result<(), CliError> {
                 line,
                 ", {} incident{plural}, {} down",
                 row.incidents,
-                hora_core::report::format_secs(row.downtime_secs)
+                fmt::duration(row.downtime_secs)
             );
         }
         if let Some(mttr) = row.mttr_secs {
-            let _ = write!(line, ", MTTR {}", hora_core::report::format_secs(mttr));
+            let _ = write!(line, ", MTTR {}", fmt::duration(mttr));
         }
         if let (Some(slo_bp), Some(met)) = (row.slo_bp, row.slo_met) {
             let _ = write!(
                 line,
                 ", SLO {} {}",
-                hora_core::report::format_bp(i64::from(slo_bp)),
+                fmt::pct_bp(i64::from(slo_bp)),
                 if met { "met" } else { "MISSED" }
             );
         }
@@ -703,7 +703,7 @@ fn print_tuning(t: &hora_core::tune::MonitorTuning) {
     println!("{}  ({}, every {}s)", t.name, t.kind, t.interval_secs);
 
     let window = t.window.map_or_else(String::new, |(first, last)| {
-        format!("{} -> {}, ", format_epoch(first), format_epoch(last))
+        format!("{} -> {}, ", fmt::utc(first), fmt::utc(last))
     });
     println!(
         "  {} checks, {window}{} down  [fail_threshold={}]",
@@ -731,7 +731,7 @@ fn print_tuning(t: &hora_core::tune::MonitorTuning) {
                 "    {marker} {:<2}            {:>4}    {:>8}{current}",
                 row.threshold,
                 row.alerts,
-                format_secs(row.detect_after_secs),
+                fmt::duration(row.detect_after_secs),
             );
         }
         print_threshold_advice(t);
@@ -814,7 +814,7 @@ fn print_threshold_advice(t: &hora_core::tune::MonitorTuning) {
                  (drops flaps <= {flap_max}), same real outages, +{} to detect",
                 rec_alerts,
                 t.current_alerts,
-                format_secs(delay)
+                fmt::duration(delay)
             );
         }
         std::cmp::Ordering::Less => {
@@ -822,7 +822,7 @@ fn print_threshold_advice(t: &hora_core::tune::MonitorTuning) {
             println!(
                 "  -> fail_threshold {rec} would catch the same outages {} sooner; \
                  the current {} only adds delay (no extra flaps above {flap_max} to filter)",
-                format_secs(saved),
+                fmt::duration(saved),
                 t.current_threshold
             );
         }
@@ -1141,7 +1141,7 @@ async fn event(args: &[String]) -> Result<(), CliError> {
                 println!("No events recorded.");
             }
             for event in events {
-                println!("{}  {}", format_epoch(event.created_at), event.title);
+                println!("{}  {}", fmt::utc(event.created_at), event.title);
             }
         }
         EventCommand::Record(title) => {
@@ -1333,7 +1333,7 @@ async fn timeline(args: &[String]) -> Result<(), CliError> {
             .unwrap_or_default();
         println!(
             "{}  {:<9}  {}{link}",
-            format_epoch(entry.at),
+            fmt::utc(entry.at),
             entry.kind.as_str(),
             entry.title
         );
@@ -1372,11 +1372,11 @@ async fn list_incidents(limit: i64) -> Result<(), CliError> {
         let span = match incident.ended_at {
             Some(ended) => format!(
                 "{} -> {} ({})",
-                format_epoch(incident.started_at),
-                format_epoch(ended),
-                format_secs(incident.duration_s.unwrap_or(0))
+                fmt::utc(incident.started_at),
+                fmt::utc(ended),
+                fmt::duration(incident.duration_s.unwrap_or(0))
             ),
-            None => format!("{} -> ongoing", format_epoch(incident.started_at)),
+            None => format!("{} -> ongoing", fmt::utc(incident.started_at)),
         };
         println!("#{}  {name}  {span}", incident.id);
         if let Some(error) = &incident.error {
@@ -1437,8 +1437,8 @@ async fn silence(args: &[String]) -> Result<(), CliError> {
                     .unwrap_or_default();
                 println!(
                     "{target}: until {} ({} left){reason}",
-                    format_epoch(silence.until),
-                    format_secs(silence.until - now)
+                    fmt::utc(silence.until),
+                    fmt::duration(silence.until - now)
                 );
             }
         }
@@ -1478,7 +1478,7 @@ async fn silence(args: &[String]) -> Result<(), CliError> {
             } else {
                 monitors.join(", ")
             };
-            println!("Silenced {target} until {}.", format_epoch(until));
+            println!("Silenced {target} until {}.", fmt::utc(until));
         }
         _ => {
             return Err(usage(concat!(
@@ -1511,23 +1511,6 @@ const MAX_EVENT_TITLE_CHARS: usize = 200;
 const MAX_ANNOUNCE_TITLE_CHARS: usize = 200;
 const MAX_ANNOUNCE_BODY_CHARS: usize = 500;
 const MAX_SILENCE_REASON_CHARS: usize = 500;
-
-fn format_epoch(timestamp: i64) -> String {
-    chrono::DateTime::from_timestamp(timestamp, 0).map_or_else(
-        || timestamp.to_string(),
-        |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-    )
-}
-
-fn format_secs(seconds: i64) -> String {
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3600 {
-        format!("{}m {}s", seconds / 60, seconds % 60)
-    } else {
-        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
-    }
-}
 
 /// Run the monitor: load config, open the database, start the supervisor and
 /// background tasks, and serve the status page until a shutdown signal.

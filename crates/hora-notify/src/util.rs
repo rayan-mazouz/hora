@@ -14,6 +14,10 @@ pub(crate) fn escape(input: &str) -> String {
 
 /// `"2d 3h"`, `"6h"`, `"45m"`, `"30s"` - coarse on purpose: it phrases a burn
 /// estimate and how long a channel has been failing, not a measurement.
+///
+/// Twin of `hora_core::fmt::elapsed` (hora-notify sits below hora-core and
+/// cannot call it): keep both outputs identical so a span reads the same in a
+/// notification and in `hora top`.
 pub(crate) fn human_duration(secs: u64) -> String {
     if secs >= 2 * 86_400 {
         format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
@@ -210,6 +214,9 @@ fn redact(text: &str, secrets: &[&str]) -> String {
 /// `application/x-www-form-urlencoded` (reqwest's query/form serializer):
 /// space is `+` and `*` stays bare; the strict RFC 3986 variant keeps `~` bare
 /// instead.
+///
+/// The strict variant is the twin of `hora_core::fmt::percent_encode` (out of
+/// reach from this crate); keep the two byte-for-byte identical.
 fn percent_encode(value: &str, form: bool) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(value.len());

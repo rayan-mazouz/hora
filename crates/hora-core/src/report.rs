@@ -204,10 +204,6 @@ fn month_label(start: i64) -> String {
         .map_or_else(String::new, |dt| dt.format("%B %Y").to_string())
 }
 
-// Kept under their historical names for the web report and `hora report`;
-// both are the shared [`crate::fmt`] helpers.
-pub use crate::fmt::{duration as format_secs, pct_bp as format_bp};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,15 +231,6 @@ mod tests {
             .unwrap()
             .timestamp();
         assert_eq!(previous_month(mid_june), "2026-05");
-    }
-
-    #[test]
-    fn formatting_helpers() {
-        assert_eq!(format_bp(10_000), "100.00%");
-        assert_eq!(format_bp(9_997), "99.97%");
-        assert_eq!(format_secs(45), "45s");
-        assert_eq!(format_secs(720), "12m 0s");
-        assert_eq!(format_secs(7500), "2h 5m");
     }
 
     #[tokio::test]

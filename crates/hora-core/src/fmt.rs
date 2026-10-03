@@ -82,6 +82,14 @@ pub fn pct_bp(basis_points: i64) -> String {
     format!("{sign}{}.{:02}%", magnitude / 100, magnitude % 100)
 }
 
+/// `"99.9%"` from permille (0..=1000, clamped): the one-decimal uptime the
+/// status page, the badges and `hora top` show.
+#[must_use]
+pub fn permille(permille: i64) -> String {
+    let permille = permille.clamp(0, 1000);
+    format!("{}.{}%", permille / 10, permille % 10)
+}
+
 /// `"99.97%"` for `part / total`, or `"no checks"` when there is no data.
 #[must_use]
 pub fn pct(part: i64, total: i64) -> String {
@@ -166,6 +174,10 @@ mod tests {
         assert_eq!(pct_bp(-150), "-1.50%");
         assert_eq!(pct(0, 0), "no checks");
         assert_eq!(pct(9997, 10_000), "99.97%");
+        assert_eq!(permille(1000), "100.0%");
+        assert_eq!(permille(999), "99.9%");
+        assert_eq!(permille(0), "0.0%");
+        assert_eq!(permille(1200), "100.0%");
     }
 
     #[test]

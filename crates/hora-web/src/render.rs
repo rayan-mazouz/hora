@@ -7,6 +7,7 @@ use axum::response::IntoResponse;
 use badgelib::{Badge, Color, Style};
 
 use hora_core::db::{EventMarker, Point};
+use hora_core::fmt::xml_escape;
 
 // --- Server-rendered latency chart --------------------------------------
 // Colours come from CSS (the `status` class on the <svg>), not inline here.
@@ -119,15 +120,6 @@ pub(crate) fn uptime_color(permille: i64) -> &'static str {
     } else {
         "#e05d44"
     }
-}
-
-/// Escape XML metacharacters for safe embedding in an SVG document.
-pub(crate) fn xml_escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 pub(crate) fn svg_response(svg: String) -> impl IntoResponse {

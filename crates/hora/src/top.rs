@@ -808,7 +808,7 @@ fn monitor_table(app: &App) -> Table<'static> {
                     monitor.group.clone().unwrap_or_default(),
                     monitor
                         .uptime_permille
-                        .map_or_else(|| "-".to_owned(), |p| format!("{}.{}%", p / 10, p % 10)),
+                        .map_or_else(|| "-".to_owned(), hora_core::fmt::permille),
                     ms(monitor.p50),
                     ms(monitor.p95),
                     ms(monitor.p99),
@@ -899,7 +899,7 @@ fn trouble_lines(app: &App) -> Vec<Line<'static>> {
                         ch.name,
                         ch.consecutive_failures,
                         ch.failing_for_secs
-                            .map_or_else(|| "?".to_owned(), human_elapsed),
+                            .map_or_else(|| "?".to_owned(), hora_core::fmt::elapsed),
                     ),
                     Style::new().fg(Color::Yellow),
                 ))
@@ -928,19 +928,6 @@ fn severity_style(severity: &str) -> Style {
 
 fn ms(value: Option<i64>) -> String {
     value.map_or_else(|| "-".to_owned(), |ms| format!("{ms}ms"))
-}
-
-/// `"2d 3h"`, `"6h"`, `"45m"`, `"30s"` — coarse, for the channel-failing line.
-fn human_elapsed(secs: u64) -> String {
-    if secs >= 2 * 86_400 {
-        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
-    } else if secs >= 3600 {
-        format!("{}h", secs / 3600)
-    } else if secs >= 60 {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{secs}s")
-    }
 }
 
 fn status_dot(status: &str) -> &'static str {
