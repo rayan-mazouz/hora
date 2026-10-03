@@ -29,7 +29,7 @@ impl AnnounceError {
         match self {
             Self::EmptyTitle => "title must not be empty",
             Self::UnknownSeverity => UnknownSeverity::MESSAGE,
-            Self::InvalidUntil => "invalid until (use a duration like 4h, or HH:MM UTC)",
+            Self::InvalidUntil => "invalid until (use a duration up to 365d like 4h, or HH:MM UTC)",
             Self::MissingValue("--severity") => "--severity needs a value",
             Self::MissingValue(_) => "--until needs a value (e.g. 4h or 18:00)",
         }
@@ -99,13 +99,22 @@ pub fn parse_severity(raw: &str) -> Result<Severity, AnnounceError> {
         .map_err(|UnknownSeverity| AnnounceError::UnknownSeverity)
 }
 
-/// An expiry: a duration from `now` (`4h`, `90m`), or a UTC clock time
-/// (`18:00`) meaning its next occurrence - today if still ahead, tomorrow
-/// otherwise. `None` for anything else.
+/// The longest an announcement can be set to last: a year. Past that it is
+/// not an announcement but a page edit, and an unbounded `until` (`9999d`)
+/// would sit in the table and on the page forever.
+pub const MAX_UNTIL_SECS: u64 = 365 * 86_400;
+
+/// An expiry: a duration from `now` (`4h`, `90m`, at most
+/// [`MAX_UNTIL_SECS`]), or a UTC clock time (`18:00`) meaning its next
+/// occurrence - today if still ahead, tomorrow otherwise. `None` for anything
+/// else.
 #[must_use]
 pub fn parse_until(raw: &str, now: i64) -> Option<i64> {
     let raw = raw.trim();
     if let Some(secs) = crate::parse_duration(raw) {
+        if secs > MAX_UNTIL_SECS {
+            return None;
+        }
         return Some(now.saturating_add(i64::try_from(secs).unwrap_or(i64::MAX)));
     }
     let (hours, minutes) = raw.split_once(':')?;
@@ -186,7 +195,8 @@ mod tests {
             parse_until("12:00", now),
             Some(11 * SECONDS_PER_DAY + 12 * 3600)
         );
-        for bad in ["24:00", "18:60", "-1:00", "noon", "", "4"] {
+        assert_eq!(parse_until("365d", now), Some(now + 365 * SECONDS_PER_DAY));
+        for bad in ["24:00", "18:60", "-1:00", "noon", "", "4", "366d", "9999d"] {
             assert_eq!(parse_until(bad, now), None, "{bad}");
         }
     }
