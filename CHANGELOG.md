@@ -7,13 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-A hardening release: the findings of a full audit of the codebase, fixed.
-Alerting gets its edge cases right (no lost recovery, no duplicate down),
-secrets stay on their origin, and the web layer gets one visibility rule
-instead of five. See [UPGRADES.md](UPGRADES.md#0100--0110) for what to check
-before upgrading.
+A new face and a hardening release. Hora gets its brand (the night watch,
+a little owl that dozes while all is well) and a status page redesigned
+around it; the findings of a full audit are fixed; and the page stays
+instant on huge databases: measured on 575 million checks across 700
+monitors, the status page answers in 1.5 ms at p99 (it took 13 s in
+0.10.0), weighs 71 KB instead of 6.5 MB, and the daemon peaks at 396 MB of
+RAM instead of 887 MB. See [UPGRADES.md](UPGRADES.md#0100--0110) for what to
+check before upgrading.
 
 ### Added
+
+- **A redesigned status page.** The hour and one sentence ("Everything is
+  running."), count chips, then what needs attention first; groups that are
+  all well fold away, large groups show compact rows, and each monitor's
+  daily bar is one image instead of ninety elements. Every state reads as a
+  colour, a shape and a word, never colour alone. Light and dark follow the
+  system, `?theme=light|dark` forces one (handy for embeds and kiosks).
+  Down monitors say since when ("Down · 38 min"), rows show uptime over the
+  bar's days, maintenance days are marked, and recent incidents and a
+  "No incident in N days" chip sit under the groups.
+- **`/monitor/{id}`**: a page per monitor with its figures, the 24-hour
+  chart, a day-by-day bar whose details open by keyboard or tap, the
+  hour-by-day latency heatmap (moved here from `/history`), what each
+  vantage point sees, and its incidents.
+- **`/watchers`** (operator only): the mesh from this node, its peers'
+  heartbeats, how often outages were confirmed, and each shared service as
+  seen from each place.
+- **"Not an outage."** A down seen from this node only, while every peer
+  reaches the target, shows as up with a notice explaining why nobody was
+  paged. The JSON API is unchanged.
+- **Kiosk refresh is opt-in**: `?refresh=<secs>` (10 to 3600) reloads the
+  page; without it the page no longer reloads itself every 30 seconds,
+  which closed open groups and disturbed screen readers.
+- **Add to home screen**: a web app manifest and icons, so a phone can keep
+  the status page as an app (no service worker: always the live page).
+- The monthly report gets a day strip per service and shorter headings, and
+  is cached per month and audience.
+- History, timeline, post-mortem, the empty and private-page states and the
+  plain-text (curl) output share the new design and wording.
+- The documentation site wears the brand, with new pages: When Hora fits,
+  Concepts (how a failed check becomes one alert, or none), The status page,
+  Brand, Development, and the changelog.
 
 - **`/api/announce` takes `until` as a time of day** (`18:00`, UTC, the next
   occurrence) as well as a duration (`4h`), like `hora announce`; the hint
@@ -34,6 +69,19 @@ before upgrading.
 
 ### Changed
 
+- **The status summary is never built on a request.** A background task
+  rebuilds it continuously (about 150 ms on 575M checks, was 13-20 s) and
+  every page, `/api/summary`, `/metrics`, group page and peer exchange is
+  served from the latest snapshot, at most a few seconds old. It is built
+  once for the operator and cut in memory for the public and each group;
+  pages are rendered once per snapshot and audience. Only the first request
+  after start waits for the first build (logged as "status page ready").
+  Announcing, clearing banners or recording an event returns once the page
+  shows it.
+- **24-hour figures read the hourly roll-ups** plus the current hour, not
+  millions of raw checks, and hourly roll-ups now run every 5 minutes
+  instead of every 6 hours. p50/p95/p99 come from per-hour latency
+  histograms: exact below 64 ms, within 1.6% above.
 - **Push heartbeats drive alerting with their own verdict.** A push with
   `status=down` makes the monitor down on the next tick (confirmed after
   `fail_threshold`), with the job's `msg` as the reason; `status=degraded`
@@ -103,6 +151,9 @@ before upgrading.
   build provenance and an SBOM. CI Actions are pinned to commit SHAs.
 - Dependencies: utoipa 6, nix 0.31 (process-group kill), docs on Astro 7.3
   and Starlight 0.42.
+- Fonts: Cal Sans, Fraunces, Borel and Mona Sans Mono, served from
+  `/assets/` with a content hash; the old `/assets/CalSans-SemiBold.woff2`
+  route is gone. Badges and the heatmap use the brand palette.
 
 ### Deprecated
 
@@ -168,7 +219,10 @@ before upgrading.
 - `hora backup` creates the file `0600` atomically instead of tightening it
   after the copy.
 - A malformed inbound `x-request-id` is replaced instead of echoed; CSP
-  `img-src` no longer allows `data:`.
+  `img-src` no longer allows `data:`, and `style-src` no longer needs
+  `'unsafe-inline'`: pages carry no inline style, and still run no script.
+- The token in a query string is spliced into each response, never into
+  the pages cached and shared between viewers.
 - CI checkouts no longer persist the token, and the Pages write permission
   is scoped to the deploy job.
 

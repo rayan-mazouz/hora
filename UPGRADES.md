@@ -6,9 +6,13 @@ procedure (pull the new image, recreate the container, history lives on the
 
 ## 0.10.0 → 0.11.0
 
-One schema migration (`0019`, a `source` column on `checks` telling probes,
-pushes and recorded misses apart) applies automatically; rows written before
-it are read exactly as before. No new config key. Check these before you
+Two schema migrations apply automatically, in seconds even on hundreds of
+millions of checks: `0019` (a `source` column on `checks` telling probes,
+pushes and recorded misses apart; older rows are read exactly as before) and
+`0020` (a latency histogram per hourly roll-up, plus two indexes; hours
+rolled up before it are read from raw checks until they age out). No new
+config key. The first page request after the upgrade waits for the first
+summary build (a few seconds on a large database). Check these before you
 roll out:
 
 - **Configs that no longer load.** `interval_secs`, `timeout_secs`,
@@ -40,6 +44,13 @@ roll out:
   relies on it; an external monitor that matched the body still works.
 - Removed monitors now keep their history for 7 days before it is deleted
   (a warning names them and the date).
+- **The status page no longer reloads itself.** A wall screen or kiosk adds
+  `?refresh=30` to its URL.
+- **Latency percentiles** are now read from histograms: identical below
+  64 ms, within 1.6% above. Prometheus quantiles follow.
+- The new design moves the latency heatmaps from `/history` to each
+  monitor's page (`/monitor/{id}`); the monthly report is titled "Service
+  report". The JSON API is unchanged.
 
 ## 0.9.6 → 0.10.0
 

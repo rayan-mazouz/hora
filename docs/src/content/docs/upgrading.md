@@ -41,8 +41,11 @@ older binary refuses keys it does not know.
 
 ## 0.10 to 0.11
 
-The next release is a hardening release. One schema migration applies by
-itself and there is no new config key, but a few behaviours change:
+The next release brings the new status page and a hardening pass. Two
+schema migrations apply by themselves, in seconds even on very large
+databases, and there is no new config key; the first page request after the
+upgrade waits a few seconds for the first summary build. A few behaviours
+change:
 
 - **Some configs no longer load.** Intervals and timeouts above 30 days, an
   `expected_status` outside 100 to 599, an unbracketed IPv6 tcp target, or a
@@ -69,6 +72,12 @@ itself and there is no new config key, but a few behaviours change:
   marks it unhealthy.
 - **Removed monitors keep their history for 7 days** before it is deleted.
   See [Removed monitors](../configuration/#removed-monitors).
+- **The status page no longer reloads itself.** A wall screen adds
+  `?refresh=30` to its URL. See [The status page](../guides/status-page/).
+- **Latency percentiles come from histograms**: identical below 64 ms,
+  within 1.6% above, Prometheus quantiles included.
+- **The heatmaps moved** from `/history` to each monitor's page,
+  `/monitor/{id}`. The JSON API is unchanged.
 
 ## Version notes
 
