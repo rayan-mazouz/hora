@@ -25,7 +25,10 @@ use tracing::{error, info, warn};
 use crate::config::{Config, Health, Peer};
 use crate::db;
 use crate::notifications::Notifiers;
-use crate::scheduler::heartbeat_outcome_for;
+use crate::scheduler::{
+    AlertCell, AlertLevel, AlertState, Cadence, heartbeat_expected_since, heartbeat_outcome_for,
+    silenced,
+};
 
 /// Floor on the scheduler-liveness tolerance, so a node whose fastest monitor
 /// ticks very frequently is not flagged unhealthy by a momentary scheduling jitter.
@@ -36,6 +39,15 @@ const WITNESS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long an outbound heartbeat `POST` may take before it is abandoned.
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Hard deadline for one whole round of outbound heartbeats (they are sent
+/// concurrently, so this is one slow receiver's worth plus slack): a dead
+/// receiver can never delay the dead-man cadence to the others.
+const HEARTBEAT_ROUND_DEADLINE: Duration = Duration::from_secs(12);
+
+/// A witness `/healthz` report is a small JSON object; cap the body so a
+/// compromised peer can't stream hundreds of MB into memory within the timeout.
+const MAX_REPORT_BYTES: usize = 64 * 1024;
 
 // --- /healthz report ------------------------------------------------------
 
@@ -194,19 +206,29 @@ pub fn spawn_heartbeat(
             }
 
             let digest = format!("ok mon={} tick={}s", snapshot.monitors.len(), age.max(0));
-            for peer in &snapshot.peers {
-                if let Some(url) = &peer.ping_url {
-                    send_heartbeat(
-                        &client,
-                        url.as_ref(),
-                        peer.ping_token.as_ref().map(AsRef::as_ref),
-                        &digest,
-                    )
-                    .await;
-                }
-            }
-            if let Some(url) = &health.heartbeat_url {
-                send_heartbeat(&client, url.as_ref(), None, &digest).await;
+            let targets = snapshot
+                .peers
+                .iter()
+                .filter_map(|peer| {
+                    peer.ping_url
+                        .as_ref()
+                        .map(|url| (url.as_ref(), peer.ping_token.as_ref().map(AsRef::as_ref)))
+                })
+                .chain(
+                    health
+                        .heartbeat_url
+                        .as_ref()
+                        .map(|url| (url.as_ref(), None)),
+                );
+            // Concurrently, under one deadline: sequential 10 s timeouts would
+            // let a single dead receiver push every other heartbeat late.
+            let round =
+                join_all(targets.map(|(url, token)| send_heartbeat(&client, url, token, &digest)));
+            if tokio::time::timeout(HEARTBEAT_ROUND_DEADLINE, round)
+                .await
+                .is_err()
+            {
+                warn!("heartbeat round abandoned past its deadline");
             }
         }
     })
@@ -234,20 +256,6 @@ async fn send_heartbeat(client: &Client, url: &str, token: Option<&str>, digest:
 
 // --- Peer watches (the inbound side, with quorum) -------------------------
 
-/// The alert state of one watched peer. Kept so a transition is reported once and
-/// a long partition does not re-fire every tick.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PeerAlert {
-    Healthy,
-    /// Down locally and no witness reachable: probably *this* node is isolated, so
-    /// we stayed silent.
-    Isolated,
-    /// Down locally but a witness still sees the peer: a partition, reported once
-    /// as a (low-severity) link-degraded event, not an outage.
-    Partition,
-    Down,
-}
-
 /// The quorum verdict for a peer this node can no longer reach.
 enum Verdict {
     /// No witness vouches for it (or none to consult): a real outage.
@@ -260,7 +268,8 @@ enum Verdict {
 
 /// Spawn the watch task for one peer (the IN side). The supervisor owns these and
 /// reconciles them on config reload, so adding, removing or changing a peer takes
-/// effect without a restart (the captured `peer` is replaced by a fresh task).
+/// effect without a restart (the captured `peer` is replaced by a fresh task,
+/// which picks up the previous one's alert state from `alert_state`).
 #[must_use]
 pub(crate) fn spawn_watch(
     peer: Peer,
@@ -268,43 +277,59 @@ pub(crate) fn spawn_watch(
     pool: SqlitePool,
     client: Client,
     notifier: Notifiers,
+    alert_state: AlertCell,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         // `is_watched()` guarantees `expect_every_secs` is set.
         let expect = peer.expect_every_secs.unwrap_or(60);
+        let cadence = Cadence::Every(expect);
         // When this watch started: heartbeats within `grace_secs` of it are not
         // alerted, so a node whose persisted history looks instantly stale after a
         // restart (e.g. both peers rebooting together) doesn't fire a false down.
         let started = chrono::Utc::now().timestamp();
+        // A peer that never pinged at all is judged from when its first
+        // heartbeat was expected (persisted across restarts), not left unknown.
+        let expected_since = heartbeat_expected_since(&pool, peer.listen_id(), started).await;
         let mut ticker = tokio::time::interval(Duration::from_secs(expect));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut consecutive_down: u32 = 0;
-        let mut alerted = PeerAlert::Healthy;
+        let mut state = alert_state.get().unwrap_or_default();
 
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
                 _ = shutdown.changed() => break,
             }
-            // `None` = never pinged yet: stays unknown (the startup grace), nothing
+            let now = chrono::Utc::now();
+            // `None` = never pinged and not yet late (or a read error): nothing
             // to react to.
-            let Some(outcome) = heartbeat_outcome_for(&pool, peer.listen_id(), expect).await else {
+            let Some(outcome) = heartbeat_outcome_for(
+                &pool,
+                peer.listen_id(),
+                &cadence,
+                expected_since,
+                now.timestamp(),
+            )
+            .await
+            else {
                 continue;
             };
 
             let snapshot = config.borrow().clone();
-            let now = chrono::Utc::now();
-            if snapshot.in_maintenance(peer.listen_id(), now) {
-                continue; // Muted: the miss is still recorded, only alerts are skipped.
+            // Muted by a maintenance window or an ad-hoc silence, exactly like a
+            // monitor: the miss is still recorded, only alerts are skipped.
+            if snapshot.in_maintenance(peer.listen_id(), now)
+                || silenced(&pool, peer.listen_id()).await
+            {
+                continue;
             }
             let threshold = snapshot.alerts.fail_threshold.max(1);
 
             if outcome.up {
-                consecutive_down = 0;
-                if alerted != PeerAlert::Healthy {
+                let previous = state.level;
+                if state.observe_up() {
                     // Only announce recovery if we actually alerted (Isolated was silent).
-                    if matches!(alerted, PeerAlert::Down | PeerAlert::Partition) {
+                    if matches!(previous, AlertLevel::Down | AlertLevel::Partition) {
                         info!(peer = %peer.id, "peer recovered");
                         dispatch(
                             &notifier,
@@ -315,12 +340,14 @@ pub(crate) fn spawn_watch(
                         )
                         .await;
                     }
-                    alerted = PeerAlert::Healthy;
+                    state.level = AlertLevel::Healthy;
                 }
+                alert_state.set(state);
                 continue;
             }
 
-            consecutive_down = consecutive_down.saturating_add(1);
+            let confirmed = state.observe_down(threshold);
+            alert_state.set(state);
             // Hold off during the post-startup grace window (see `started`).
             let grace = i64::try_from(
                 snapshot
@@ -330,7 +357,7 @@ pub(crate) fn spawn_watch(
             )
             .unwrap_or(0);
             let in_grace = now.timestamp() - started < grace;
-            if consecutive_down < threshold || alerted == PeerAlert::Down || in_grace {
+            if !confirmed || in_grace {
                 continue;
             }
 
@@ -342,46 +369,60 @@ pub(crate) fn spawn_watch(
             } else {
                 Verdict::Confirmed
             };
-            match verdict {
-                Verdict::Confirmed => {
-                    error!(peer = %peer.id, "peer down");
-                    dispatch(
-                        &notifier,
-                        &peer,
-                        Event::Down {
-                            monitor: &peer.name,
-                            error: outcome.error.as_deref(),
-                            cause: None,
-                            impacted: &[],
-                            vantage: None,
-                            event: None,
-                        },
-                    )
-                    .await;
-                    alerted = PeerAlert::Down;
-                }
-                Verdict::Partition(witness) if alerted != PeerAlert::Partition => {
-                    warn!(peer = %peer.id, %witness, "peer unreachable but a witness sees it up: treating as a partition, not an outage");
-                    dispatch(
-                        &notifier,
-                        &peer,
-                        Event::PeerLinkDegraded {
-                            peer: &peer.name,
-                            witness: &witness,
-                        },
-                    )
-                    .await;
-                    alerted = PeerAlert::Partition;
-                }
-                Verdict::Isolated if alerted != PeerAlert::Isolated => {
-                    warn!(peer = %peer.id, "peer down but no witness reachable: possible local isolation, not alerting");
-                    alerted = PeerAlert::Isolated;
-                }
-                // Already in this suppressed state: nothing to re-announce.
-                Verdict::Partition(_) | Verdict::Isolated => {}
-            }
+            announce_verdict(&notifier, &peer, &outcome, verdict, &mut state).await;
+            alert_state.set(state);
         }
     })
+}
+
+/// Act on the quorum verdict for a peer confirmed down locally, moving `state`
+/// to the level announced. A suppressed state (partition, isolation) is
+/// announced once, not on every tick it persists.
+async fn announce_verdict(
+    notifier: &Notifiers,
+    peer: &Peer,
+    outcome: &crate::probe::Outcome,
+    verdict: Verdict,
+    state: &mut AlertState,
+) {
+    match verdict {
+        Verdict::Confirmed => {
+            error!(peer = %peer.id, "peer down");
+            dispatch(
+                notifier,
+                peer,
+                Event::Down {
+                    monitor: &peer.name,
+                    error: outcome.error.as_deref(),
+                    cause: None,
+                    impacted: &[],
+                    vantage: None,
+                    event: None,
+                },
+            )
+            .await;
+            state.level = AlertLevel::Down;
+        }
+        Verdict::Partition(witness) if state.level != AlertLevel::Partition => {
+            warn!(peer = %peer.id, %witness, "peer unreachable but a witness sees it up: treating as a partition, not an outage");
+            dispatch(
+                notifier,
+                peer,
+                Event::PeerLinkDegraded {
+                    peer: &peer.name,
+                    witness: &witness,
+                },
+            )
+            .await;
+            state.level = AlertLevel::Partition;
+        }
+        Verdict::Isolated if state.level != AlertLevel::Isolated => {
+            warn!(peer = %peer.id, "peer down but no witness reachable: possible local isolation, not alerting");
+            state.level = AlertLevel::Isolated;
+        }
+        // Already in this suppressed state: nothing to re-announce.
+        Verdict::Partition(_) | Verdict::Isolated => {}
+    }
 }
 
 /// Ask the other peers whether they still see `target`. Witnesses are the peers
@@ -434,32 +475,9 @@ async fn confirm_down(client: &Client, config: &Config, target: &Peer) -> Verdic
 }
 
 /// Fetch a witness's `/healthz` report, or `None` if it is unreachable or replies
-/// with something other than a healthy report.
+/// with something other than a complete, healthy report.
 async fn fetch_witness(client: &Client, url: &str) -> Option<HealthReport> {
-    /// A healthy report is a small JSON object; cap the body so a compromised
-    /// peer can't stream hundreds of MB into memory within the timeout.
-    const MAX_REPORT_BYTES: usize = 64 * 1024;
-
-    let mut response = client.get(url).timeout(WITNESS_TIMEOUT).send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let mut body = Vec::new();
-    loop {
-        match response.chunk().await {
-            Ok(Some(chunk)) => {
-                if body.len() + chunk.len() > MAX_REPORT_BYTES {
-                    return None; // Oversized: treat as an unreachable/unhealthy witness.
-                }
-                body.extend_from_slice(&chunk);
-            }
-            Ok(None) => break,
-            // A transport error mid-body is not a clean end of stream; a report
-            // we could not fully read must not vouch for a healthy witness.
-            Err(_) => return None,
-        }
-    }
-    serde_json::from_slice::<HealthReport>(&body).ok()
+    crate::http::fetch_json_capped(client.get(url), MAX_REPORT_BYTES, WITNESS_TIMEOUT).await
 }
 
 /// Deliver an event to the peer's routed channels (or all, if unrouted).

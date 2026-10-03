@@ -1,7 +1,7 @@
 //! The scheduler: one independent probing loop per monitor, plus alert state.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use hora_notify::Event;
 use reqwest::Client;
@@ -17,33 +17,113 @@ use crate::probe::Outcome;
 use crate::topology;
 use crate::{db, probe, slo};
 
-/// The level a monitor was most recently alerted at, so we never re-alert the
-/// same state and can detect transitions (escalation, recovery).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AlertLevel {
+/// The level a monitor (or watched peer) was most recently alerted at, so we
+/// never re-alert the same state and can detect transitions (escalation,
+/// recovery).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum AlertLevel {
+    #[default]
     Healthy,
     Degraded,
     Down,
+    /// Peer watches only: down locally but a witness still sees the peer, a
+    /// partition reported once as a link-degraded event, not an outage.
+    Partition,
+    /// Peer watches only: down locally and no witness reachable, so probably
+    /// *this* node is isolated - nothing was announced.
+    Isolated,
 }
 
 /// Edge-triggered burn-rate alert state: each severity fires once when its
 /// window pair first exceeds the threshold and re-arms when the long window
 /// cools back down.
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct BurnAlerts {
     fast: bool,
     slow: bool,
 }
 
 impl BurnAlerts {
-    fn any(&self) -> bool {
+    fn any(self) -> bool {
         self.fast || self.slow
+    }
+}
+
+/// The anti-flap alert state machine, shared by monitor loops and peer
+/// watches: consecutive-failure counters against the threshold, plus the level
+/// last announced. Pure (no I/O), so the transitions are unit-testable; the
+/// callers perform the side effect and then record the new [`AlertLevel`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AlertState {
+    pub(crate) level: AlertLevel,
+    consecutive_down: u32,
+    consecutive_degraded: u32,
+    burn: BurnAlerts,
+}
+
+impl AlertState {
+    /// The state of a monitor found mid-outage at startup (an incident is
+    /// still open): its down was already announced by the previous run, so a
+    /// still-down monitor must not alert again, and its recovery must be.
+    fn resumed_down(threshold: u32) -> Self {
+        Self {
+            level: AlertLevel::Down,
+            consecutive_down: threshold,
+            ..Self::default()
+        }
+    }
+
+    /// Count a down tick. `true` when this tick confirms the outage: the
+    /// threshold is reached and the down has not been announced yet.
+    pub(crate) fn observe_down(&mut self, threshold: u32) -> bool {
+        self.consecutive_down = self.consecutive_down.saturating_add(1);
+        self.consecutive_degraded = 0;
+        self.consecutive_down >= threshold && self.level != AlertLevel::Down
+    }
+
+    /// Count an up-but-slow tick (only when degraded alerts are on). `true`
+    /// when this tick confirms the degradation, same threshold as down.
+    fn observe_degraded(&mut self, threshold: u32) -> bool {
+        self.consecutive_degraded = self.consecutive_degraded.saturating_add(1);
+        self.consecutive_down = 0;
+        self.consecutive_degraded >= threshold && self.level != AlertLevel::Degraded
+    }
+
+    /// Count a healthy tick. `true` when something was alerted before (the
+    /// caller decides what a recovery from [`Self::level`] announces, then
+    /// resets it to [`AlertLevel::Healthy`]).
+    pub(crate) fn observe_up(&mut self) -> bool {
+        self.consecutive_down = 0;
+        self.consecutive_degraded = 0;
+        self.level != AlertLevel::Healthy
+    }
+}
+
+/// One monitor's (or peer's) alert state, owned by the supervisor and handed to
+/// each task it spawns for that id. A task restarted by a config edit or after
+/// a crash picks up where the previous one stopped: a still-down monitor is not
+/// announced twice, and its recovery is not lost. Empty until the first task
+/// seeds it (from the open incident, see [`AlertState::resumed_down`]).
+///
+/// The task writes it back synchronously right after each transition's side
+/// effect, so an abort (always at an `.await`) can at worst repeat an alert
+/// whose delivery it interrupted, never lose one.
+#[derive(Clone, Debug, Default)]
+pub struct AlertCell(Arc<Mutex<Option<AlertState>>>);
+
+impl AlertCell {
+    pub(crate) fn get(&self) -> Option<AlertState> {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn set(&self, state: AlertState) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(state);
     }
 }
 
 /// Everything a monitor loop borrows from the application: storage, its HTTP
 /// client, the notifier set (degraded/burn alerts), the coalescer inbox
-/// (down/recovered alerts), and the liveness beacon.
+/// (down/recovered alerts), the liveness beacon, and its alert state.
 pub struct MonitorDeps {
     pub pool: SqlitePool,
     pub client: Client,
@@ -54,6 +134,8 @@ pub struct MonitorDeps {
     pub notifier: Notifiers,
     pub alerts: mpsc::UnboundedSender<AlertMsg>,
     pub last_tick: Arc<AtomicU64>,
+    /// Survives this task: see [`AlertCell`].
+    pub alert_state: AlertCell,
 }
 
 /// Spawn the probing loop for a single monitor. Aborting the returned handle
@@ -70,16 +152,33 @@ pub fn spawn_monitor(
 }
 
 /// The phase shift for a monitor's first tick: a stable hash of its id spread
-/// over the interval, capped at one minute. Deterministic (`DefaultHasher::new`
-/// uses fixed keys) so a monitor keeps its phase across restarts and reloads.
+/// over the interval, capped at one minute. FNV-1a rather than std's
+/// `DefaultHasher`, whose algorithm is unspecified and may change with the
+/// toolchain: a monitor keeps its phase across restarts, reloads and upgrades.
 fn stagger_offset(id: &str, interval: std::time::Duration) -> std::time::Duration {
-    use std::hash::{Hash as _, Hasher as _};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    id.hash(&mut hasher);
     let span = interval.min(std::time::Duration::from_mins(1));
-    span.mul_f64(f64::from(u32::try_from(hasher.finish() % 1000).unwrap_or(0)) / 1000.0)
+    span.mul_f64(f64::from(u32::try_from(fnv1a(id.as_bytes()) % 1000).unwrap_or(0)) / 1000.0)
 }
 
+/// 64-bit FNV-1a: tiny, fixed forever, good enough to spread ids over phases.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    bytes.iter().fold(OFFSET_BASIS, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+    })
+}
+
+/// Send an alert to the coalescer. It only fails once the coalescer is gone
+/// (it panicked, or shutdown is under way), and then the alert is lost: say so
+/// loudly rather than dropping it in silence.
+fn send_alert(alerts: &mpsc::UnboundedSender<AlertMsg>, monitor_id: &str, message: AlertMsg) {
+    if alerts.send(message).is_err() {
+        error!(monitor = %monitor_id, "alert dropped: the alert coalescer is not running");
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 async fn run(
     monitor: Monitor,
     config: watch::Receiver<Arc<Config>>,
@@ -93,6 +192,7 @@ async fn run(
         notifier,
         alerts,
         last_tick,
+        alert_state,
     } = deps;
     // Fixed cadence: the tick interval does not drift by the probe duration.
     // The first tick is phase-shifted per monitor so a fleet sharing the same
@@ -104,10 +204,6 @@ async fn run(
     let mut ticker =
         tokio::time::interval_at(tokio::time::Instant::now() + offset, monitor.interval());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut consecutive_down: u32 = 0;
-    let mut consecutive_degraded: u32 = 0;
-    let mut alerted = AlertLevel::Healthy;
-    let mut burn = BurnAlerts::default();
     // The exec directory comes from the environment (immutable for the process
     // lifetime), so one read outlives every config reload.
     let exec_dir = config.borrow().exec_dir.clone();
@@ -118,6 +214,25 @@ async fn run(
         .await
         .ok()
         .flatten();
+    // The alert state of the previous task for this id, if the supervisor
+    // restarted it; otherwise (daemon start) an open incident says the down
+    // was already announced.
+    let mut state = alert_state.get().unwrap_or_else(|| {
+        if open_incident.is_some() {
+            AlertState::resumed_down(alert_settings(&config, &monitor.id).1)
+        } else {
+            AlertState::default()
+        }
+    });
+    alert_state.set(state);
+    // Push monitors are judged from stored heartbeats against their cadence,
+    // counted from the first heartbeat expected (persisted, so a monitor that
+    // never pinged still alerts across restarts).
+    let heartbeat = if monitor.kind == Kind::Push {
+        HeartbeatWatch::for_monitor(&pool, &monitor).await
+    } else {
+        None
+    };
 
     loop {
         tokio::select! {
@@ -133,9 +248,16 @@ async fn run(
             Ordering::Relaxed,
         );
 
-        // No outcome means a push monitor without a heartbeat yet: status
-        // stays unknown, nothing to react to this tick.
-        let Some(outcome) = tick_outcome(&client, &pool, &monitor, exec_dir.as_deref()).await
+        // No outcome means a push monitor still inside its first expected
+        // window (or a read error): status stays unknown, nothing to react to.
+        let Some(outcome) = tick_outcome(
+            &client,
+            &pool,
+            &monitor,
+            exec_dir.as_deref(),
+            heartbeat.as_ref(),
+        )
+        .await
         else {
             continue;
         };
@@ -144,7 +266,7 @@ async fn run(
         // page only shows "degraded" until the threshold confirms, so this is
         // where a blip's reason is visible). Quiet once the outage is
         // confirmed - "confirmed down" already said it.
-        if !outcome.up && alerted != AlertLevel::Down {
+        if !outcome.up && state.level != AlertLevel::Down {
             warn!(
                 monitor = %monitor.id,
                 error = outcome.error.as_deref().unwrap_or("unknown"),
@@ -175,18 +297,17 @@ async fn run(
         // cost nothing; once tripped, evaluation continues on up ticks so the
         // alert can re-arm when the windows cool.
         if let Some(slo_bp) = monitor.slo_uptime
-            && (!outcome.up || burn.any())
+            && (!outcome.up || state.burn.any())
         {
-            evaluate_burn(&pool, &notifier, &monitor, slo_bp, &mut burn).await;
+            evaluate_burn(&pool, &notifier, &monitor, slo_bp, &mut state.burn).await;
+            alert_state.set(state);
         }
 
         if !outcome.up {
             // Down resets degraded tracking; alert once `threshold` consecutive
             // failures confirm it (escalating from healthy or degraded).
-            consecutive_down = consecutive_down.saturating_add(1);
-            consecutive_degraded = 0;
-            if consecutive_down >= threshold && alerted != AlertLevel::Down {
-                error!(monitor = %monitor.id, failures = consecutive_down, "confirmed down");
+            if state.observe_down(threshold) {
+                error!(monitor = %monitor.id, failures = state.consecutive_down, "confirmed down");
                 let snapshot = config.borrow().clone();
                 confirm_down(
                     &snapshot,
@@ -199,32 +320,34 @@ async fn run(
                     &mut open_incident,
                 )
                 .await;
-                alerted = AlertLevel::Down;
+                state.level = AlertLevel::Down;
             }
         } else if outcome.degraded && alert_on_degraded {
             // Up but slow: same anti-flap threshold as down, separate state.
-            consecutive_degraded = consecutive_degraded.saturating_add(1);
-            consecutive_down = 0;
-            if consecutive_degraded >= threshold && alerted != AlertLevel::Degraded {
+            if state.observe_degraded(threshold) {
                 alert_degraded(&notifier, &monitor, outcome.latency_ms).await;
-                alerted = AlertLevel::Degraded;
+                state.level = AlertLevel::Degraded;
             }
-        } else {
-            // Fully healthy (or degraded with the option off, treated as up).
-            consecutive_down = 0;
-            consecutive_degraded = 0;
-            if alerted != AlertLevel::Healthy {
-                info!(monitor = %monitor.id, "recovered");
-                // Through the coalescer too: the recovery of a folded down
-                // alert stays silent (nothing was announced going down).
-                let _ = alerts.send(AlertMsg::Recovered {
+        } else if state.observe_up() {
+            // Fully healthy (or degraded with the option off, treated as up)
+            // after an alert.
+            info!(monitor = %monitor.id, "recovered");
+            // Through the coalescer too: the recovery of a folded down
+            // alert stays silent (nothing was announced going down).
+            send_alert(
+                &alerts,
+                &monitor.id,
+                AlertMsg::Recovered {
                     id: monitor.id.clone(),
                     name: monitor.name.clone(),
                     notify: monitor.notify.clone(),
-                });
-                alerted = AlertLevel::Healthy;
-            }
+                },
+            );
+            state.level = AlertLevel::Healthy;
         }
+        // Written back right after the side effect, with no `.await` in
+        // between: see [`AlertCell`].
+        alert_state.set(state);
     }
 }
 
@@ -283,20 +406,24 @@ async fn confirm_down(
     // The coalescer groups on the *configured* upstreams: in a cascade this
     // monitor often confirms a tick before its upstream is derivably down,
     // so the derived cause alone would lose the race.
-    let _ = alerts.send(AlertMsg::Down(DownAlert {
-        id: monitor.id.clone(),
-        name: monitor.name.clone(),
-        error: outcome.error.clone(),
-        upstreams: topology::transitive_upstreams(&config.monitors, &monitor.id)
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-        cause_name: cause.map(|(_, name)| name),
-        impacted: impacted_names,
-        notify: monitor.notify.clone(),
-        vantage,
-        event,
-    }));
+    send_alert(
+        alerts,
+        &monitor.id,
+        AlertMsg::Down(DownAlert {
+            id: monitor.id.clone(),
+            name: monitor.name.clone(),
+            error: outcome.error.clone(),
+            upstreams: topology::transitive_upstreams(&config.monitors, &monitor.id)
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            cause_name: cause.map(|(_, name)| name),
+            impacted: impacted_names,
+            notify: monitor.notify.clone(),
+            vantage,
+            event,
+        }),
+    );
 }
 
 /// How far back a recorded event still counts as "what changed" for a down
@@ -360,7 +487,7 @@ async fn alert_degraded(notifier: &Notifiers, monitor: &Monitor, latency_ms: Opt
 
 /// Whether an ad-hoc silence covers this monitor right now. A read error fails
 /// open (logged, not silenced): a database hiccup must never mute an alert.
-async fn silenced(pool: &SqlitePool, monitor_id: &str) -> bool {
+pub(crate) async fn silenced(pool: &SqlitePool, monitor_id: &str) -> bool {
     match db::is_silenced(pool, monitor_id, chrono::Utc::now().timestamp()).await {
         Ok(silenced) => silenced,
         Err(err) => {
@@ -387,9 +514,19 @@ async fn tick_outcome(
     pool: &SqlitePool,
     monitor: &Monitor,
     exec_dir: Option<&std::path::Path>,
+    heartbeat: Option<&HeartbeatWatch>,
 ) -> Option<Outcome> {
     if monitor.kind == Kind::Push {
-        return heartbeat_outcome(pool, monitor).await;
+        // `None` only for an unusable cron schedule (logged at startup).
+        let watch = heartbeat?;
+        return heartbeat_outcome_for(
+            pool,
+            &monitor.id,
+            &watch.cadence,
+            watch.expected_since,
+            chrono::Utc::now().timestamp(),
+        )
+        .await;
     }
     let outcome = if monitor.kind == Kind::Exec {
         match exec_dir {
@@ -532,48 +669,6 @@ async fn fire_burn_alert(
         .await;
 }
 
-/// Evaluate a push monitor from its stored heartbeats: down (and record it) when
-/// one is overdue, up otherwise. Without a `schedule`, a heartbeat is overdue
-/// once it is older than the interval; with one, only once a scheduled run has
-/// missed its grace window. `None` means no heartbeat yet (or a read error) -
-/// the loop skips this tick, leaving the status unknown.
-async fn heartbeat_outcome(pool: &SqlitePool, monitor: &Monitor) -> Option<Outcome> {
-    let Some(schedule) = &monitor.schedule else {
-        return heartbeat_outcome_for(pool, &monitor.id, monitor.interval_secs).await;
-    };
-    // Validated at config load; a parse failure here is defensive only.
-    let Ok(cron) = crate::config::parse_cron(schedule) else {
-        error!(monitor = %monitor.id, "invalid cron schedule {schedule:?}");
-        return None;
-    };
-
-    let last = last_heartbeat(pool, &monitor.id).await?;
-    let now = chrono::Utc::now().timestamp();
-    match cron_missed(&cron, last, monitor.push_grace_secs(), now) {
-        Some(due) => {
-            let due_label = chrono::DateTime::from_timestamp(due, 0)
-                .map_or_else(|| due.to_string(), |dt| dt.format("%H:%M UTC").to_string());
-            let reason = format!(
-                "missed scheduled heartbeat (was due {due_label} + {}m grace)",
-                monitor.push_grace_secs() / 60
-            );
-            Some(record_missed_heartbeat(pool, &monitor.id, reason).await)
-        }
-        None => Some(up_heartbeat()),
-    }
-}
-
-/// With a cron schedule, the heartbeat is overdue once `now` passes the first
-/// scheduled run *after* the last heartbeat. Returns that due time when missed
-/// (for the alert message), `None` while on time. A schedule with no computable
-/// next occurrence never alerts rather than alerting forever.
-fn cron_missed(cron: &croner::Cron, last: i64, grace_secs: u64, now: i64) -> Option<i64> {
-    let last_at = chrono::DateTime::from_timestamp(last, 0)?;
-    let due = cron.find_next_occurrence(&last_at, false).ok()?.timestamp();
-    let deadline = due.saturating_add(i64::try_from(grace_secs).unwrap_or(i64::MAX));
-    (now > deadline).then_some(due)
-}
-
 /// Compute topology annotation for a down alert: the nearest down upstream
 /// (`cause`, as config id + display name) if any, or the list of impacted
 /// dependents (`impacted`) if this monitor is a root cause. Returns
@@ -607,70 +702,264 @@ async fn down_context(
     (None, impacted)
 }
 
-/// Evaluate a heartbeat from the stored pings for `id` against `interval_secs`:
-/// down (and record it) when none arrived within the interval, up when one did.
-/// `None` means no heartbeat yet (or a read error), leaving the status unknown -
-/// which is also the startup grace, since a peer that has never pinged is unknown,
-/// not down. Shared by push monitors and peer watches.
-///
-/// Staleness is measured from the last *positive* heartbeat, not the last check:
-/// the misses recorded below carry a fresh timestamp, so measuring from the latter
-/// would reset the clock each tick and the monitor would flap instead of
-/// confirming down (see [`db::last_heartbeat_time`]).
-pub(crate) async fn heartbeat_outcome_for(
-    pool: &SqlitePool,
-    id: &str,
-    interval_secs: u64,
-) -> Option<Outcome> {
-    let last = last_heartbeat(pool, id).await?;
-    let now = chrono::Utc::now().timestamp();
-    let max_gap = i64::try_from(interval_secs).unwrap_or(i64::MAX);
-    if now - last > max_gap {
-        Some(record_missed_heartbeat(pool, id, "missing heartbeat".to_owned()).await)
-    } else {
-        Some(up_heartbeat())
-    }
+/// How often a heartbeat (a push monitor's, or a watched peer's) is expected.
+pub(crate) enum Cadence {
+    /// At least one heartbeat every this many seconds.
+    Every(u64),
+    /// One per scheduled run of a cron expression, late by at most `grace_secs`.
+    Cron {
+        cron: Box<croner::Cron>,
+        grace_secs: u64,
+    },
 }
 
-/// The last *positive* heartbeat time, or `None` for never/unreadable (logged).
-async fn last_heartbeat(pool: &SqlitePool, id: &str) -> Option<i64> {
-    match db::last_heartbeat_time(pool, id).await {
-        Ok(last) => last,
-        Err(err) => {
-            error!(monitor = %id, "failed to read last heartbeat: {err:#}");
-            None
+impl Cadence {
+    /// Why a heartbeat last seen at `since` is overdue at `now`, or `None`
+    /// while it is on time. `seen` says whether `since` is a real heartbeat
+    /// (or only when one was first expected): only a real one may count for
+    /// the run it slightly precedes (see [`cron_due`]).
+    fn overdue(&self, since: i64, seen: bool, now: i64) -> Option<String> {
+        match self {
+            Self::Every(interval_secs) => {
+                let max_gap = i64::try_from(*interval_secs).unwrap_or(i64::MAX);
+                (now - since > max_gap).then(|| "missing heartbeat".to_owned())
+            }
+            Self::Cron { cron, grace_secs } => {
+                let early_ok = seen.then_some(*grace_secs);
+                let due = cron_missed(cron, since, *grace_secs, early_ok, now)?;
+                let due_label = chrono::DateTime::from_timestamp(due, 0)
+                    .map_or_else(|| due.to_string(), |dt| dt.format("%H:%M UTC").to_string());
+                Some(format!(
+                    "missed scheduled heartbeat (was due {due_label} + {}m grace)",
+                    grace_secs / 60
+                ))
+            }
         }
     }
 }
 
-/// Record a missed heartbeat as a down check so the page and alerting react.
-/// The up-checks themselves are written by the push endpoint; staleness stays
-/// measured from the last positive heartbeat, so this recorded miss does not
-/// mask the ongoing outage.
-async fn record_missed_heartbeat(pool: &SqlitePool, id: &str, reason: String) -> Outcome {
-    let outcome = Outcome::down(reason);
-    if let Err(err) = db::insert_check(pool, id, outcome.status_value(), &outcome).await {
-        error!(monitor = %id, "failed to record heartbeat miss: {err:#}");
-    }
-    outcome
+/// A push monitor's heartbeat expectations, resolved once per task.
+struct HeartbeatWatch {
+    cadence: Cadence,
+    /// When a heartbeat was first expected (persisted, see
+    /// [`heartbeat_expected_since`]).
+    expected_since: i64,
 }
 
-/// A healthy heartbeat outcome - the up-check is already recorded by the push
-/// endpoint, so nothing is written here.
-fn up_heartbeat() -> Outcome {
-    Outcome {
-        up: true,
-        degraded: false,
-        latency_ms: None,
-        status_code: None,
-        error: None,
-        snapshot: None,
+impl HeartbeatWatch {
+    /// `None` (logged) for a schedule that does not parse - validated at
+    /// config load, so defensive only: the monitor then stays unknown.
+    async fn for_monitor(pool: &SqlitePool, monitor: &Monitor) -> Option<Self> {
+        let cadence = match &monitor.schedule {
+            None => Cadence::Every(monitor.interval_secs),
+            Some(schedule) => {
+                let Ok(cron) = crate::config::parse_cron(schedule) else {
+                    error!(monitor = %monitor.id, "invalid cron schedule {schedule:?}");
+                    return None;
+                };
+                Cadence::Cron {
+                    cron: Box::new(cron),
+                    grace_secs: monitor.push_grace_secs(),
+                }
+            }
+        };
+        let now = chrono::Utc::now().timestamp();
+        Some(Self {
+            cadence,
+            expected_since: heartbeat_expected_since(pool, &monitor.id, now).await,
+        })
+    }
+}
+
+/// When a heartbeat was first expected for `id`: the first time a task ever
+/// watched it, persisted in `meta` so a restart does not push the deadline
+/// back. A job that never pings (broken from day one, a typo in its push URL)
+/// is then judged against this instead of staying unknown forever. A database
+/// error falls back to `now`, unpersisted: the watch still works, just from
+/// this start.
+pub(crate) async fn heartbeat_expected_since(pool: &SqlitePool, id: &str, now: i64) -> i64 {
+    let key = format!("heartbeat_expected_since:{id}");
+    match db::meta_get(pool, &key).await {
+        Ok(Some(stored)) => {
+            if let Ok(since) = stored.parse::<i64>() {
+                return since;
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            error!(monitor = %id, "failed to read the heartbeat start: {err:#}");
+            return now;
+        }
+    }
+    if let Err(err) = db::meta_set(pool, &key, &now.to_string()).await {
+        error!(monitor = %id, "failed to record the heartbeat start: {err:#}");
+    }
+    now
+}
+
+/// With a cron schedule, the heartbeat is overdue once `now` passes the
+/// scheduled run it should have answered (see [`cron_due`]) plus the grace.
+/// Returns that due time when missed (for the alert message), `None` while on
+/// time. A schedule with no computable next occurrence never alerts rather
+/// than alerting forever.
+fn cron_missed(
+    cron: &croner::Cron,
+    last: i64,
+    grace_secs: u64,
+    early_secs: Option<u64>,
+    now: i64,
+) -> Option<i64> {
+    let due = cron_due(cron, last, early_secs)?;
+    let deadline = due.saturating_add(i64::try_from(grace_secs).unwrap_or(i64::MAX));
+    (now > deadline).then_some(due)
+}
+
+/// The scheduled run the next heartbeat after `last` must answer: normally the
+/// first run after `last`. A heartbeat arriving slightly *before* a run (clock
+/// skew between the job's host and this one, a job that pings as it starts)
+/// belongs to that run, so the one after it is due instead - otherwise a ping
+/// at 02:59:59 for a `0 3 * * *` job reads as "missed 03:00". "Slightly" is
+/// the grace (`early_secs`), capped at half the gap between runs so a frequent
+/// schedule can never skip a real run this way.
+fn cron_due(cron: &croner::Cron, last: i64, early_secs: Option<u64>) -> Option<i64> {
+    let last_at = chrono::DateTime::from_timestamp(last, 0)?;
+    let next = cron.find_next_occurrence(&last_at, false).ok()?;
+    let Some(early_secs) = early_secs else {
+        return Some(next.timestamp());
+    };
+    let Ok(after) = cron.find_next_occurrence(&next, false) else {
+        return Some(next.timestamp());
+    };
+    let (next, after) = (next.timestamp(), after.timestamp());
+    let early = i64::try_from(early_secs)
+        .unwrap_or(i64::MAX)
+        .min((after - next) / 2);
+    Some(if next - last <= early { after } else { next })
+}
+
+/// What the stored heartbeats say about a push monitor or peer right now.
+#[derive(Debug)]
+enum HeartbeatVerdict {
+    /// Never pinged, and the first expected heartbeat is not late yet.
+    Unknown,
+    /// The heartbeat is overdue, for this reason.
+    Overdue(String),
+    /// On time: the outcome of the latest heartbeat, as pushed.
+    OnTime(Outcome),
+}
+
+/// Judge the latest heartbeat (`None`: never pinged) against the cadence at
+/// `now`. A monitor that never pinged is judged from when a heartbeat was
+/// first expected. An on-time heartbeat yields what the job pushed: an
+/// explicit `status=down` is down with the job's own message, `degraded` is
+/// degraded - the job's verdict, not just its liveness, drives the alert.
+fn judge_heartbeat(
+    cadence: &Cadence,
+    last: Option<&db::Heartbeat>,
+    expected_since: i64,
+    now: i64,
+) -> HeartbeatVerdict {
+    let since = last.map_or(expected_since, |beat| beat.time);
+    if let Some(reason) = cadence.overdue(since, last.is_some(), now) {
+        return HeartbeatVerdict::Overdue(if last.is_some() {
+            reason
+        } else {
+            "no heartbeat received yet".to_owned()
+        });
+    }
+    let Some(beat) = last else {
+        return HeartbeatVerdict::Unknown;
+    };
+    HeartbeatVerdict::OnTime(match beat.status {
+        0 => Outcome::down(
+            beat.error
+                .clone()
+                .unwrap_or_else(|| "push reported down".to_owned()),
+        ),
+        status => Outcome {
+            up: true,
+            degraded: status == 2,
+            latency_ms: beat.latency_ms,
+            status_code: None,
+            error: None,
+            snapshot: None,
+        },
+    })
+}
+
+/// Evaluate a heartbeat-driven monitor (push monitor or peer watch) from the
+/// stored pings for `id`: down (and recorded as a miss) when overdue, else the
+/// latest heartbeat's own status. `None` means nothing to react to yet (never
+/// pinged and not yet late, or a read error).
+///
+/// Staleness is measured from the last *heartbeat*, not the last check: the
+/// misses recorded here carry a fresh timestamp, so measuring from them would
+/// reset the clock each tick and the monitor would flap instead of confirming
+/// down (see [`db::last_heartbeat`]).
+pub(crate) async fn heartbeat_outcome_for(
+    pool: &SqlitePool,
+    id: &str,
+    cadence: &Cadence,
+    expected_since: i64,
+    now: i64,
+) -> Option<Outcome> {
+    let last = match db::last_heartbeat(pool, id).await {
+        Ok(last) => last,
+        Err(err) => {
+            error!(monitor = %id, "failed to read last heartbeat: {err:#}");
+            return None;
+        }
+    };
+    match judge_heartbeat(cadence, last.as_ref(), expected_since, now) {
+        HeartbeatVerdict::Unknown => None,
+        HeartbeatVerdict::OnTime(outcome) => Some(outcome),
+        HeartbeatVerdict::Overdue(reason) => {
+            // Recorded so the page and history show it; marked as a miss so it
+            // never reads as a heartbeat (or as the job's own down).
+            if let Err(err) = db::insert_heartbeat_miss(pool, id, &reason).await {
+                error!(monitor = %id, "failed to record heartbeat miss: {err:#}");
+            }
+            Some(Outcome::down(reason))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::time::Duration;
+
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    async fn memory_pool() -> SqlitePool {
+        let options = SqliteConnectOptions::new()
+            .filename(":memory:")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect in-memory");
+        db::migrator().run(&pool).await.expect("run migrations");
+        pool
+    }
+
+    fn beat(time: i64, status: i64, error: Option<&str>) -> db::Heartbeat {
+        db::Heartbeat {
+            time,
+            status,
+            latency_ms: None,
+            error: error.map(str::to_owned),
+        }
+    }
+
+    fn nightly() -> Cadence {
+        Cadence::Cron {
+            cron: Box::new("0 3 * * *".parse().expect("valid cron")),
+            grace_secs: 1800,
+        }
+    }
 
     #[test]
     fn stagger_offset_is_stable_and_bounded() {
@@ -684,6 +973,14 @@ mod tests {
         assert!(stagger_offset("api", five_secs) < five_secs);
         let daily = std::time::Duration::from_hours(24);
         assert!(stagger_offset("api", daily) < minute);
+    }
+
+    #[test]
+    fn stagger_hash_is_fixed_across_toolchains() {
+        // The published FNV-1a 64 test vectors: phases never move on upgrade.
+        assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a(b"foobar"), 0x8594_4171_f739_67e8);
     }
 
     #[test]
@@ -714,12 +1011,293 @@ mod tests {
         let grace: u64 = 1800;
         let deadline = due + 1800; // due + grace, as a timestamp
 
-        // Before the next run, and within the grace window: on time.
-        assert_eq!(cron_missed(&cron, last, grace, due - 3600), None);
-        assert_eq!(cron_missed(&cron, last, grace, deadline), None);
-        // Past due + grace: missed, reporting the due time.
-        assert_eq!(cron_missed(&cron, last, grace, deadline + 1), Some(due));
-        // A heartbeat long dead stays missed until a fresh ping moves `last`.
-        assert_eq!(cron_missed(&cron, last, grace, due + 30 * day), Some(due));
+        for early in [None, Some(grace)] {
+            // Before the next run, and within the grace window: on time.
+            assert_eq!(cron_missed(&cron, last, grace, early, due - 3600), None);
+            assert_eq!(cron_missed(&cron, last, grace, early, deadline), None);
+            // Past due + grace: missed, reporting the due time.
+            assert_eq!(
+                cron_missed(&cron, last, grace, early, deadline + 1),
+                Some(due)
+            );
+            // A heartbeat long dead stays missed until a fresh ping moves `last`.
+            assert_eq!(
+                cron_missed(&cron, last, grace, early, due + 30 * day),
+                Some(due)
+            );
+        }
+    }
+
+    #[test]
+    fn early_cron_heartbeat_counts_for_the_run_it_precedes() {
+        let cron: croner::Cron = "0 3 * * *".parse().expect("valid cron");
+        let day = 86_400;
+        let run = day + 3 * 3600; // 03:00, day 2
+        let grace: u64 = 1800;
+        // Pinged at 02:59:59 (clock skew): that is the 03:00 run, so 03:30
+        // today is *not* a miss - tomorrow's run is the one due.
+        let last = run - 1;
+        assert_eq!(
+            cron_missed(&cron, last, grace, Some(grace), run + 1801),
+            None
+        );
+        assert_eq!(
+            cron_missed(&cron, last, grace, Some(grace), run + day + 1801),
+            Some(run + day)
+        );
+        // Without the early allowance (only a "first expected" time, not a
+        // real ping) the 03:00 run is still due.
+        assert_eq!(cron_missed(&cron, last, grace, None, run + 1801), Some(run));
+        // Far ahead of the run (more than the grace) is not "slightly early".
+        let last = run - 3600;
+        assert_eq!(
+            cron_missed(&cron, last, grace, Some(grace), run + 1801),
+            Some(run)
+        );
+    }
+
+    #[test]
+    fn early_allowance_never_skips_a_run_of_a_frequent_schedule() {
+        // Every 15 minutes with a 30-minute grace: a ping right after 03:00
+        // must not be taken as the 03:15 run (half the gap caps the allowance).
+        let cron: croner::Cron = "*/15 * * * *".parse().expect("valid cron");
+        let run = 86_400 + 3 * 3600; // 03:00
+        assert_eq!(cron_due(&cron, run + 5, Some(1800)), Some(run + 900));
+        // 02:59:00 is within half the gap of 03:00: it answers 03:00.
+        assert_eq!(cron_due(&cron, run - 60, Some(1800)), Some(run + 900));
+    }
+
+    #[test]
+    fn explicit_down_and_degraded_pushes_drive_the_outcome() {
+        let every = Cadence::Every(60);
+        let now = 1_000;
+
+        // A fresh `status=down&msg=backup failed`: down, with the job's words.
+        let HeartbeatVerdict::OnTime(outcome) =
+            judge_heartbeat(&every, Some(&beat(990, 0, Some("backup failed"))), 0, now)
+        else {
+            panic!("on time");
+        };
+        assert!(!outcome.up);
+        assert_eq!(outcome.error.as_deref(), Some("backup failed"));
+
+        // Without a message it still reads as the job's own verdict.
+        let HeartbeatVerdict::OnTime(outcome) =
+            judge_heartbeat(&every, Some(&beat(990, 0, None)), 0, now)
+        else {
+            panic!("on time");
+        };
+        assert_eq!(outcome.error.as_deref(), Some("push reported down"));
+
+        // Degraded is up-but-degraded, so `alert_on_degraded` applies.
+        let HeartbeatVerdict::OnTime(outcome) =
+            judge_heartbeat(&every, Some(&beat(990, 2, None)), 0, now)
+        else {
+            panic!("on time");
+        };
+        assert!(outcome.up && outcome.degraded);
+
+        // Up is up.
+        let HeartbeatVerdict::OnTime(outcome) =
+            judge_heartbeat(&every, Some(&beat(990, 1, None)), 0, now)
+        else {
+            panic!("on time");
+        };
+        assert!(outcome.up && !outcome.degraded);
+
+        // Any of them, once stale, is a missing heartbeat.
+        assert!(matches!(
+            judge_heartbeat(&every, Some(&beat(900, 0, Some("x"))), 0, now),
+            HeartbeatVerdict::Overdue(reason) if reason == "missing heartbeat"
+        ));
+    }
+
+    #[test]
+    fn a_monitor_that_never_pinged_alerts_after_its_first_window() {
+        let every = Cadence::Every(60);
+        // Expected since t=1000: unknown within the interval...
+        assert!(matches!(
+            judge_heartbeat(&every, None, 1000, 1060),
+            HeartbeatVerdict::Unknown
+        ));
+        // ...then overdue, saying why.
+        assert!(matches!(
+            judge_heartbeat(&every, None, 1000, 1061),
+            HeartbeatVerdict::Overdue(reason) if reason == "no heartbeat received yet"
+        ));
+
+        // Scheduled: the first run after it was expected, plus the grace.
+        let day = 86_400;
+        let since = day + 3600; // 01:00, day 2
+        let run = day + 3 * 3600; // 03:00, day 2
+        assert!(matches!(
+            judge_heartbeat(&nightly(), None, since, run + 1800),
+            HeartbeatVerdict::Unknown
+        ));
+        assert!(matches!(
+            judge_heartbeat(&nightly(), None, since, run + 1801),
+            HeartbeatVerdict::Overdue(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_expectation_survives_restarts() {
+        let pool = memory_pool().await;
+        assert_eq!(heartbeat_expected_since(&pool, "job", 1000).await, 1000);
+        // A later task start (daemon restart) keeps the original deadline.
+        assert_eq!(heartbeat_expected_since(&pool, "job", 5000).await, 1000);
+        // Per id.
+        assert_eq!(heartbeat_expected_since(&pool, "other", 5000).await, 5000);
+    }
+
+    #[tokio::test]
+    async fn explicit_down_push_is_evaluated_and_never_recorded_as_a_miss() {
+        let pool = memory_pool().await;
+        let now = chrono::Utc::now().timestamp();
+        db::insert_push(&pool, "job", 0, None, Some("backup failed"))
+            .await
+            .unwrap();
+        let outcome = heartbeat_outcome_for(&pool, "job", &Cadence::Every(60), now, now)
+            .await
+            .expect("an outcome");
+        assert!(!outcome.up);
+        assert_eq!(outcome.error.as_deref(), Some("backup failed"));
+        // Only the push itself is stored: an on-time down records no miss.
+        assert_eq!(db::recent_checks(&pool, "job", 10).await.unwrap().len(), 1);
+
+        // Never pinged and past its first window: a recorded miss.
+        let outcome = heartbeat_outcome_for(&pool, "silent", &Cadence::Every(60), now - 120, now)
+            .await
+            .expect("an outcome");
+        assert_eq!(outcome.error.as_deref(), Some("no heartbeat received yet"));
+        let rows = db::recent_checks(&pool, "silent", 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, 0);
+        // And that miss is not a heartbeat: still never pinged.
+        assert_eq!(db::last_heartbeat(&pool, "silent").await.unwrap(), None);
+    }
+
+    #[test]
+    fn alert_state_confirms_once_and_recovers_once() {
+        let mut state = AlertState::default();
+        assert!(!state.observe_down(2));
+        assert!(state.observe_down(2), "threshold reached");
+        state.level = AlertLevel::Down;
+        assert!(!state.observe_down(2), "already announced");
+
+        // A restarted task resumes the same state: no second down...
+        let mut resumed = state;
+        assert!(!resumed.observe_down(2));
+        // ...and the recovery is still owed.
+        assert!(resumed.observe_up());
+        resumed.level = AlertLevel::Healthy;
+        assert!(!resumed.observe_up());
+
+        // Found mid-outage at startup: the same, from the open incident.
+        let mut seeded = AlertState::resumed_down(2);
+        assert!(!seeded.observe_down(2));
+        assert!(seeded.observe_up());
+    }
+
+    /// A push monitor ticking every two seconds with a threshold of 1, wired to a
+    /// test coalescer inbox.
+    fn push_task(
+        pool: &SqlitePool,
+        config: &watch::Receiver<Arc<Config>>,
+        alerts: &mpsc::UnboundedSender<AlertMsg>,
+        cell: &AlertCell,
+        shutdown: &watch::Receiver<bool>,
+    ) -> JoinHandle<()> {
+        let client = crate::http::client(None).expect("client");
+        let monitor = config.borrow().monitors[0].clone();
+        spawn_monitor(
+            monitor,
+            config.clone(),
+            MonitorDeps {
+                pool: pool.clone(),
+                client: client.clone(),
+                confirm_client: client.clone(),
+                notifier: crate::notifications::shared(&config.borrow(), &client),
+                alerts: alerts.clone(),
+                last_tick: Arc::new(AtomicU64::new(0)),
+                alert_state: cell.clone(),
+            },
+            shutdown.clone(),
+        )
+    }
+
+    /// The next alert within `wait`, as `("down" | "recovered", id)`.
+    async fn next_alert(
+        rx: &mut mpsc::UnboundedReceiver<AlertMsg>,
+        wait: Duration,
+    ) -> Option<(&'static str, String)> {
+        match tokio::time::timeout(wait, rx.recv()).await {
+            Ok(Some(AlertMsg::Down(alert))) => Some(("down", alert.id)),
+            Ok(Some(AlertMsg::Recovered { id, .. })) => Some(("recovered", id)),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn restarted_monitor_task_keeps_its_alert_state() {
+        let pool = memory_pool().await;
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [alerts]
+            fail_threshold = 1
+            [[monitors]]
+            id = "job"
+            name = "Job"
+            kind = "push"
+            interval_secs = 2
+            "#,
+        )
+        .expect("config");
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        let cell = AlertCell::default();
+
+        // The job reports a failure: confirmed down, announced once.
+        db::insert_push(&pool, "job", 0, None, Some("backup failed"))
+            .await
+            .unwrap();
+        let task = push_task(&pool, &config_rx, &alerts_tx, &cell, &shutdown_rx);
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            Some(("down", "job".to_owned()))
+        );
+
+        // A config edit restarts the task while still down: no second alert.
+        task.abort();
+        let task = push_task(&pool, &config_rx, &alerts_tx, &cell, &shutdown_rx);
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(3)).await,
+            None
+        );
+
+        // A daemon restart (no state carried over) seeds it from the open
+        // incident instead: still no second alert.
+        task.abort();
+        let fresh = AlertCell::default();
+        let task = push_task(&pool, &config_rx, &alerts_tx, &fresh, &shutdown_rx);
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(3)).await,
+            None
+        );
+
+        // The job recovers: the recovery is announced, exactly once.
+        db::insert_push(&pool, "job", 1, None, None).await.unwrap();
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            Some(("recovered", "job".to_owned()))
+        );
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_millis(1500)).await,
+            None
+        );
+        task.abort();
     }
 }

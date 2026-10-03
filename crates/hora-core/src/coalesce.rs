@@ -93,7 +93,7 @@ impl Coalescer {
             // A root (nothing above it in the topology), or grouping disabled:
             // send immediately. The impacted list already names the dependents
             // being folded.
-            self.covered.insert(alert.id.clone(), now);
+            self.mark_sent(&alert.id, now);
             return Some(alert);
         }
         if self.covered_upstream(&alert) {
@@ -162,7 +162,7 @@ impl Coalescer {
                 pending.deadline = upstream_deadline.max(now).saturating_add(1);
                 self.pending.push(pending);
             } else {
-                self.covered.insert(pending.alert.id.clone(), now);
+                self.mark_sent(&pending.alert.id, now);
                 out.push(pending.alert);
             }
         }
@@ -181,10 +181,26 @@ impl Coalescer {
                     self.fold(p.alert, now);
                     None
                 } else {
+                    self.suppressed.remove(&p.alert.id);
                     Some(p.alert)
                 }
             })
             .collect()
+    }
+
+    /// A down alert goes out: it covers its dependents, and its recovery must
+    /// be announced - even if an earlier, folded down of the same monitor left
+    /// it in `suppressed` (a recovery that never reached us, a restarted task).
+    fn mark_sent(&mut self, id: &str, now: i64) {
+        self.covered.insert(id.to_owned(), now);
+        self.suppressed.remove(id);
+    }
+
+    /// Forget folded downs of monitors no longer configured: their recovery
+    /// will never come, and a monitor re-added under the same id later must
+    /// not have its first real recovery swallowed.
+    fn retain_monitors(&mut self, known: impl Fn(&str) -> bool) {
+        self.suppressed.retain(|id| known(id));
     }
 
     /// Fold a symptom into its (already alerted) cause. The symptom becomes a
@@ -223,6 +239,10 @@ pub fn spawn(
             tokio::select! {
                 message = alerts.recv() => {
                     let now = chrono::Utc::now().timestamp();
+                    {
+                        let config = config.borrow();
+                        state.retain_monitors(|id| config.monitors.iter().any(|m| m.id == id));
+                    }
                     match message {
                         Some(AlertMsg::Down(alert)) => {
                             let window = config.borrow().alerts.group_window_secs;
@@ -360,6 +380,31 @@ mod tests {
         assert_eq!(sent[0].id, "api");
         assert!(c.flush(200).is_empty());
         assert!(!c.on_recovered("web", 300));
+    }
+
+    #[test]
+    fn a_sent_down_clears_a_stale_suppression() {
+        let mut c = Coalescer::default();
+        // api's down folds into db's: api is suppressed...
+        assert!(c.on_down(down("db", &[]), 100, 30).is_some());
+        assert!(c.on_down(down("api", &["db"]), 105, 30).is_none());
+        // ...and its recovery never arrives (the old task was replaced).
+        // Much later api goes down on its own and the alert is sent: its
+        // recovery must be announced, not swallowed by the stale entry.
+        let late = 105 + CAUSE_MEMORY_SECS + 1;
+        assert!(c.on_down(down("api", &["db"]), late, 30).is_none());
+        assert_eq!(c.flush(late + 31).len(), 1);
+        assert!(c.on_recovered("api", late + 100));
+    }
+
+    #[test]
+    fn removed_monitors_are_forgotten() {
+        let mut c = Coalescer::default();
+        assert!(c.on_down(down("db", &[]), 100, 30).is_some());
+        assert!(c.on_down(down("api", &["db"]), 105, 30).is_none());
+        // api leaves the config: its suppression goes with it.
+        c.retain_monitors(|id| id == "db");
+        assert!(c.suppressed.is_empty());
     }
 
     #[test]
