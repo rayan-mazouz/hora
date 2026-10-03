@@ -17,8 +17,8 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::db::Store;
@@ -122,6 +122,8 @@ const LIVENESS_CHECK: Duration = Duration::from_secs(30);
 struct Deps {
     store: Store,
     client: Client,
+    /// The monitors' probe clients, one per proxy (see [`ProbeClients`]).
+    probe_clients: Mutex<ProbeClients>,
     notifier: Notifiers,
     /// Inbox of the alert coalescer (root-cause grouping); every monitor loop
     /// gets a clone.
@@ -161,6 +163,7 @@ pub fn start(
     let deps = Deps {
         store,
         client,
+        probe_clients: Mutex::default(),
         notifier: Arc::clone(&notifier),
         alerts: alerts_tx,
         last_tick,
@@ -298,11 +301,15 @@ fn reconcile(
         config.monitors.iter().map(|m| (m.id.as_str(), m)).collect();
     fleet.retire(&desired);
 
+    let mut probe_clients = deps
+        .probe_clients
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    probe_clients.retain_used(&config);
     for monitor in &config.monitors {
         if !fleet.running.contains_key(&monitor.id) {
-            // Each monitor gets its own client so it can carry its own proxy.
             // The proxy URL is validated at config load, so this rarely fails.
-            let client = match crate::http::probe_client(monitor.proxy()) {
+            let client = match probe_clients.get(monitor.proxy()) {
                 Ok(client) => client,
                 Err(err) => {
                     warn!(monitor = %monitor.id, "monitor not started, bad proxy: {err:#}");
@@ -331,6 +338,42 @@ fn reconcile(
                 },
             );
         }
+    }
+}
+
+/// The probe clients monitors share: one for every monitor without a proxy,
+/// one per proxy URL for the others. A client carries its own TLS setup and
+/// connection pool - about 45 KB - so one per monitor cost 450 MB at 10,000
+/// monitors. Monitors on one client share its pool, as requests to the same
+/// host from one process do anyway; nothing else about a probe client is
+/// per monitor (credentials and timeouts are set per request).
+#[derive(Default)]
+struct ProbeClients {
+    clients: HashMap<Option<String>, Client>,
+}
+
+impl ProbeClients {
+    /// The client for `proxy`, built on first use.
+    fn get(&mut self, proxy: Option<&str>) -> reqwest::Result<Client> {
+        let key = proxy.map(str::to_owned);
+        if let Some(client) = self.clients.get(&key) {
+            return Ok(client.clone());
+        }
+        let client = crate::http::probe_client(proxy)?;
+        self.clients.insert(key, client.clone());
+        Ok(client)
+    }
+
+    /// Forget the clients of proxies no monitor uses any more (running
+    /// monitors keep their own handle on theirs until they restart).
+    fn retain_used(&mut self, config: &Config) {
+        self.clients.retain(|proxy, _| {
+            proxy.is_none()
+                || config
+                    .monitors
+                    .iter()
+                    .any(|monitor| monitor.proxy() == proxy.as_deref())
+        });
     }
 }
 
@@ -449,4 +492,33 @@ fn file_watcher(config_path: &Path, tx: mpsc::Sender<()>) -> notify::Result<Reco
     })?;
     watcher.watch(&directory, RecursiveMode::NonRecursive)?;
     Ok(watcher)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitors_share_a_probe_client_per_proxy() {
+        let mut clients = ProbeClients::default();
+        clients.get(None).unwrap();
+        clients.get(None).unwrap();
+        clients.get(Some("http://proxy.example:3128")).unwrap();
+        clients.get(Some("http://proxy.example:3128")).unwrap();
+        assert_eq!(
+            clients.clients.len(),
+            2,
+            "one client per proxy, not per monitor"
+        );
+
+        // A reload that drops the proxied monitor forgets its client.
+        let config = config::parse(
+            "[page]\n[server]\n[[monitors]]\nid = \"a\"\nname = \"A\"\n\
+             target = \"https://example.com\"\ninterval_secs = 60\n",
+        )
+        .unwrap();
+        clients.retain_used(&config);
+        assert_eq!(clients.clients.len(), 1);
+        assert!(clients.clients.contains_key(&None));
+    }
 }
