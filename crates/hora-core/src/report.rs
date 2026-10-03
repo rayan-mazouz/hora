@@ -74,7 +74,12 @@ pub struct MonthReport {
 #[must_use]
 pub fn month_bounds(month: &str) -> Option<(i64, i64)> {
     let (year, month_no) = month.split_once('-')?;
-    if year.len() != 4 || month_no.len() != 2 {
+    // Digits only: `parse` also takes a sign, and `2026-+5` would be a
+    // second spelling (a second cache entry) of `2026-05`.
+    let digits = |part: &str, len: usize| {
+        part.len() == len && part.bytes().all(|byte| byte.is_ascii_digit())
+    };
+    if !digits(year, 4) || !digits(month_no, 2) {
         return None;
     }
     let year: i32 = year.parse().ok()?;
@@ -244,7 +249,15 @@ mod tests {
         let (start, end) = month_bounds("2024-02").expect("leap month");
         assert_eq!(end - start, 29 * SECONDS_PER_DAY);
 
-        for bad in ["2026-13", "2026-5", "may", "2026-05-01", "9999-01"] {
+        for bad in [
+            "2026-13",
+            "2026-5",
+            "2026-+5",
+            "+026-05",
+            "may",
+            "2026-05-01",
+            "9999-01",
+        ] {
             assert!(month_bounds(bad).is_none(), "{bad}");
         }
     }

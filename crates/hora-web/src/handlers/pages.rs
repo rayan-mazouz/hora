@@ -326,7 +326,18 @@ pub(crate) async fn report_page(
             &chrome,
         )?;
         let page = Arc::new(Spliced::new(html));
-        report_pages(&state).insert(key, (Arc::clone(&report), Arc::clone(&page)));
+        let mut pages = report_pages(&state);
+        // Drop the pages of reports the memo no longer serves (expired, or
+        // built under an older config): without this the map only ever
+        // grows - one entry per month, audience and group ever asked for,
+        // each pinning its own copy of a month's report.
+        pages.retain(|(month, _, _), (built, _)| {
+            state
+                .reports
+                .get(month, config)
+                .is_some_and(|current| Arc::ptr_eq(&current, built))
+        });
+        pages.insert(key, (Arc::clone(&report), Arc::clone(&page)));
         page
     };
     Ok(Html(page.serve(&chrome.req)).into_response())
