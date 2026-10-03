@@ -35,7 +35,9 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
         let _ = writeln!(out, "- **Duration:** {}", fmt::duration(duration));
     }
     if let Some(error) = &incident.error {
-        let _ = writeln!(out, "- **First failure:** {error}");
+        // Remote-controlled (a body snippet, a push msg): a code span, so a
+        // `![](https://tracker)` or a link in it stays text in the ticket.
+        let _ = writeln!(out, "- **First failure:** {}", inline_code(error));
     }
     if let Some(vantage) = &incident.vantage {
         let _ = writeln!(out, "- **Multi-vantage:** {vantage}");
@@ -79,7 +81,7 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
         incident
             .error
             .as_deref()
-            .map(|error| format!(" ({error})"))
+            .map(|error| format!(" ({})", inline_code(error)))
             .unwrap_or_default()
     );
     if let Some(ended) = incident.ended_at {
@@ -95,6 +97,20 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
 fn impacted_names(impacted: Option<&str>) -> Option<String> {
     let names: Vec<String> = serde_json::from_str(impacted?).ok()?;
     (!names.is_empty()).then(|| names.join(", "))
+}
+
+/// `text` as one markdown code span: delimited by a backtick run longer than
+/// any inside it (padded with a space when it starts or ends with a
+/// backtick), on one line.
+fn inline_code(text: &str) -> String {
+    let text = text.replace(['\r', '\n'], " ");
+    let fence = "`".repeat(longest_backtick_run(&text) + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{text}{pad}{fence}")
 }
 
 /// The longest run of consecutive backticks in `text` (to size the fence).
@@ -141,7 +157,7 @@ mod tests {
         assert!(md.starts_with("# Post-mortem: API - 2023-11-14"), "{md}");
         assert!(md.contains("- **Incident:** #7 (resolved)"));
         assert!(md.contains("- **Duration:** 9m 0s"));
-        assert!(md.contains("- **First failure:** HTTP 503: upstream connect error"));
+        assert!(md.contains("- **First failure:** `HTTP 503: upstream connect error`"));
         assert!(md.contains("- **Multi-vantage:** confirmed down from 2/2 vantage points"));
         assert!(md.contains("- **Probable cause (topology):** Database"));
         assert!(md.contains("- **Impacted:** Web, Worker"));
@@ -184,6 +200,25 @@ mod tests {
         ] {
             assert!(!md.contains(absent), "{absent} should be omitted:\n{md}");
         }
+    }
+
+    #[test]
+    fn remote_text_in_lines_stays_text() {
+        let hostile = Incident {
+            error: Some(
+                "HTTP 500: ![x](https://t.example/p.gif) `a` [ok](https://evil)".to_owned(),
+            ),
+            ..incident()
+        };
+        let md = render(&hostile, "API");
+        let spanned = "``HTTP 500: ![x](https://t.example/p.gif) `a` [ok](https://evil)``";
+        assert!(
+            md.contains(&format!("- **First failure:** {spanned}")),
+            "{md}"
+        );
+        assert!(md.contains(&format!("down confirmed ({spanned})")), "{md}");
+        assert_eq!(inline_code("`tick"), "`` `tick ``");
+        assert_eq!(inline_code("two\nlines"), "`two lines`");
     }
 
     #[test]
