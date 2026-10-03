@@ -9,14 +9,19 @@ mod env;
 mod monitor;
 mod parsed;
 mod peer;
+mod raw;
 mod secret;
 #[cfg(test)]
 mod tests;
 mod validate;
 
 pub use channel::Channel;
-pub use monitor::{Kind, Monitor, ReleaseWatch, split_host_port};
-pub use parsed::{DnsRecord, ParseField, Parsed};
+pub use monitor::{
+    DnsSpec, ExecSpec, HttpSpec, IcmpSpec, JsonAssert, KeywordAssert, Kind, Monitor, MonitorKind,
+    NetworkProbe, NumberAssert, PushSchedule, PushSpec, ReleaseWatch, Starttls, TcpSpec,
+    split_host_port,
+};
+pub use parsed::{Compiled, DnsRecord, ParseField, Parsed};
 pub use peer::Peer;
 pub use secret::Secret;
 
@@ -455,20 +460,8 @@ pub fn parse_with_exec_dir(
     // since TOML errors quote the offending line.
     let mut table: toml::Table = toml::from_str(toml_str).context("parsing config TOML")?;
     expand_env_table(&mut table);
-    let mut config: Config = table.try_into().context("reading config values")?;
+    let mut config: Config = table.try_into().map_err(read_error)?;
     apply_env_overrides(&mut config);
-    // Canonicalize cert pins to lowercase hex so the comparison in
-    // `cert::pin_alert` (against the lowercase `sha256_hex`) matches whatever
-    // case the operator typed; `validate` then rejects a malformed pin outright.
-    for monitor in &mut config.monitors {
-        if let Some(pin) = &mut monitor.cert_pin {
-            pin.make_ascii_lowercase();
-        }
-        // Domain names are case-insensitive; RDAP servers expect lowercase.
-        if let Some(domain) = &mut monitor.domain_expiry {
-            domain.make_ascii_lowercase();
-        }
-    }
     // Canonicalized once, here: the exec probe's escape check compares the
     // resolved plugin path against it, and must not re-resolve the directory
     // (blocking filesystem calls) on every tick. A directory that does not
@@ -476,6 +469,19 @@ pub fn parse_with_exec_dir(
     config.exec_dir = exec_dir.map(|dir| dir.canonicalize().unwrap_or(dir));
     validate(&config)?;
     Ok(config)
+}
+
+/// A deserialization error as the operator should read it. A monitor that
+/// fails validation (which runs as each `[[monitors]]` table is read, see
+/// [`Monitor`]) already names itself ("monitor api: ..."): that message is
+/// the whole story, without serde's "in `monitors`" trailer. Anything else
+/// (a type error, an unknown key) keeps the decoder's message and path.
+fn read_error(err: toml::de::Error) -> anyhow::Error {
+    if err.message().starts_with("monitor ") {
+        anyhow::anyhow!(err.message().trim_end().to_owned())
+    } else {
+        anyhow::Error::new(err).context("reading config values")
+    }
 }
 
 /// Infrastructure overrides honoured by the Docker image; secrets come from the

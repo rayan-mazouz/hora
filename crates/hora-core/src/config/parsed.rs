@@ -61,6 +61,71 @@ impl<T> Parsed<T> {
     }
 }
 
+impl<T: Clone> Parsed<T> {
+    /// The parsed value with its text, once validation has made sure it
+    /// parsed; `None` for a malformed value.
+    #[must_use]
+    pub fn compiled(&self) -> Option<Compiled<T>> {
+        self.get().map(|value| Compiled {
+            raw: self.raw.clone(),
+            value: value.clone(),
+        })
+    }
+}
+
+/// A config string and the value it parsed into, after validation: unlike a
+/// [`Parsed`], it cannot hold an error, so the probes use the value directly.
+/// Equality (hot-reload change detection) and `Debug` go by the raw text.
+#[derive(Clone)]
+pub struct Compiled<T> {
+    raw: String,
+    value: T,
+}
+
+impl<T> Compiled<T> {
+    /// The text as written in the config.
+    #[must_use]
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+}
+
+impl<T: ParseField> Compiled<T> {
+    /// Parse `raw`, for values built outside a config file (tests, the CLI).
+    ///
+    /// # Errors
+    ///
+    /// The parse error, as for a config value.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        T::parse_field(raw).map(|value| Self {
+            raw: raw.to_owned(),
+            value,
+        })
+    }
+}
+
+impl<T> std::ops::Deref for Compiled<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> PartialEq for Compiled<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl<T> Eq for Compiled<T> {}
+
+impl<T> std::fmt::Debug for Compiled<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.raw, f)
+    }
+}
+
 impl<T> PartialEq for Parsed<T> {
     fn eq(&self, other: &Self) -> bool {
         self.raw == other.raw
@@ -84,6 +149,12 @@ impl<'de, T: ParseField> Deserialize<'de> for Parsed<T> {
 impl ParseField for regex::Regex {
     fn parse_field(raw: &str) -> Result<Self, String> {
         Self::new(raw).map_err(|err| err.to_string())
+    }
+}
+
+impl ParseField for croner::Cron {
+    fn parse_field(raw: &str) -> Result<Self, String> {
+        super::parse_cron(raw).map_err(|err| err.to_string())
     }
 }
 

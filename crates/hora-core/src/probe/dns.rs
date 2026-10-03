@@ -13,23 +13,15 @@ use hickory_resolver::proto::rr::RecordType;
 
 use super::snapshot::{MAX_SNAPSHOT_BODY_CHARS, snippet};
 use super::{Outcome, millis, over_threshold};
-use crate::config::{DnsRecord, Monitor, Parsed};
+use crate::config::{DnsRecord, DnsSpec, Monitor};
 
 /// DNS resolution: resolve a name and, when `dns_expected` is set, pin the
 /// answer (hijack detection). Without it any non-empty answer counts as up -
 /// answers rotate freely behind CDNs and round-robin records, so alerting on
 /// mere change would flap.
-pub(super) async fn dns(monitor: &Monitor) -> Outcome {
-    let record_type = record_type(
-        monitor
-            .dns_record
-            .as_ref()
-            .and_then(Parsed::get)
-            .copied()
-            .unwrap_or(DnsRecord::A),
-    );
-
-    let custom = monitor.dns_resolver.as_ref().and_then(Parsed::get).copied();
+pub(super) async fn dns(monitor: &Monitor, spec: &DnsSpec) -> Outcome {
+    let record_type = record_type(spec.record);
+    let custom = spec.resolver;
     let resolver = match resolver_for(custom) {
         Ok(resolver) => resolver,
         Err(err) => {
@@ -43,7 +35,7 @@ pub(super) async fn dns(monitor: &Monitor) -> Outcome {
     let start = Instant::now();
     let result = tokio::time::timeout(
         monitor.timeout(),
-        resolver.lookup(monitor.target.as_str(), record_type),
+        resolver.lookup(spec.target.as_str(), record_type),
     )
     .await;
     let latency = millis(start.elapsed());
@@ -67,7 +59,7 @@ pub(super) async fn dns(monitor: &Monitor) -> Outcome {
             answers.sort();
             let answer = answers.join(",");
 
-            if let Some(expected) = &monitor.dns_expected {
+            if let Some(expected) = &spec.expected {
                 // Both sides sorted: the assertion is order-insensitive, so
                 // rotation within a pinned record set never flaps.
                 let mut wanted: Vec<&str> = expected.split(',').map(str::trim).collect();

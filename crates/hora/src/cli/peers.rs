@@ -38,11 +38,16 @@ pub(crate) async fn peers(args: &[String]) -> Result<(), CliError> {
         .iter()
         .filter(|monitor| {
             !matches!(
-                monitor.kind,
+                monitor.kind(),
                 hora_core::config::Kind::Push | hora_core::config::Kind::Exec
             )
         })
-        .map(|monitor| (monitor.kind.as_str().to_owned(), monitor.target.clone()))
+        .map(|monitor| {
+            (
+                monitor.kind().as_str().to_owned(),
+                monitor.target().to_owned(),
+            )
+        })
         .collect();
 
     let client = hora_core::http::client(None).context("building HTTP client")?;

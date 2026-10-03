@@ -65,7 +65,7 @@ pub fn for_monitor<S: std::hash::BuildHasher>(
     map: &HashMap<String, Vec<PeerVantage>, S>,
     monitor: &Monitor,
 ) -> Vec<PeerVantage> {
-    map.get(&key(monitor.kind, &monitor.target))
+    map.get(&key(monitor.kind(), monitor.target()))
         .cloned()
         .unwrap_or_default()
 }
@@ -210,9 +210,10 @@ mod tests {
         let mut map = HashMap::new();
         merge_peer(&mut map, "B", &answer(&[("db:5432", "up", Some(10))]));
 
-        let mut monitor = crate::config::Monitor::ad_hoc(Kind::Tcp, "db:5432".to_owned());
+        let monitor = crate::config::Monitor::ad_hoc(Kind::Tcp, "db:5432".to_owned()).unwrap();
         assert_eq!(for_monitor(&map, &monitor).len(), 1);
-        monitor.target = "elsewhere:1".to_owned();
-        assert!(for_monitor(&map, &monitor).is_empty());
+        let elsewhere =
+            crate::config::Monitor::ad_hoc(Kind::Tcp, "elsewhere:1".to_owned()).unwrap();
+        assert!(for_monitor(&map, &elsewhere).is_empty());
     }
 }

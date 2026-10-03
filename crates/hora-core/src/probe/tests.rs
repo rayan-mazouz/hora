@@ -9,7 +9,10 @@ use super::snapshot::{
     render_snapshot,
 };
 use super::*;
-use crate::config::{DnsRecord, Parsed, Secret};
+use crate::config::{
+    Compiled, DnsRecord, HttpSpec, JsonAssert, KeywordAssert, MonitorKind, NumberAssert, Parsed,
+    Secret,
+};
 
 #[test]
 fn public_reason_collapses_detail() {
@@ -217,11 +220,14 @@ fn a_down_outcome_is_stored_as_down() {
 }
 
 fn number(pattern: &str, min: Option<i64>, max: Option<i64>, body: &str) -> Option<String> {
-    check_number(&Parsed::new(pattern), min, max, body)
+    let regex = Compiled::parse(pattern).unwrap();
+    check_number(&NumberAssert { regex, min, max }, body)
 }
 
 fn json(query: &str, expected: Option<&str>, body: &str) -> Option<String> {
-    check_json(&Parsed::new(query), expected, body)
+    let query = Compiled::parse(query).unwrap();
+    let expected = expected.map(str::to_owned);
+    check_json(&JsonAssert { query, expected }, body)
 }
 
 #[test]
@@ -290,18 +296,17 @@ async fn expected_redirect_is_not_followed() {
         )
         .await;
     let client = crate::http::probe_client(None).unwrap();
-    let mut monitor = http_monitor();
-    monitor.target = url;
-    monitor.expected_status = Some(301);
-    let outcome = http(&client, &monitor).await;
+    let mut monitor = http_monitor(&url);
+    spec_mut(&mut monitor).expected_status = Some(301);
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
     assert!(outcome.is_up(), "{:?}", outcome.error);
     assert_eq!(outcome.status_code, Some(301));
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 
     // Without a 3xx expectation the redirect is chased (here into a loop
     // back to the same server, until the hop budget runs out).
-    monitor.expected_status = None;
-    let outcome = http(&client, &monitor).await;
+    spec_mut(&mut monitor).expected_status = None;
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
     assert_eq!(outcome.error.as_deref(), Some("too many redirects"));
 }
 
@@ -311,33 +316,49 @@ async fn truncated_body_is_a_body_error_not_an_assertion_failure() {
     let (url, _hits) =
         serve("HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial").await;
     let client = crate::http::probe_client(None).unwrap();
-    let mut monitor = http_monitor();
-    monitor.target = url;
-    monitor.keyword = Some("complete".to_owned());
-    let outcome = http(&client, &monitor).await;
+    let mut monitor = http_monitor(&url);
+    spec_mut(&mut monitor).keyword = Some(KeywordAssert {
+        text: "complete".to_owned(),
+        invert: false,
+    });
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
     assert!(!outcome.is_up());
     assert_eq!(outcome.error.as_deref(), Some("invalid response body"));
 }
 
-fn http_monitor() -> Monitor {
-    Monitor {
-        id: "m".to_owned(),
-        name: "M".to_owned(),
-        target: "https://example.com".to_owned(),
-        ..Monitor::default()
+fn http_monitor(target: &str) -> Monitor {
+    Monitor::ad_hoc(crate::config::Kind::Http, target.to_owned()).unwrap()
+}
+
+fn spec(monitor: &Monitor) -> &HttpSpec {
+    match &monitor.spec {
+        MonitorKind::Http(spec) => spec,
+        other => panic!("not an http monitor: {other:?}"),
+    }
+}
+
+fn spec_mut(monitor: &mut Monitor) -> &mut HttpSpec {
+    match &mut monitor.spec {
+        MonitorKind::Http(spec) => spec,
+        other => panic!("not an http monitor: {other:?}"),
     }
 }
 
 #[test]
 fn keyword_assertion() {
-    let mut monitor = http_monitor();
-    monitor.keyword = Some("OK".to_owned());
-    assert!(check_assertions(&monitor, b"all OK here").is_none());
-    assert!(check_assertions(&monitor, b"failure").is_some());
+    let mut monitor = http_monitor("https://example.com");
+    spec_mut(&mut monitor).keyword = Some(KeywordAssert {
+        text: "OK".to_owned(),
+        invert: false,
+    });
+    assert!(check_assertions(spec(&monitor), b"all OK here").is_none());
+    assert!(check_assertions(spec(&monitor), b"failure").is_some());
 
-    monitor.keyword_invert = true;
-    assert!(check_assertions(&monitor, b"failure").is_none());
-    assert!(check_assertions(&monitor, b"all OK").is_some());
+    if let Some(keyword) = &mut spec_mut(&mut monitor).keyword {
+        keyword.invert = true;
+    }
+    assert!(check_assertions(spec(&monitor), b"failure").is_none());
+    assert!(check_assertions(spec(&monitor), b"all OK").is_some());
 }
 
 #[test]

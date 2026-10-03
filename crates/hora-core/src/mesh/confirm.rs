@@ -56,7 +56,7 @@ pub(crate) enum Verdict {
 /// into a false "confirmed down from 2/2").
 #[must_use]
 pub fn enabled(config: &Config, monitor: &Monitor) -> bool {
-    if matches!(monitor.kind, Kind::Push | Kind::Exec) {
+    if matches!(monitor.kind(), Kind::Push | Kind::Exec) {
         return false;
     }
     monitor.confirm_with_peers.unwrap_or_else(|| {
@@ -132,8 +132,8 @@ async fn peer_verdicts(
 
     let request = ProbeRequest {
         from,
-        kind: monitor.kind,
-        target: monitor.target.clone(),
+        kind: monitor.kind(),
+        target: monitor.target().to_owned(),
     };
     let probes = peers.iter().map(|(name, url, token)| {
         let request = &request;
@@ -373,8 +373,10 @@ mod tests {
         assert!(!enabled(&config, &config.monitors[2])); // push: never
         // exec: never, whatever the global default says.
         let mut exec = config.monitors[0].clone();
-        exec.kind = Kind::Exec;
-        exec.target = String::new();
+        exec.spec = crate::config::MonitorKind::Exec(crate::config::ExecSpec {
+            program: "check_raid".to_owned(),
+            args: Vec::new(),
+        });
         assert!(!enabled(&config, &exec));
     }
 

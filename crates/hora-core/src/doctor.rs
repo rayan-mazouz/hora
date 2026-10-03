@@ -77,8 +77,10 @@ fn exec_dir(config: &Config) -> Finding {
     let monitors: Vec<&str> = config
         .monitors
         .iter()
-        .filter(|monitor| monitor.kind == Kind::Exec)
-        .filter_map(|monitor| monitor.command.first().map(String::as_str))
+        .filter_map(|monitor| match &monitor.spec {
+            crate::config::MonitorKind::Exec(spec) => Some(spec.program.as_str()),
+            _ => None,
+        })
         .collect();
     let Some(dir) = &config.exec_dir else {
         return if monitors.is_empty() {
@@ -194,7 +196,7 @@ fn icmp_socket(config: &Config) -> Finding {
     let needed = config
         .monitors
         .iter()
-        .filter(|monitor| monitor.kind == Kind::Icmp)
+        .filter(|monitor| monitor.kind() == Kind::Icmp)
         .count();
     let ping_config = surge_ping::Config::builder()
         .kind(surge_ping::ICMP::V4)

@@ -5,7 +5,7 @@ use crate::db::Store;
 use crate::status::CheckStatus;
 use tracing::error;
 
-use crate::config::Monitor;
+use crate::config::{Monitor, PushSpec};
 use crate::db;
 use crate::probe::{FailureKind, Outcome};
 
@@ -62,27 +62,21 @@ pub(crate) struct HeartbeatWatch {
 }
 
 impl HeartbeatWatch {
-    /// `None` (logged) for a schedule that does not parse - validated at
-    /// config load, so defensive only: the monitor then stays unknown.
-    pub(crate) async fn for_monitor(store: &Store, monitor: &Monitor) -> Option<Self> {
-        let cadence = match &monitor.schedule {
+    /// The watch for a push monitor: every `interval_secs`, or per cron run
+    /// when it has a schedule (parsed at config load).
+    pub(crate) async fn for_monitor(store: &Store, monitor: &Monitor, push: &PushSpec) -> Self {
+        let cadence = match &push.schedule {
             None => Cadence::Every(monitor.interval_secs),
-            Some(schedule) => {
-                let Ok(cron) = crate::config::parse_cron(schedule) else {
-                    error!(monitor = %monitor.id, "invalid cron schedule {schedule:?}");
-                    return None;
-                };
-                Cadence::Cron {
-                    cron: Box::new(cron),
-                    grace_secs: monitor.push_grace_secs(),
-                }
-            }
+            Some(schedule) => Cadence::Cron {
+                cron: Box::new((*schedule.cron).clone()),
+                grace_secs: schedule.grace_secs,
+            },
         };
         let now = chrono::Utc::now().timestamp();
-        Some(Self {
+        Self {
             cadence,
             expected_since: heartbeat_expected_since(store, &monitor.id, now).await,
-        })
+        }
     }
 }
 

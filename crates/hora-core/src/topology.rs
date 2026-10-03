@@ -124,51 +124,13 @@ mod tests {
     use super::*;
 
     fn monitor(id: &str, depends_on: Option<Vec<&str>>) -> Monitor {
-        Monitor {
-            id: id.to_owned(),
-            name: id.to_uppercase(),
-            kind: crate::config::Kind::Http,
-            target: format!("https://{id}.example"),
-            interval_secs: 60,
-            timeout_secs: 10,
-            expected_status: None,
-            degraded_over_ms: None,
-            slo_latency_ms: None,
-            headers: HashMap::new(),
-            keyword: None,
-            keyword_invert: false,
-            json_query: None,
-            json_expected: None,
-            number_regex: None,
-            number_min: None,
-            number_max: None,
-            max_body_kb: None,
-            probe_retries: None,
-            dual_stack: None,
-            notify: None,
-            proxy: None,
-            push_token: None,
-            check_cert: None,
-            starttls: None,
-            ehlo_name: None,
-            retention_days: None,
-            group: None,
-            depends_on: depends_on.map(|v| v.into_iter().map(String::from).collect()),
-            public: true,
-            public_error_detail: false,
-            dns_record: None,
-            dns_expected: None,
-            dns_resolver: None,
-            cert_pin: None,
-            domain_expiry: None,
-            release: None,
-            confirm_with_peers: None,
-            command: Vec::new(),
-            slo_uptime: None,
-            slo_window_days: None,
-            schedule: None,
-            grace_secs: None,
-        }
+        let mut monitor =
+            Monitor::ad_hoc(crate::config::Kind::Http, format!("https://{id}.example")).unwrap();
+        monitor.id = id.to_owned();
+        monitor.name = id.to_uppercase();
+        monitor.probe_retries = None;
+        monitor.depends_on = depends_on.map(|v| v.into_iter().map(String::from).collect());
+        monitor
     }
 
     #[test]

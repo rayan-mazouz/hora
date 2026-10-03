@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::coalesce::{AlertMsg, DownAlert};
-use crate::config::{Config, Kind, Monitor};
+use crate::config::{Config, Monitor, MonitorKind, NetworkProbe};
 use crate::heartbeat::{HeartbeatWatch, heartbeat_outcome_for};
 use crate::notifications::Notifiers;
 use crate::probe::Outcome;
@@ -230,10 +230,9 @@ async fn run(
     // Push monitors are judged from stored heartbeats against their cadence,
     // counted from the first heartbeat expected (persisted, so a monitor that
     // never pinged still alerts across restarts).
-    let heartbeat = if monitor.kind == Kind::Push {
-        HeartbeatWatch::for_monitor(&store, &monitor).await
-    } else {
-        None
+    let heartbeat = match &monitor.spec {
+        MonitorKind::Push(push) => Some(HeartbeatWatch::for_monitor(&store, &monitor, push).await),
+        _ => None,
     };
 
     loop {
@@ -513,29 +512,31 @@ async fn tick_outcome(
     exec_dir: Option<&std::path::Path>,
     heartbeat: Option<&HeartbeatWatch>,
 ) -> Option<Outcome> {
-    if monitor.kind == Kind::Push {
-        // `None` only for an unusable cron schedule (logged at startup).
-        let watch = heartbeat?;
-        return heartbeat_outcome_for(
-            store,
-            &monitor.id,
-            &watch.cadence,
-            watch.expected_since,
-            chrono::Utc::now().timestamp(),
-        )
-        .await;
-    }
-    let outcome = if monitor.kind == Kind::Exec {
-        match exec_dir {
-            Some(dir) => crate::exec::run(dir, monitor).await,
+    let outcome = match &monitor.spec {
+        MonitorKind::Push(_) => {
+            // Built with the task for every push monitor.
+            let watch = heartbeat?;
+            return heartbeat_outcome_for(
+                store,
+                &monitor.id,
+                &watch.cadence,
+                watch.expected_since,
+                chrono::Utc::now().timestamp(),
+            )
+            .await;
+        }
+        MonitorKind::Exec(spec) => match exec_dir {
+            Some(dir) => crate::exec::run(dir, monitor, spec).await,
             // Config validation guarantees the directory; defensive only.
             None => crate::probe::Outcome::down(
                 crate::probe::FailureKind::Plugin,
                 "HORA_EXEC_DIR is not set".to_owned(),
             ),
-        }
-    } else {
-        probe::run(client, monitor).await
+        },
+        MonitorKind::Http(spec) => probe::run(client, monitor, NetworkProbe::Http(spec)).await,
+        MonitorKind::Tcp(spec) => probe::run(client, monitor, NetworkProbe::Tcp(spec)).await,
+        MonitorKind::Icmp(spec) => probe::run(client, monitor, NetworkProbe::Icmp(spec)).await,
+        MonitorKind::Dns(spec) => probe::run(client, monitor, NetworkProbe::Dns(spec)).await,
     };
     if let Err(err) = db::insert_check(store, &monitor.id, &outcome).await {
         error!(monitor = %monitor.id, "failed to record check: {err:#}");

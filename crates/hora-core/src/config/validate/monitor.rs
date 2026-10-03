@@ -1,11 +1,190 @@
-//! Per-monitor validation: the fields each probe kind accepts.
+//! Per-monitor validation: the fields each probe kind accepts, and the
+//! conversion of the flat file table into a typed [`Monitor`].
 
-use crate::config::{Kind, Monitor, Parsed, ReleaseWatch, parse_cron, split_host_port};
+use crate::config::monitor::{
+    DnsSpec, ExecSpec, HttpSpec, IcmpSpec, JsonAssert, KeywordAssert, Monitor, MonitorKind,
+    NumberAssert, PushSchedule, PushSpec, Starttls, TcpSpec,
+};
+use crate::config::raw::RawMonitor;
+use crate::config::{DnsRecord, Kind, Parsed, ReleaseWatch, parse_cron, split_host_port};
+
+/// Validate one `[[monitors]]` table and turn it into a [`Monitor`]: every
+/// check that needs nothing but the monitor itself (targets, kind-specific
+/// fields, value shapes) runs here, at deserialization; what needs the rest
+/// of the config (unique ids, routes, the dependency graph, `HORA_EXEC_DIR`)
+/// runs in [`validate`](super::validate).
+///
+/// A setting that only another kind understands and that was never refused
+/// (an `expected_status` on a tcp monitor, `headers` on a dns one) is dropped
+/// with a warning, so files that loaded before still load.
+pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
+    // Canonicalize cert pins to lowercase hex so the comparison in
+    // `cert::pin_alert` (against the lowercase `sha256_hex`) matches whatever
+    // case the operator typed; a malformed pin is rejected below.
+    if let Some(pin) = &mut raw.cert_pin {
+        pin.make_ascii_lowercase();
+    }
+    // Domain names are case-insensitive; RDAP servers expect lowercase.
+    if let Some(domain) = &mut raw.domain_expiry {
+        domain.make_ascii_lowercase();
+    }
+    anyhow::ensure!(
+        matches!(raw.kind, Kind::Push | Kind::Exec) || !raw.target.is_empty(),
+        "monitor {}: target must not be empty",
+        raw.id
+    );
+    validate_monitor_io(&raw)?;
+    warn_ignored(&raw);
+    let spec = spec_of(&mut raw)?;
+    Ok(Monitor {
+        id: raw.id,
+        name: raw.name,
+        interval_secs: raw.interval_secs,
+        timeout_secs: raw.timeout_secs,
+        degraded_over_ms: raw.degraded_over_ms,
+        slo_latency_ms: raw.slo_latency_ms,
+        slo_uptime: raw.slo_uptime,
+        slo_window_days: raw.slo_window_days,
+        probe_retries: raw.probe_retries,
+        notify: raw.notify,
+        check_cert: raw.check_cert,
+        retention_days: raw.retention_days,
+        group: raw.group,
+        depends_on: raw.depends_on,
+        public: raw.public,
+        public_error_detail: raw.public_error_detail,
+        cert_pin: raw.cert_pin,
+        domain_expiry: raw.domain_expiry,
+        release: raw.release,
+        confirm_with_peers: raw.confirm_with_peers,
+        push_token: raw.push_token,
+        spec,
+    })
+}
+
+/// The kind's own settings, moved out of the (validated) raw table.
+fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
+    let target = std::mem::take(&mut raw.target);
+    let dual_stack = raw.dual_stack.unwrap_or(false);
+    // Validation already parsed each of these; a `None` here would be a
+    // validation gap, reported rather than unwrapped.
+    let id = raw.id.clone();
+    let compiled = |field: &str| anyhow::anyhow!("monitor {id}: invalid {field}");
+    Ok(match raw.kind {
+        Kind::Http => MonitorKind::Http(HttpSpec {
+            url: reqwest::Url::parse(&target).map_err(|_| compiled("target"))?,
+            target,
+            expected_status: raw.expected_status,
+            headers: std::mem::take(&mut raw.headers),
+            keyword: raw.keyword.take().map(|text| KeywordAssert {
+                text,
+                invert: raw.keyword_invert,
+            }),
+            json: match raw.json_query.take() {
+                Some(query) => Some(JsonAssert {
+                    query: query.compiled().ok_or_else(|| compiled("json_query"))?,
+                    expected: raw.json_expected.take(),
+                }),
+                None => None,
+            },
+            number: match raw.number_regex.take() {
+                Some(regex) => Some(NumberAssert {
+                    regex: regex.compiled().ok_or_else(|| compiled("number_regex"))?,
+                    min: raw.number_min,
+                    max: raw.number_max,
+                }),
+                None => None,
+            },
+            max_body_kb: raw.max_body_kb,
+            proxy: raw.proxy.take(),
+            dual_stack,
+        }),
+        Kind::Tcp => MonitorKind::Tcp(TcpSpec {
+            target,
+            starttls: match raw.starttls.as_deref() {
+                Some("smtp") => Some(Starttls::Smtp {
+                    ehlo_name: raw.ehlo_name.take(),
+                }),
+                Some("imap") => Some(Starttls::Imap),
+                Some(_) => return Err(compiled("starttls")),
+                None => None,
+            },
+            dual_stack,
+        }),
+        Kind::Icmp => MonitorKind::Icmp(IcmpSpec { target, dual_stack }),
+        Kind::Dns => MonitorKind::Dns(DnsSpec {
+            target,
+            record: match &raw.dns_record {
+                Some(record) => *record.get().ok_or_else(|| compiled("dns_record"))?,
+                None => DnsRecord::A,
+            },
+            expected: raw.dns_expected.take(),
+            resolver: match &raw.dns_resolver {
+                Some(resolver) => Some(*resolver.get().ok_or_else(|| compiled("dns_resolver"))?),
+                None => None,
+            },
+        }),
+        Kind::Push => MonitorKind::Push(PushSpec {
+            schedule: match raw.schedule.take() {
+                Some(schedule) => Some(PushSchedule {
+                    cron: Parsed::<croner::Cron>::new(schedule)
+                        .compiled()
+                        .ok_or_else(|| compiled("schedule"))?,
+                    grace_secs: raw.grace_secs.unwrap_or(DEFAULT_PUSH_GRACE_SECS),
+                }),
+                None => None,
+            },
+        }),
+        Kind::Exec => {
+            let mut command = std::mem::take(&mut raw.command).into_iter();
+            MonitorKind::Exec(ExecSpec {
+                program: command.next().ok_or_else(|| compiled("command"))?,
+                args: command.collect(),
+            })
+        }
+    })
+}
+
+/// How late a scheduled push may arrive by default: 30 minutes.
+const DEFAULT_PUSH_GRACE_SECS: u64 = 1800;
+
+/// Warn about the settings of another kind that were always accepted and
+/// ignored: the typed monitor has no place for them, so they are dropped.
+fn warn_ignored(raw: &RawMonitor) {
+    let ignored = [
+        (
+            "expected_status",
+            raw.kind != Kind::Http && raw.expected_status.is_some(),
+        ),
+        ("headers", raw.kind != Kind::Http && !raw.headers.is_empty()),
+        (
+            "max_body_kb",
+            raw.kind != Kind::Http && raw.max_body_kb.is_some(),
+        ),
+        (
+            "keyword_invert",
+            raw.keyword.is_none() && raw.keyword_invert,
+        ),
+        (
+            "json_expected",
+            raw.json_query.is_none() && raw.json_expected.is_some(),
+        ),
+    ];
+    for (field, set) in ignored {
+        if set {
+            tracing::warn!(
+                "monitor {}: {field} has no effect on this monitor (kind = \"{}\"), ignored",
+                raw.id,
+                raw.kind.as_str()
+            );
+        }
+    }
+}
 
 /// Exec monitors: a `command` argv instead of a `target`, with `command[0]`
 /// a bare file name - resolution happens strictly inside `HORA_EXEC_DIR`, so
 /// a path here is either a mistake or an escape attempt.
-fn validate_exec_io(monitor: &Monitor) -> anyhow::Result<()> {
+fn validate_exec_io(monitor: &RawMonitor) -> anyhow::Result<()> {
     anyhow::ensure!(
         monitor.target.is_empty(),
         "monitor {}: exec monitors take a `command`, not a `target`",
@@ -29,9 +208,8 @@ fn validate_exec_io(monitor: &Monitor) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Validate a monitor's target, latency thresholds and headers (split out of
-/// [`validate`](super::validate) to keep it small).
-pub(super) fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
+/// Validate a monitor's target, latency thresholds and headers.
+fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
     // Parse the target now, so a typo fails at load instead of at probe time.
     match monitor.kind {
         Kind::Http => anyhow::ensure!(
@@ -136,7 +314,7 @@ pub(super) fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
     // A malformed pin (wrong length, non-hex) can never match the observed
     // fingerprint, which silently disables pinning after one spurious alert.
     validate_pins(monitor)?;
-    if monitor.dual_stack() {
+    if monitor.dual_stack.unwrap_or(false) {
         validate_dual_stack(monitor)?;
     }
     validate_schedule_and_slo(monitor)?;
@@ -146,7 +324,7 @@ pub(super) fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
 /// Validate the body assertions: the `JSONPath` and the number regex must
 /// compile, and the number bounds only make sense with a regex to extract the
 /// number and in min <= max order.
-fn validate_body_assertions(monitor: &Monitor) -> anyhow::Result<()> {
+fn validate_body_assertions(monitor: &RawMonitor) -> anyhow::Result<()> {
     if let Some(err) = monitor.json_query.as_ref().and_then(Parsed::error) {
         anyhow::bail!("monitor {}: invalid json_query: {err}", monitor.id);
     }
@@ -174,7 +352,7 @@ fn validate_body_assertions(monitor: &Monitor) -> anyhow::Result<()> {
 /// STARTTLS is the certificate watcher's business: it only makes sense on a
 /// tcp monitor (the protocols it speaks live on host:port targets), and only
 /// for the protocols the negotiation implements.
-fn validate_starttls(monitor: &Monitor) -> anyhow::Result<()> {
+fn validate_starttls(monitor: &RawMonitor) -> anyhow::Result<()> {
     if let Some(name) = &monitor.ehlo_name {
         anyhow::ensure!(
             monitor.starttls.as_deref() == Some("smtp"),
@@ -226,7 +404,7 @@ fn valid_ehlo_name(name: &str) -> bool {
 }
 
 /// Validate the identity assertions: the certificate pin and the RDAP domain.
-fn validate_pins(monitor: &Monitor) -> anyhow::Result<()> {
+fn validate_pins(monitor: &RawMonitor) -> anyhow::Result<()> {
     if let Some(pin) = &monitor.cert_pin {
         anyhow::ensure!(
             pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -300,7 +478,7 @@ fn validate_release(id: &str, release: &ReleaseWatch) -> anyhow::Result<()> {
 /// active kind, no proxy in the way, and a hostname target (an IP literal has
 /// a single family by construction). Runs after the per-kind target checks,
 /// so the target is already known to be well-shaped.
-fn validate_dual_stack(monitor: &Monitor) -> anyhow::Result<()> {
+fn validate_dual_stack(monitor: &RawMonitor) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(monitor.kind, Kind::Http | Kind::Tcp | Kind::Icmp),
         "monitor {}: dual_stack requires an http, tcp or icmp monitor",
@@ -332,7 +510,7 @@ fn validate_dual_stack(monitor: &Monitor) -> anyhow::Result<()> {
 /// Validate the push `schedule`/`grace_secs` pair and the availability SLO
 /// fields. The cron expression is parsed here so a typo fails at load, not at
 /// the first missed heartbeat.
-fn validate_schedule_and_slo(monitor: &Monitor) -> anyhow::Result<()> {
+fn validate_schedule_and_slo(monitor: &RawMonitor) -> anyhow::Result<()> {
     if let Some(schedule) = &monitor.schedule {
         anyhow::ensure!(
             monitor.kind == Kind::Push,
@@ -368,7 +546,7 @@ fn validate_schedule_and_slo(monitor: &Monitor) -> anyhow::Result<()> {
 
 /// The DNS-specific half of [`validate_monitor_io`]: target shape, record
 /// type, resolver address.
-fn validate_dns_io(monitor: &Monitor) -> anyhow::Result<()> {
+fn validate_dns_io(monitor: &RawMonitor) -> anyhow::Result<()> {
     anyhow::ensure!(
         !monitor.target.is_empty()
             && !monitor.target.contains("://")

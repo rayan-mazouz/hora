@@ -7,16 +7,16 @@ use tokio::net::TcpStream;
 
 use super::family::Family;
 use super::{Outcome, millis, over_threshold};
-use crate::config::Monitor;
+use crate::config::{Monitor, TcpSpec};
 
-pub(super) async fn tcp(monitor: &Monitor) -> Outcome {
-    tcp_connect(monitor, monitor.target.as_str()).await
+pub(super) async fn tcp(monitor: &Monitor, spec: &TcpSpec) -> Outcome {
+    tcp_connect(monitor, spec.target.as_str()).await
 }
 
 /// TCP for one address family: resolve the `host:port` target ourselves and
 /// connect to the first address of that family.
-pub(super) async fn tcp_family(monitor: &Monitor, family: Family) -> Outcome {
-    let Ok(addrs) = tokio::net::lookup_host(&monitor.target).await else {
+pub(super) async fn tcp_family(monitor: &Monitor, spec: &TcpSpec, family: Family) -> Outcome {
+    let Ok(addrs) = tokio::net::lookup_host(spec.target.as_str()).await else {
         return Outcome::down(
             FailureKind::Unresolvable,
             "could not resolve host".to_owned(),

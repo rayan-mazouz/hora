@@ -6,7 +6,7 @@ mod monitor;
 use std::collections::HashSet;
 
 use super::{Channel, Config, Kind, Secret, parse_cron};
-use monitor::validate_monitor_io;
+pub(crate) use monitor::monitor_from_raw;
 
 /// A configured access token must be non-empty: an empty one (often the result
 /// of an unset `${VAR}` expanding to "") would authorize a blank `?token=`, since
@@ -103,11 +103,6 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
             &format!("monitor {} interval_secs", monitor.id),
             monitor.interval_secs,
         )?;
-        anyhow::ensure!(
-            matches!(monitor.kind, Kind::Push | Kind::Exec) || !monitor.target.is_empty(),
-            "monitor {}: target must not be empty",
-            monitor.id
-        );
         validate_period(
             &format!("monitor {} timeout_secs", monitor.id),
             monitor.timeout_secs,
@@ -115,7 +110,7 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         // A probe outliving its interval delays the next tick (the scheduler
         // never overlaps probes), so the effective cadence is the timeout,
         // not the interval. Push monitors probe nothing; their timeout is inert.
-        if monitor.kind != Kind::Push && monitor.timeout_secs > monitor.interval_secs {
+        if monitor.kind() != Kind::Push && monitor.timeout_secs > monitor.interval_secs {
             tracing::warn!(
                 "monitor {}: timeout_secs ({}) exceeds interval_secs ({}) - a hung probe \
                  delays the next check by up to the timeout",
@@ -148,14 +143,13 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         // not secrets (a public monitor's id is served on the page and API):
         // anyone could forge heartbeats to mask an outage. Warn, don't fail -
         // a bare id may be acceptable on a private network.
-        if monitor.kind == Kind::Push && monitor.push_token.is_none() {
+        if monitor.kind() == Kind::Push && monitor.push_token.is_none() {
             tracing::warn!(
                 "monitor {}: push monitor has no push_token - its id appears on the \
                  status page/API, so anyone who can reach /api/push can forge heartbeats",
                 monitor.id
             );
         }
-        validate_monitor_io(monitor)?;
         validate_routes(
             &format!("monitor {}", monitor.id),
             monitor.notify.as_deref(),
@@ -200,7 +194,7 @@ fn validate_confirm(config: &Config) -> anyhow::Result<()> {
     for monitor in &config.monitors {
         anyhow::ensure!(
             !(monitor.confirm_with_peers == Some(true)
-                && matches!(monitor.kind, Kind::Push | Kind::Exec)),
+                && matches!(monitor.kind(), Kind::Push | Kind::Exec)),
             "monitor {}: confirm_with_peers needs a network probe (push monitors \
              have no target, and exec checks are local to this host)",
             monitor.id
@@ -213,7 +207,7 @@ fn validate_confirm(config: &Config) -> anyhow::Result<()> {
 /// config declaring one without the variable - or with a directory that does
 /// not exist - fails at load, not at the first probe.
 fn validate_exec(config: &Config) -> anyhow::Result<()> {
-    if !config.monitors.iter().any(|m| m.kind == Kind::Exec) {
+    if !config.monitors.iter().any(|m| m.kind() == Kind::Exec) {
         return Ok(());
     }
     let Some(dir) = &config.exec_dir else {

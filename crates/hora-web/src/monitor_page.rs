@@ -109,7 +109,7 @@ pub(crate) fn build(
     let state = m.display_state();
     let places_count = 1 + m.vantages.len();
     let every = humanize_secs(monitor.interval_secs);
-    let checked = if monitor.kind == Kind::Push {
+    let checked = if monitor.kind() == Kind::Push {
         format!("expects a heartbeat every {every}")
     } else if places_count > 1 {
         format!("checked every {every} from {places_count} places")
@@ -175,7 +175,7 @@ pub(crate) fn build(
             )
         }),
         checked,
-        target: (show_target && !monitor.target.is_empty()).then(|| monitor.target.clone()),
+        target: (show_target && !monitor.target().is_empty()).then(|| monitor.target().to_owned()),
         why: why_line(&m, now),
         tiles: tiles(&m, monitor, incidents),
         has_events: chart.contains("spark-event"),
@@ -537,11 +537,11 @@ fn details(
     let mut rows = Vec::new();
     let mut probe = format!(
         "{} every {}",
-        monitor.kind.as_str(),
+        monitor.kind().as_str(),
         humanize_secs(monitor.interval_secs)
     );
-    if show_target && !monitor.target.is_empty() {
-        probe = format!("{probe}, {}", monitor.target);
+    if show_target && !monitor.target().is_empty() {
+        probe = format!("{probe}, {}", monitor.target());
     }
     rows.push(("Probe".to_owned(), probe));
     if let Some(at) = &m.last_checked {

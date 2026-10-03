@@ -9,19 +9,19 @@ use reqwest::{Client, RequestBuilder};
 
 use super::snapshot::{MAX_SNAPSHOT_BODY_CHARS, render_snapshot, snapshot_head, snippet};
 use super::{Outcome, millis, over_threshold};
-use crate::config::{Monitor, Parsed, Secret};
+use crate::config::{HttpSpec, JsonAssert, Monitor, NumberAssert, Secret};
 
-pub(super) async fn http(client: &Client, monitor: &Monitor) -> Outcome {
+pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) -> Outcome {
     let start = Instant::now();
     // One deadline for the whole request - every redirect hop and the body read -
     // so a chain of slow redirects can't outlive the monitor's timeout. Latency is
     // taken when the final response's headers arrive, before the body read, to
     // match the single-request timing this replaced.
     let attempt = async {
-        let mut response = send_following_redirects(client, monitor).await?;
+        let mut response = send_following_redirects(client, monitor, spec).await?;
         let latency = millis(start.elapsed());
         let code = response.status().as_u16();
-        let status_ok = match monitor.expected_status {
+        let status_ok = match spec.expected_status {
             Some(expected) => code == expected,
             None => response.status().is_success(),
         };
@@ -29,13 +29,11 @@ pub(super) async fn http(client: &Client, monitor: &Monitor) -> Outcome {
         // a keyword/JSON assertion. Assertions get a larger budget. The head
         // (status line + headers) is captured first - reading the body
         // consumes the response - in case this turns into a failure snapshot.
-        let assertions = monitor.keyword.is_some()
-            || monitor.json_query.is_some()
-            || monitor.number_regex.is_some();
+        let assertions = spec.asserts_body();
         let (head, body) = if !status_ok || assertions {
             let head = snapshot_head(&response);
             let cap = if assertions {
-                monitor.assertion_body_cap()
+                spec.assertion_body_cap()
             } else {
                 MAX_SNAPSHOT_BODY_CHARS
             };
@@ -64,7 +62,7 @@ pub(super) async fn http(client: &Client, monitor: &Monitor) -> Outcome {
                     format!("HTTP {code}: {snippet}")
                 };
                 (false, Some(detail), Some(FailureKind::Http))
-            } else if let Some(failure) = check_assertions(monitor, &body) {
+            } else if let Some(failure) = check_assertions(spec, &body) {
                 (false, Some(failure), Some(FailureKind::Content))
             } else {
                 (true, None, None)
@@ -120,21 +118,13 @@ enum HttpError {
 async fn send_following_redirects(
     client: &Client,
     monitor: &Monitor,
+    spec: &HttpSpec,
 ) -> Result<reqwest::Response, HttpError> {
-    let Ok(target) = reqwest::Url::parse(&monitor.target) else {
-        // Config validation rejects non-URL http targets; degrade gracefully by
-        // letting reqwest surface the error on send.
-        return client
-            .get(&monitor.target)
-            .timeout(monitor.timeout())
-            .send()
-            .await
-            .map_err(HttpError::Request);
-    };
+    let target = &spec.url;
     // A monitor expecting a 3xx asserts the redirect itself (HTTP -> HTTPS,
     // apex -> www): following it would judge the destination instead, and the
     // probe could never pass.
-    let follow = !monitor
+    let follow = !spec
         .expected_status
         .is_some_and(|status| (300..400).contains(&status));
     let mut url = target.clone();
@@ -143,8 +133,8 @@ async fn send_following_redirects(
         // which may be *shorter* than the monitor's own; the caller's outer
         // deadline still bounds the whole chain.
         let mut request = client.get(url.clone()).timeout(monitor.timeout());
-        if same_origin(&target, &url) {
-            request = with_headers(request, &monitor.headers);
+        if same_origin(target, &url) {
+            request = with_headers(request, &spec.headers);
         }
         let response = request.send().await.map_err(HttpError::Request)?;
         if !follow || !response.status().is_redirection() {
@@ -174,25 +164,25 @@ pub(super) fn same_origin(target: &reqwest::Url, url: &reqwest::Url) -> bool {
 
 /// Run the configured keyword/JSON assertions against the body; the first that
 /// fails returns its reason. `None` means every assertion passed.
-pub(super) fn check_assertions(monitor: &Monitor, body: &[u8]) -> Option<String> {
+pub(super) fn check_assertions(spec: &HttpSpec, body: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(body);
-    if let Some(keyword) = &monitor.keyword {
-        let found = text.contains(keyword.as_str());
-        if found == monitor.keyword_invert {
-            return Some(if monitor.keyword_invert {
-                format!("keyword present: {keyword}")
+    if let Some(keyword) = &spec.keyword {
+        let found = text.contains(keyword.text.as_str());
+        if found == keyword.invert {
+            return Some(if keyword.invert {
+                format!("keyword present: {}", keyword.text)
             } else {
-                format!("keyword missing: {keyword}")
+                format!("keyword missing: {}", keyword.text)
             });
         }
     }
-    if let Some(query) = &monitor.json_query
-        && let Some(failure) = check_json(query, monitor.json_expected.as_deref(), &text)
+    if let Some(json) = &spec.json
+        && let Some(failure) = check_json(json, &text)
     {
         return Some(failure);
     }
-    if let Some(pattern) = &monitor.number_regex {
-        return check_number(pattern, monitor.number_min, monitor.number_max, &text);
+    if let Some(number) = &spec.number {
+        return check_number(number, &text);
     }
     None
 }
@@ -204,18 +194,9 @@ pub(super) fn check_assertions(monitor: &Monitor, body: &[u8]) -> Option<String>
     clippy::cast_precision_loss,
     reason = "config bounds are human-scale thresholds, far below 2^52"
 )]
-pub(super) fn check_number(
-    pattern: &Parsed<regex::Regex>,
-    min: Option<i64>,
-    max: Option<i64>,
-    body: &str,
-) -> Option<String> {
-    // Compiled at config load, where validation rejects a bad pattern.
-    let Some(regex) = pattern.get() else {
-        return Some(format!("invalid number_regex: {}", pattern.raw()));
-    };
-    let pattern = pattern.raw();
-    let Some(captures) = regex.captures(body) else {
+pub(super) fn check_number(number: &NumberAssert, body: &str) -> Option<String> {
+    let (pattern, min, max) = (number.regex.raw(), number.min, number.max);
+    let Some(captures) = number.regex.captures(body) else {
         return Some(format!("number_regex matched nothing: {pattern}"));
     };
     let matched = captures
@@ -239,21 +220,13 @@ pub(super) fn check_number(
 }
 
 /// Evaluate a `JSONPath` against the body. Returns a failure reason or `None`.
-pub(super) fn check_json(
-    query: &Parsed<serde_json_path::JsonPath>,
-    expected: Option<&str>,
-    body: &str,
-) -> Option<String> {
+pub(super) fn check_json(json: &JsonAssert, body: &str) -> Option<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return Some("response is not valid JSON".to_owned());
     };
-    // Parsed at config load, where validation rejects a bad query.
-    let Some(path) = query.get() else {
-        return Some(format!("invalid JSON query: {}", query.raw()));
-    };
-    let query = query.raw();
-    let nodes = path.query(&value).all();
-    match expected {
+    let query = json.query.raw();
+    let nodes = json.query.query(&value).all();
+    match json.expected.as_deref() {
         None => nodes
             .is_empty()
             .then(|| format!("JSON query matched nothing: {query}")),

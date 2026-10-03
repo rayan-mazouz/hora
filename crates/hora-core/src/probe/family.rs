@@ -12,7 +12,7 @@ use super::Outcome;
 use super::http::http;
 use super::icmp::icmp_family;
 use super::tcp::tcp_family;
-use crate::config::{Kind, Monitor};
+use crate::config::{HttpSpec, IcmpSpec, Monitor, NetworkProbe, TcpSpec};
 
 /// One IP address family of a dual-stack probe.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -56,32 +56,48 @@ impl Family {
 /// Probe both address families concurrently and merge the outcomes: a service
 /// whose IPv6 (or IPv4) is silently dead behind a healthy sibling goes down
 /// with the broken family named in the reason.
-pub(super) async fn dual_stack(monitor: &Monitor) -> Outcome {
+/// A probe that can be run once per address family: the kinds `dual_stack`
+/// applies to.
+#[derive(Clone, Copy)]
+pub(super) enum DualStack<'a> {
+    Http(&'a HttpSpec),
+    Tcp(&'a TcpSpec),
+    Icmp(&'a IcmpSpec),
+}
+
+impl<'a> DualStack<'a> {
+    /// The probe, when it is set to run over both families.
+    pub(super) fn of(probe: NetworkProbe<'a>) -> Option<Self> {
+        match probe {
+            NetworkProbe::Http(spec) if spec.dual_stack => Some(Self::Http(spec)),
+            NetworkProbe::Tcp(spec) if spec.dual_stack => Some(Self::Tcp(spec)),
+            NetworkProbe::Icmp(spec) if spec.dual_stack => Some(Self::Icmp(spec)),
+            _ => None,
+        }
+    }
+}
+
+pub(super) async fn dual_stack(monitor: &Monitor, probe: DualStack<'_>) -> Outcome {
     let (v4, v6) = tokio::join!(
-        probe_family(monitor, Family::V4),
-        probe_family(monitor, Family::V6)
+        probe_family(monitor, probe, Family::V4),
+        probe_family(monitor, probe, Family::V6)
     );
     combine(&v4, &v6)
 }
 
-async fn probe_family(monitor: &Monitor, family: Family) -> Outcome {
-    match monitor.kind {
+async fn probe_family(monitor: &Monitor, probe: DualStack<'_>, family: Family) -> Outcome {
+    match probe {
         // The per-monitor client cannot be steered per family, so dual-stack
         // probes share one family-bound client per family.
-        Kind::Http => match family_client(family) {
-            Ok(client) => http(&client, monitor).await,
+        DualStack::Http(spec) => match family_client(family) {
+            Ok(client) => http(&client, monitor, spec).await,
             Err(err) => Outcome::down(
                 FailureKind::Other,
                 format!("could not build probe client: {err}"),
             ),
         },
-        Kind::Tcp => tcp_family(monitor, family).await,
-        Kind::Icmp => icmp_family(monitor, Some(family)).await,
-        // Config validation restricts dual_stack to the three kinds above.
-        Kind::Dns | Kind::Push | Kind::Exec => Outcome::down(
-            FailureKind::Other,
-            "dual_stack unsupported for this monitor kind".to_owned(),
-        ),
+        DualStack::Tcp(spec) => tcp_family(monitor, spec, family).await,
+        DualStack::Icmp(spec) => icmp_family(monitor, spec, Some(family)).await,
     }
 }
 

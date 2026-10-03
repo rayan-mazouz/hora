@@ -21,11 +21,11 @@ use std::time::Duration;
 
 use reqwest::Client;
 
-use crate::config::{Kind, Monitor};
+use crate::config::{Monitor, NetworkProbe};
 use crate::status::CheckStatus;
 
 use dns::dns;
-use family::{Family, dual_stack};
+use family::{DualStack, Family, dual_stack};
 use http::http;
 use icmp::icmp;
 use tcp::tcp;
@@ -92,9 +92,14 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 /// a blip that passes on retry never reaches the history, the page or the
 /// error budget. Retries are logged so a flaky path stays visible in the logs
 /// even when the recorded check ends up green.
+///
+/// Only the kinds with a live probe get here (`probe` is borrowed from the
+/// monitor's own [`MonitorKind::network`](crate::config::MonitorKind::network)):
+/// push monitors are judged from stored heartbeats, exec monitors by the exec
+/// module.
 #[must_use]
-pub async fn run(client: &Client, monitor: &Monitor) -> Outcome {
-    let mut outcome = probe_once(client, monitor).await;
+pub async fn run(client: &Client, monitor: &Monitor, probe: NetworkProbe<'_>) -> Outcome {
+    let mut outcome = probe_once(client, monitor, probe).await;
     for attempt in 1..=monitor.probe_retries() {
         if outcome.is_up() {
             break;
@@ -106,31 +111,20 @@ pub async fn run(client: &Client, monitor: &Monitor) -> Outcome {
             "probe failed, retrying"
         );
         tokio::time::sleep(RETRY_DELAY).await;
-        outcome = probe_once(client, monitor).await;
+        outcome = probe_once(client, monitor, probe).await;
     }
     outcome
 }
 
-async fn probe_once(client: &Client, monitor: &Monitor) -> Outcome {
-    if monitor.dual_stack() {
-        return dual_stack(monitor).await;
+async fn probe_once(client: &Client, monitor: &Monitor, probe: NetworkProbe<'_>) -> Outcome {
+    if let Some(both) = DualStack::of(probe) {
+        return dual_stack(monitor, both).await;
     }
-    match monitor.kind {
-        Kind::Http => http(client, monitor).await,
-        Kind::Tcp => tcp(monitor).await,
-        Kind::Icmp => icmp(monitor).await,
-        Kind::Dns => dns(monitor).await,
-        // Push monitors are evaluated from stored heartbeats, exec monitors by
-        // the exec module - both routed by the scheduler before reaching here;
-        // these arms are defensive only.
-        Kind::Push => Outcome::down(
-            FailureKind::Other,
-            "push monitor has no active probe".to_owned(),
-        ),
-        Kind::Exec => Outcome::down(
-            FailureKind::Other,
-            "exec monitor is not a network probe".to_owned(),
-        ),
+    match probe {
+        NetworkProbe::Http(spec) => http(client, monitor, spec).await,
+        NetworkProbe::Tcp(spec) => tcp(monitor, spec).await,
+        NetworkProbe::Icmp(spec) => icmp(monitor, spec).await,
+        NetworkProbe::Dns(spec) => dns(monitor, spec).await,
     }
 }
 

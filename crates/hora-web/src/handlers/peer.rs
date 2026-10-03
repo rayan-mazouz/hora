@@ -49,7 +49,7 @@ pub(crate) async fn peer_probe(
     let monitor = config
         .monitors
         .iter()
-        .find(|monitor| monitor.kind == request.kind && monitor.target == request.target)
+        .find(|monitor| monitor.kind() == request.kind && monitor.target() == request.target)
         .ok_or(AppError::NotFound(
             "target not in this node's configuration",
         ))?;
@@ -62,15 +62,17 @@ pub(crate) async fn peer_probe(
     probe_monitor.probe_retries = Some(0);
     let client = state
         .probe_clients
-        .get_or_build(
-            &config,
-            monitor.proxy.as_deref(),
-            hora_core::http::probe_client,
-        )
+        .get_or_build(&config, monitor.proxy(), hora_core::http::probe_client)
         .map_err(|err| AppError::Internal(err.into()))?;
+    // The kind check above leaves only the kinds with a live probe.
+    let Some(probe) = probe_monitor.spec.network() else {
+        return Err(AppError::BadRequest(
+            "exec and push monitors are not network probes",
+        ));
+    };
     let outcome = match tokio::time::timeout(
         hora_core::mesh::confirm::PROBE_DEADLINE,
-        hora_core::probe::run(&client, &probe_monitor),
+        hora_core::probe::run(&client, &probe_monitor, probe),
     )
     .await
     {
@@ -131,12 +133,12 @@ pub(crate) async fn peer_monitors(
     let monitors = config
         .monitors
         .iter()
-        .filter(|monitor| !matches!(monitor.kind, Kind::Push | Kind::Exec))
+        .filter(|monitor| !matches!(monitor.kind(), Kind::Push | Kind::Exec))
         .map(|monitor| {
             let view = views.get(monitor.id.as_str());
             hora_core::mesh::wire::PeerMonitor {
-                kind: monitor.kind,
-                target: monitor.target.clone(),
+                kind: monitor.kind(),
+                target: monitor.target().to_owned(),
                 status: view.map_or(MonitorState::Unknown, |view| view.status),
                 p50_ms: view.and_then(|view| view.p50_ms),
             }

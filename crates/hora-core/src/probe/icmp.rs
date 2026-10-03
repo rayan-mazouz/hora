@@ -8,19 +8,23 @@ use surge_ping::{
 
 use super::family::Family;
 use super::{Outcome, millis, over_threshold, resolve};
-use crate::config::Monitor;
+use crate::config::{IcmpSpec, Monitor};
 
 /// ICMP echo (ping). Uses a per-probe unprivileged datagram socket (no
 /// `CAP_NET_RAW`), so it works in rootless Docker; one socket per probe avoids
 /// datagram identifier collisions between concurrent monitors. The address family
 /// (IPv4/IPv6) follows the resolved address.
-pub(super) async fn icmp(monitor: &Monitor) -> Outcome {
-    icmp_family(monitor, None).await
+pub(super) async fn icmp(monitor: &Monitor, spec: &IcmpSpec) -> Outcome {
+    icmp_family(monitor, spec, None).await
 }
 
 /// ICMP to the first resolved address - of one specific family when given.
-pub(super) async fn icmp_family(monitor: &Monitor, family: Option<Family>) -> Outcome {
-    let Some(addr) = resolve(&monitor.target, family).await else {
+pub(super) async fn icmp_family(
+    monitor: &Monitor,
+    spec: &IcmpSpec,
+    family: Option<Family>,
+) -> Outcome {
+    let Some(addr) = resolve(&spec.target, family).await else {
         return match family {
             Some(family) => Outcome::down(
                 FailureKind::Other,

@@ -1,16 +1,36 @@
 use super::env::expand_env;
-use super::monitor::default_timeout;
+use super::raw::default_timeout;
 use super::*;
 
 fn parse(toml_src: &str) -> Config {
     toml::from_str(toml_src).expect("valid config")
 }
 
+/// The whole loader (deserialization, which validates each monitor, then the
+/// cross-checks), as `hora check` runs it.
+fn load(toml_src: &str) -> anyhow::Result<Config> {
+    super::parse(toml_src)
+}
+
+fn http_spec(monitor: &Monitor) -> &HttpSpec {
+    match &monitor.spec {
+        MonitorKind::Http(spec) => spec,
+        other => panic!("not an http monitor: {other:?}"),
+    }
+}
+
+fn dns_spec(monitor: &Monitor) -> &DnsSpec {
+    match &monitor.spec {
+        MonitorKind::Dns(spec) => spec,
+        other => panic!("not a dns monitor: {other:?}"),
+    }
+}
+
 #[test]
 fn ad_hoc_monitor_carries_only_kind_and_target() {
-    let monitor = Monitor::ad_hoc(Kind::Tcp, "db.example.com:5432".to_owned());
-    assert_eq!(monitor.kind, Kind::Tcp);
-    assert_eq!(monitor.target, "db.example.com:5432");
+    let monitor = Monitor::ad_hoc(Kind::Tcp, "db.example.com:5432".to_owned()).unwrap();
+    assert_eq!(monitor.kind(), Kind::Tcp);
+    assert_eq!(monitor.target(), "db.example.com:5432");
     // Defaults the probe path relies on.
     assert_eq!(monitor.timeout_secs, default_timeout());
     // No anti-flap retry for a one-shot: the honest first result.
@@ -18,7 +38,7 @@ fn ad_hoc_monitor_carries_only_kind_and_target() {
     assert!(!monitor.dual_stack());
     assert!(monitor.confirm_with_peers.is_none());
     // An https ad-hoc monitor opts into the cert check like a real one.
-    let https = Monitor::ad_hoc(Kind::Http, "https://example.com".to_owned());
+    let https = Monitor::ad_hoc(Kind::Http, "https://example.com".to_owned()).unwrap();
     assert!(https.checks_cert());
 }
 
@@ -42,7 +62,7 @@ fn applies_defaults() {
     assert_eq!(config.alerts.default_retention_days, 90);
 
     let monitor = &config.monitors[0];
-    assert_eq!(monitor.kind, Kind::Http);
+    assert_eq!(monitor.kind(), Kind::Http);
     assert_eq!(monitor.timeout_secs, 10);
     assert_eq!(monitor.retention_days(90), 90);
 }
@@ -100,14 +120,14 @@ fn parses_custom_headers() {
             headers = { Accept = "text/html", "X-Token" = "abc" }
         "#,
     );
-    let headers = &config.monitors[0].headers;
+    let headers = &http_spec(&config.monitors[0]).headers;
     assert_eq!(headers.get("Accept").map(AsRef::as_ref), Some("text/html"));
     assert_eq!(headers.get("X-Token").map(AsRef::as_ref), Some("abc"));
 }
 
 #[test]
 fn rejects_duplicate_ids() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -122,14 +142,15 @@ fn rejects_duplicate_ids() {
             target = "https://b.example"
             interval_secs = 60
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("duplicate monitor id"), "got: {error}");
 }
 
 #[test]
 fn rejects_zero_timeout() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -140,8 +161,9 @@ fn rejects_zero_timeout() {
             interval_secs = 60
             timeout_secs = 0
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("timeout_secs"), "got: {error}");
 }
 
@@ -185,25 +207,27 @@ fn parses_http_assertions() {
             number_max = 500
         "#,
     );
-    let monitor = &config.monitors[0];
-    assert_eq!(monitor.keyword.as_deref(), Some("operational"));
+    let monitor = http_spec(&config.monitors[0]);
     assert_eq!(
-        monitor.json_query.as_ref().map(Parsed::raw),
-        Some("$.status")
+        monitor
+            .keyword
+            .as_ref()
+            .map(|keyword| keyword.text.as_str()),
+        Some("operational")
     );
-    assert_eq!(monitor.json_expected.as_deref(), Some("ok"));
-    assert_eq!(
-        monitor.number_regex.as_ref().map(Parsed::raw),
-        Some(r#"ships">(\d+)<"#)
-    );
-    assert_eq!(monitor.number_min, Some(1));
-    assert_eq!(monitor.number_max, Some(500));
+    let json = monitor.json.as_ref().expect("json assertion");
+    assert_eq!(json.query.raw(), "$.status");
+    assert_eq!(json.expected.as_deref(), Some("ok"));
+    let number = monitor.number.as_ref().expect("number assertion");
+    assert_eq!(number.regex.raw(), r#"ships">(\d+)<"#);
+    assert_eq!(number.min, Some(1));
+    assert_eq!(number.max, Some(500));
     validate(&config).expect("valid assertions");
 }
 
 #[test]
 fn rejects_invalid_number_regex() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -214,14 +238,15 @@ fn rejects_invalid_number_regex() {
             interval_secs = 60
             number_regex = "ships (["
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("invalid number_regex"), "got: {error}");
 }
 
 #[test]
 fn rejects_number_bounds_without_regex() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -232,14 +257,15 @@ fn rejects_number_bounds_without_regex() {
             interval_secs = 60
             number_min = 1
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("require number_regex"), "got: {error}");
 }
 
 #[test]
 fn rejects_inverted_number_bounds() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -252,14 +278,15 @@ fn rejects_inverted_number_bounds() {
             number_min = 10
             number_max = 5
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("exceeds number_max"), "got: {error}");
 }
 
 #[test]
 fn rejects_assertions_on_tcp() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -271,14 +298,15 @@ fn rejects_assertions_on_tcp() {
             interval_secs = 60
             keyword = "nope"
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("require an http monitor"), "got: {error}");
 }
 
 #[test]
 fn rejects_invalid_json_query() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -289,8 +317,9 @@ fn rejects_invalid_json_query() {
             interval_secs = 60
             json_query = "not a path"
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("invalid json_query"), "got: {error}");
 }
 
@@ -308,8 +337,8 @@ fn parses_push_monitor_without_target() {
             push_token = "secret"
         "#,
     );
-    assert_eq!(config.monitors[0].kind, Kind::Push);
-    assert_eq!(config.monitors[0].target, "");
+    assert_eq!(config.monitors[0].kind(), Kind::Push);
+    assert_eq!(config.monitors[0].target(), "");
     assert_eq!(
         config.monitors[0].push_token.as_ref().map(AsRef::as_ref),
         Some("secret")
@@ -319,7 +348,7 @@ fn parses_push_monitor_without_target() {
 
 #[test]
 fn rejects_empty_target_on_http() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -328,8 +357,9 @@ fn rejects_empty_target_on_http() {
             name = "X"
             interval_secs = 60
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("target must not be empty"), "got: {error}");
 }
 
@@ -347,16 +377,13 @@ fn parses_and_validates_proxy() {
             proxy = "socks5://127.0.0.1:9050"
         "#,
     );
-    assert_eq!(
-        config.monitors[0].proxy.as_deref(),
-        Some("socks5://127.0.0.1:9050")
-    );
+    assert_eq!(config.monitors[0].proxy(), Some("socks5://127.0.0.1:9050"));
     validate(&config).expect("valid proxy");
 }
 
 #[test]
 fn rejects_proxy_on_tcp() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -368,8 +395,9 @@ fn rejects_proxy_on_tcp() {
             interval_secs = 60
             proxy = "http://127.0.0.1:8080"
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("require an http monitor"), "got: {error}");
 }
 
@@ -396,7 +424,7 @@ fn dual_stack_validation() {
         "kind = \"tcp\"\ntarget = \"db.example.com:5432\"",
         "kind = \"icmp\"\ntarget = \"gw.example.com\"",
     ] {
-        validate(&parse(&base(body))).expect("hostname target valid");
+        load(&base(body)).expect("hostname target valid");
     }
 
     // An IP literal has a single family - rejected, brackets included.
@@ -406,21 +434,21 @@ fn dual_stack_validation() {
         "kind = \"tcp\"\ntarget = \"192.0.2.1:5432\"",
         "kind = \"icmp\"\ntarget = \"2001:db8::1\"",
     ] {
-        let error = validate(&parse(&base(body))).unwrap_err().to_string();
+        let error = load(&base(body)).unwrap_err().to_string();
         assert!(error.contains("requires a hostname"), "got: {error}");
     }
 
     // Wrong kind, and proxy combination.
-    let error = validate(&parse(&base("kind = \"dns\"\ntarget = \"example.com\"")))
+    let error = load(&base("kind = \"dns\"\ntarget = \"example.com\""))
         .unwrap_err()
         .to_string();
     assert!(
         error.contains("requires an http, tcp or icmp monitor"),
         "got: {error}"
     );
-    let error = validate(&parse(&base(
+    let error = load(&base(
         "target = \"https://example.com\"\nproxy = \"http://127.0.0.1:8080\"",
-    )))
+    ))
     .unwrap_err()
     .to_string();
     assert!(error.contains("cannot go through a proxy"), "got: {error}");
@@ -455,7 +483,7 @@ fn maintenance_window_mutes_selected_monitor() {
 
 #[test]
 fn rejects_inverted_maintenance_window() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -463,8 +491,9 @@ fn rejects_inverted_maintenance_window() {
             start = "2026-06-08T02:00:00Z"
             end = "2026-06-08T00:00:00Z"
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("start must be before end"), "got: {error}");
 }
 
@@ -488,7 +517,7 @@ fn parses_incidents() {
 
 #[test]
 fn rejects_non_url_safe_id() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -498,8 +527,9 @@ fn rejects_non_url_safe_id() {
             target = "https://example.com"
             interval_secs = 60
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("alphanumeric"), "got: {error}");
 }
 
@@ -537,18 +567,20 @@ fn monitor_debug_redacts_url_credentials() {
 
 #[test]
 fn monitor_debug_redacts_query_secrets() {
-    let mut monitor = Monitor {
-        name: "API".to_owned(),
-        target: "https://api.example.com/health?api_key=s3cret&verbose=1".to_owned(),
-        ..Monitor::default()
-    };
+    let mut monitor = Monitor::ad_hoc(
+        Kind::Http,
+        "https://api.example.com/health?api_key=s3cret&verbose=1".to_owned(),
+    )
+    .unwrap();
+    // The ad-hoc name is the target; a configured one is not.
+    monitor.name = "API".to_owned();
     let dump = format!("{monitor:?}");
     assert!(!dump.contains("s3cret"), "query secret leaked: {dump}");
     // Keys stay, so the log still says *what* was sent.
     assert!(dump.contains("api_key=***&verbose=***"), "{dump}");
     // Strings that are not URLs (a tcp host:port) are untouched.
-    monitor.target = "db.example.com:5432".to_owned();
-    assert!(format!("{monitor:?}").contains("db.example.com:5432"));
+    let tcp = Monitor::ad_hoc(Kind::Tcp, "db.example.com:5432".to_owned()).unwrap();
+    assert!(format!("{tcp:?}").contains("db.example.com:5432"));
 
     // The release watch's version endpoint is redacted the same way.
     monitor.release = Some(ReleaseWatch {
@@ -621,7 +653,7 @@ fn env_expansion_only_touches_string_values() {
 
 #[test]
 fn rejects_negative_latency_threshold() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -632,8 +664,9 @@ fn rejects_negative_latency_threshold() {
             interval_secs = 60
             degraded_over_ms = -1
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
         error.contains("degraded_over_ms must be > 0"),
         "got: {error}"
@@ -642,7 +675,7 @@ fn rejects_negative_latency_threshold() {
 
 #[test]
 fn rejects_malformed_http_target() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -652,8 +685,9 @@ fn rejects_malformed_http_target() {
             target = "https//example.com"
             interval_secs = 60
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("http(s) URL"), "got: {error}");
 }
 
@@ -774,7 +808,7 @@ fn parses_email_channel_with_default_port() {
 
 #[test]
 fn rejects_duplicate_channel_names() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -787,8 +821,9 @@ fn rejects_duplicate_channel_names() {
             type = "slack"
             webhook_url = "https://y/2"
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("duplicate channel name"), "got: {error}");
 }
 
@@ -993,7 +1028,7 @@ fn digest_validates_schedule_and_routes() {
 
 #[test]
 fn rejects_notify_unknown_channel() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -1008,8 +1043,9 @@ fn rejects_notify_unknown_channel() {
             interval_secs = 60
             notify = ["typo"]
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("unknown channel"), "got: {error}");
 }
 
@@ -1047,7 +1083,7 @@ fn parses_health_and_peers() {
 
 #[test]
 fn rejects_peers_without_health() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -1056,14 +1092,15 @@ fn rejects_peers_without_health() {
             name = "Hora B"
             ping_url = "https://b.example/api/push/hora-a"
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("require a [health] section"), "got: {error}");
 }
 
 #[test]
 fn rejects_peer_that_does_nothing() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -1073,8 +1110,9 @@ fn rejects_peer_that_does_nothing() {
             id = "hora-b"
             name = "Hora B"
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
         error.contains("ping_url") && error.contains("expect_every_secs"),
         "got: {error}"
@@ -1083,7 +1121,7 @@ fn rejects_peer_that_does_nothing() {
 
 #[test]
 fn rejects_peer_listen_id_clashing_with_monitor() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -1100,8 +1138,9 @@ fn rejects_peer_listen_id_clashing_with_monitor() {
             listen_id = "shared"
             expect_every_secs = 90
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("clashes with a monitor id"), "got: {error}");
 }
 
@@ -1200,7 +1239,7 @@ fn parses_group_and_depends_on() {
 
 #[test]
 fn rejects_depends_on_unknown_monitor() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -1211,14 +1250,15 @@ fn rejects_depends_on_unknown_monitor() {
             interval_secs = 30
             depends_on = ["ghost"]
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("unknown monitor"), "got: {error}");
 }
 
 #[test]
 fn rejects_dependency_cycle() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -1235,8 +1275,9 @@ fn rejects_dependency_cycle() {
             interval_secs = 30
             depends_on = ["a"]
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("cycle"), "got: {error}");
 }
 
@@ -1254,7 +1295,7 @@ fn parses_icmp_monitor() {
             interval_secs = 30
         "#,
     );
-    assert_eq!(config.monitors[0].kind, Kind::Icmp);
+    assert_eq!(config.monitors[0].kind(), Kind::Icmp);
     // ICMP is not HTTPS, so no certificate check.
     assert!(!config.monitors[0].checks_cert());
     validate(&config).expect("valid icmp monitor");
@@ -1263,7 +1304,7 @@ fn parses_icmp_monitor() {
 #[test]
 fn rejects_icmp_target_with_scheme_or_port() {
     for bad in ["https://example.com", "1.2.3.4:443", "a/b"] {
-        let config = parse(&format!(
+        let error = load(&format!(
             r#"
                 [page]
                 [server]
@@ -1274,8 +1315,9 @@ fn rejects_icmp_target_with_scheme_or_port() {
                 target = "{bad}"
                 interval_secs = 30
             "#
-        ));
-        let error = validate(&config).unwrap_err().to_string();
+        ))
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("bare host or IP"), "{bad} -> {error}");
     }
 }
@@ -1298,15 +1340,9 @@ fn accepts_dns_monitor() {
         "#,
     );
     validate(&config).expect("valid dns monitor");
-    let monitor = &config.monitors[0];
-    assert_eq!(
-        monitor.dns_resolver.as_ref().and_then(Parsed::get),
-        Some(&"9.9.9.9:53".parse().unwrap())
-    );
-    assert_eq!(
-        monitor.dns_record.as_ref().and_then(Parsed::get),
-        Some(&DnsRecord::A)
-    );
+    let monitor = dns_spec(&config.monitors[0]);
+    assert_eq!(monitor.resolver, Some("9.9.9.9:53".parse().unwrap()));
+    assert_eq!(monitor.record, DnsRecord::A);
 }
 
 #[test]
@@ -1328,15 +1364,9 @@ fn dns_fields_parse_once_at_load() {
         "#,
     );
     validate(&config).expect("valid dns monitor");
-    let monitor = &config.monitors[0];
-    assert_eq!(
-        monitor.dns_resolver.as_ref().and_then(Parsed::get),
-        Some(&"[2620:fe::fe]:53".parse().unwrap())
-    );
-    assert_eq!(
-        monitor.dns_record.as_ref().and_then(Parsed::get),
-        Some(&DnsRecord::Aaaa)
-    );
+    let monitor = dns_spec(&config.monitors[0]);
+    assert_eq!(monitor.resolver, Some("[2620:fe::fe]:53".parse().unwrap()));
+    assert_eq!(monitor.record, DnsRecord::Aaaa);
 }
 
 #[test]
@@ -1354,12 +1384,7 @@ fn host_port_parsing_is_bracket_aware() {
     assert_eq!(split_host_port("[not-v6]:80"), None);
     assert_eq!(split_host_port("[::1]"), None);
 
-    let tcp = |target: &str| {
-        let mut config = parse(MINIMAL);
-        config.monitors[0].kind = Kind::Tcp;
-        config.monitors[0].target = target.to_owned();
-        validate(&config)
-    };
+    let tcp = |target: &str| Monitor::ad_hoc(Kind::Tcp, target.to_owned());
     assert!(tcp("[::1]:80").is_ok());
     let error = tcp("::1:80").unwrap_err().to_string();
     assert!(error.contains("must be host:port"), "{error}");
@@ -1368,7 +1393,7 @@ fn host_port_parsing_is_bracket_aware() {
 #[test]
 fn periods_and_status_are_bounded() {
     let check = |field: &str| {
-        let config = parse(&format!(
+        load(&format!(
             r#"
                 [page]
                 [server]
@@ -1378,8 +1403,8 @@ fn periods_and_status_are_bounded() {
                 target = "https://example.com"
                 {field}
             "#
-        ));
-        validate(&config).map_err(|err| err.to_string())
+        ))
+        .map_err(|err| err.to_string())
     };
     // A typo'd huge interval fails at load instead of panicking a task.
     let error = check("interval_secs = 86400000000000").unwrap_err();
@@ -1437,7 +1462,7 @@ fn rejects_invalid_dns_monitor() {
         ("dns_resolver = \"2620:fe::fe:53\"", "must be host:port"),
         ("dns_resolver = \"dns.google:53\"", "not a hostname"),
     ] {
-        let config = parse(&format!(
+        let error = load(&format!(
             r#"
                 [page]
                 [server]
@@ -1449,15 +1474,16 @@ fn rejects_invalid_dns_monitor() {
                 interval_secs = 300
                 {field}
             "#
-        ));
-        let error = validate(&config).unwrap_err().to_string();
+        ))
+        .unwrap_err()
+        .to_string();
         assert!(error.contains(message), "{field} -> {error}");
     }
 }
 
 #[test]
 fn rejects_dns_target_with_scheme() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -1468,14 +1494,15 @@ fn rejects_dns_target_with_scheme() {
             target = "https://example.com"
             interval_secs = 300
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("must be a hostname"), "{error}");
 }
 
 #[test]
 fn rejects_dns_fields_on_http() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -1486,8 +1513,9 @@ fn rejects_dns_fields_on_http() {
             interval_secs = 60
             dns_record = "A"
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("require a dns monitor"), "{error}");
 }
 
@@ -1505,8 +1533,9 @@ fn private_monitor_requires_auth_token() {
             public = false
         "#;
 
-    let config = parse(&private.replace("{token}", ""));
-    let error = validate(&config).unwrap_err().to_string();
+    let error = load(&private.replace("{token}", ""))
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("requires server.auth_token"), "{error}");
 
     let config = parse(&private.replace("{token}", "auth_token = \"s3cret\""));
@@ -1515,8 +1544,9 @@ fn private_monitor_requires_auth_token() {
     // An interpolated-but-unset token expands to "" - now rejected outright
     // (an empty token would authorize a blank `?token=`), not silently treated
     // as "no token".
-    let config = parse(&private.replace("{token}", "auth_token = \"\""));
-    let error = validate(&config).unwrap_err().to_string();
+    let error = load(&private.replace("{token}", "auth_token = \"\""))
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("auth_token must not be empty"), "{error}");
 }
 
@@ -1619,7 +1649,16 @@ fn ehlo_name_is_smtp_only_and_rfc_shaped() {
             "starttls = \"smtp\"\nehlo_name = \"{name}\""
         )))
         .unwrap_or_else(|err| panic!("{name}: {err}"));
-        assert_eq!(config.monitors[0].ehlo_name.as_deref(), Some(name));
+        assert_eq!(
+            config.monitors[0].spec,
+            MonitorKind::Tcp(TcpSpec {
+                target: "mail.example.org:25".to_owned(),
+                starttls: Some(Starttls::Smtp {
+                    ehlo_name: Some(name.to_owned())
+                }),
+                dual_stack: false,
+            })
+        );
     }
 
     // A bare label is exactly what port-25 servers refuse; bad literals too.
@@ -1809,7 +1848,10 @@ fn accepts_scheduled_push_monitor() {
         "#,
     );
     validate(&config).expect("valid scheduled push monitor");
-    assert_eq!(config.monitors[0].push_grace_secs(), 1800);
+    let MonitorKind::Push(push) = &config.monitors[0].spec else {
+        panic!("not a push monitor");
+    };
+    assert_eq!(push.schedule.as_ref().map(|s| s.grace_secs), Some(1800));
 }
 
 #[test]
@@ -1825,7 +1867,7 @@ fn rejects_bad_schedule_combinations() {
             "grace_secs requires a schedule",
         ),
     ] {
-        let config = parse(&format!(
+        let error = load(&format!(
             r#"
                 [page]
                 [server]
@@ -1836,8 +1878,9 @@ fn rejects_bad_schedule_combinations() {
                 interval_secs = 60
                 {fields}
             "#
-        ));
-        let error = validate(&config).unwrap_err().to_string();
+        ))
+        .unwrap_err()
+        .to_string();
         assert!(error.contains(message), "{fields} -> {error}");
     }
 }
@@ -1897,7 +1940,7 @@ fn probe_retries_default_and_bounds() {
     validate(&config).expect("0 disables retries");
     assert_eq!(config.monitors[0].probe_retries(), 0);
 
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -1908,14 +1951,15 @@ fn probe_retries_default_and_bounds() {
             interval_secs = 60
             probe_retries = 6
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("at most 5"), "{error}");
 }
 
 #[test]
 fn rejects_slo_window_without_target() {
-    let config = parse(
+    let error = load(
         r#"
             [page]
             [server]
@@ -1926,7 +1970,205 @@ fn rejects_slo_window_without_target() {
             interval_secs = 60
             slo_window_days = 30
         "#,
-    );
-    let error = validate(&config).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("requires slo_uptime"), "{error}");
+}
+
+/// The shipped example, as `hora check` reads it.
+const EXAMPLE: &str = include_str!("../../../../config.example.toml");
+
+/// Uncomment the lines of `text` from the one starting with `from` to the
+/// next blank line (`# key = value  # note` becomes `key = value  # note`).
+fn uncomment_block(text: &str, from: &str) -> String {
+    let start = text
+        .find(from)
+        .unwrap_or_else(|| panic!("{from:?} not in the example"));
+    let end = text[start..]
+        .find("\n\n")
+        .map_or(text.len(), |at| start + at);
+    let block: String = text[start..end]
+        .lines()
+        .map(|line| line.strip_prefix("# ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{}{block}{}", &text[..start], &text[end..])
+}
+
+/// Every `[[monitors]]` table of a config, as plain TOML values.
+fn raw_monitors(text: &str) -> Vec<toml::Table> {
+    let table: toml::Table = toml::from_str(text).expect("example parses as TOML");
+    table["monitors"]
+        .as_array()
+        .expect("monitors array")
+        .iter()
+        .map(|monitor| monitor.as_table().expect("monitor table").clone())
+        .collect()
+}
+
+#[test]
+fn the_example_config_round_trips_into_typed_monitors() {
+    let config = super::parse_with_exec_dir(EXAMPLE, None).expect("the example loads");
+    let raw = raw_monitors(EXAMPLE);
+    assert_eq!(config.monitors.len(), raw.len());
+    for (monitor, table) in config.monitors.iter().zip(&raw) {
+        // Kind and target survive as written: the target is the identity
+        // peers compare, so it must not be normalized.
+        let kind = table
+            .get("kind")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("http");
+        assert_eq!(monitor.kind().as_str(), kind, "{}", monitor.id);
+        let target = table
+            .get("target")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("");
+        assert_eq!(monitor.target(), target, "{}", monitor.id);
+        assert_eq!(
+            Some(monitor.interval_secs),
+            table["interval_secs"]
+                .as_integer()
+                .and_then(|n| u64::try_from(n).ok())
+        );
+    }
+    let smtp = config.find_monitor("smtp").expect("smtp monitor");
+    assert_eq!(
+        crate::cert::starttls_of(smtp),
+        Some(&Starttls::Smtp { ehlo_name: None })
+    );
+    assert!(smtp.checks_cert());
+    let backup = config.find_monitor("nightly-backup").expect("push monitor");
+    assert_eq!(backup.spec, MonitorKind::Push(PushSpec { schedule: None }));
+}
+
+#[test]
+fn the_example_config_optional_settings_land_in_their_kind() {
+    // The commented-out settings of the example, switched on: each lands in
+    // its kind's typed settings, parsed.
+    let mut text = EXAMPLE.to_owned();
+    for from in [
+        "# keyword = \"operational\"",
+        "# ehlo_name = ",
+        "# push_token = ",
+        "# [[monitors]]\n# id = \"raid\"",
+        "# [[monitors]]\n# id = \"dns-check\"",
+    ] {
+        text = uncomment_block(&text, from);
+    }
+    // `${BACKUP_TOKEN}` is unset here: give the token a value of its own.
+    let text = text.replace("${BACKUP_TOKEN}", "a-long-enough-backup-token");
+    let exec_dir = std::env::temp_dir();
+    let config = super::parse_with_exec_dir(&text, Some(exec_dir)).expect("the example loads");
+    assert_eq!(config.monitors.len(), raw_monitors(&text).len());
+
+    let api = http_spec(config.find_monitor("api").expect("api"));
+    let keyword = api.keyword.as_ref().expect("keyword");
+    assert_eq!(
+        (keyword.text.as_str(), keyword.invert),
+        ("operational", false)
+    );
+    let json = api.json.as_ref().expect("json assertion");
+    assert_eq!(
+        (json.query.raw(), json.expected.as_deref()),
+        ("$.status", Some("ok"))
+    );
+    let number = api.number.as_ref().expect("number assertion");
+    assert_eq!(
+        (number.regex.raw(), number.min, number.max),
+        (r#"ships">(\d+)<"#, Some(1), Some(500))
+    );
+    assert_eq!(api.max_body_kb, Some(256));
+
+    let smtp = config.find_monitor("smtp").expect("smtp");
+    assert_eq!(
+        crate::cert::starttls_of(smtp),
+        Some(&Starttls::Smtp {
+            ehlo_name: Some("status.example.com".to_owned())
+        })
+    );
+
+    let backup = config.find_monitor("nightly-backup").expect("push");
+    assert_eq!(
+        backup.push_token.as_ref().map(AsRef::as_ref),
+        Some("a-long-enough-backup-token")
+    );
+    let MonitorKind::Push(push) = &backup.spec else {
+        panic!("not a push monitor");
+    };
+    let schedule = push.schedule.as_ref().expect("schedule");
+    assert_eq!(
+        (schedule.cron.raw(), schedule.grace_secs),
+        ("0 3 * * *", 1800)
+    );
+
+    let raid = config.find_monitor("raid").expect("exec");
+    assert_eq!(
+        raid.spec,
+        MonitorKind::Exec(ExecSpec {
+            program: "check_raid".to_owned(),
+            args: vec!["--no-sudo".to_owned()],
+        })
+    );
+    assert_eq!(raid.target(), "");
+
+    let dns = dns_spec(config.find_monitor("dns-check").expect("dns"));
+    assert_eq!(dns.record, DnsRecord::A);
+    assert_eq!(dns.expected.as_deref(), Some("1.2.3.4"));
+    assert_eq!(dns.resolver, Some("8.8.8.8:53".parse().unwrap()));
+}
+
+#[test]
+fn settings_of_another_kind_that_always_loaded_still_load() {
+    // Never refused before the typed monitor, so still accepted - and
+    // dropped (with a warning), since this kind has no use for them.
+    let config = load(
+        r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "db"
+            name = "DB"
+            kind = "tcp"
+            target = "db.example.com:5432"
+            interval_secs = 60
+            expected_status = 200
+            headers = { Accept = "text/html" }
+            max_body_kb = 64
+        "#,
+    )
+    .expect("loads as before");
+    assert_eq!(
+        config.monitors[0].spec,
+        MonitorKind::Tcp(TcpSpec {
+            target: "db.example.com:5432".to_owned(),
+            starttls: None,
+            dual_stack: false,
+        })
+    );
+}
+
+#[test]
+fn a_monitor_error_reads_as_before() {
+    // Validation now runs as the table is read; the message the operator
+    // sees is still the monitor's own, without the decoder's decoration.
+    let error = load(
+        r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "db"
+            name = "DB"
+            kind = "tcp"
+            target = "db.example.com:5432"
+            interval_secs = 60
+            keyword = "ok"
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(
+        error,
+        "monitor db: keyword/json_query/number_regex/proxy require an http monitor"
+    );
 }

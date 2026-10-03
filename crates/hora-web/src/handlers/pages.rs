@@ -188,7 +188,7 @@ pub(crate) async fn monitor_page(
     }
 
     // The heatmap, inlined so the stylesheet themes it; cached like the image.
-    let heatmap = if monitor.kind == Kind::Push {
+    let heatmap = if monitor.kind() == Kind::Push {
         None
     } else {
         let key = format!("{id}#inline");

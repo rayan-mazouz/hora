@@ -60,7 +60,7 @@ pub(crate) async fn push(
     let expected_token = if let Some(monitor) = config
         .monitors
         .iter()
-        .find(|monitor| monitor.id == id && monitor.kind == Kind::Push)
+        .find(|monitor| monitor.id == id && monitor.kind() == Kind::Push)
     {
         monitor.push_token.as_ref()
     } else if let Some(peer) = config

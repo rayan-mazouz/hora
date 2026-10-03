@@ -102,30 +102,14 @@ fn client_config() -> anyhow::Result<Arc<ClientConfig>> {
     Ok(Arc::new(config))
 }
 
-/// The STARTTLS negotiation to run before the TLS handshake, for services
-/// that greet in plaintext first (mail servers on 587/143).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Starttls {
-    Smtp,
-    Imap,
-}
+pub use crate::config::Starttls;
 
-impl Starttls {
-    /// Parse a monitor's `starttls` value (validated at config load, so this
-    /// is total over what a loaded config can carry).
-    #[must_use]
-    pub fn parse(mode: &str) -> Option<Self> {
-        match mode {
-            "smtp" => Some(Self::Smtp),
-            "imap" => Some(Self::Imap),
-            _ => None,
-        }
-    }
-
-    /// A monitor's negotiation mode, when it configured one.
-    #[must_use]
-    pub fn for_monitor(monitor: &crate::config::Monitor) -> Option<Self> {
-        monitor.starttls.as_deref().and_then(Self::parse)
+/// A monitor's STARTTLS negotiation, when it is a tcp monitor that set one.
+#[must_use]
+pub fn starttls_of(monitor: &crate::config::Monitor) -> Option<&Starttls> {
+    match &monitor.spec {
+        crate::config::MonitorKind::Tcp(spec) => spec.starttls.as_ref(),
+        _ => None,
     }
 }
 
@@ -183,13 +167,13 @@ async fn read_smtp_reply<S: tokio::io::AsyncRead + Unpin>(
 /// Negotiate STARTTLS on a fresh plaintext connection, leaving the stream
 /// ready for the TLS handshake. Every step is bounded; the caller wraps the
 /// whole negotiation in the monitor's timeout.
-async fn negotiate<S>(stream: &mut S, mode: Starttls, ehlo_name: &str) -> anyhow::Result<()>
+async fn negotiate<S>(stream: &mut S, mode: &Starttls, ehlo_name: &str) -> anyhow::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt as _;
     match mode {
-        Starttls::Smtp => {
+        Starttls::Smtp { .. } => {
             read_smtp_reply(stream, "220").await?;
             stream
                 .write_all(format!("EHLO {ehlo_name}\r\n").as_bytes())
@@ -229,8 +213,7 @@ async fn fetch(
     config: &Arc<ClientConfig>,
     host: &str,
     port: u16,
-    starttls: Option<Starttls>,
-    ehlo_name: Option<&str>,
+    starttls: Option<&Starttls>,
     timeout: Duration,
 ) -> anyhow::Result<(i64, String)> {
     let mut tcp = tokio::time::timeout(timeout, TcpStream::connect((host, port)))
@@ -238,9 +221,11 @@ async fn fetch(
         .map_err(|_elapsed| anyhow::anyhow!("tcp connect timed out"))??;
 
     if let Some(mode) = starttls {
-        let ehlo_name = match ehlo_name {
-            Some(name) => name.to_owned(),
-            None => address_literal(tcp.local_addr()?),
+        let ehlo_name = match mode {
+            Starttls::Smtp {
+                ehlo_name: Some(name),
+            } => name.clone(),
+            _ => address_literal(tcp.local_addr()?),
         };
         tokio::time::timeout(timeout, negotiate(&mut tcp, mode, &ehlo_name))
             .await
@@ -291,12 +276,11 @@ pub struct CertInfo {
 pub async fn inspect_endpoint(
     host: &str,
     port: u16,
-    starttls: Option<Starttls>,
-    ehlo_name: Option<&str>,
+    starttls: Option<&Starttls>,
     timeout: Duration,
 ) -> anyhow::Result<CertInfo> {
     let tls = client_config()?;
-    let (not_after, fingerprint) = fetch(&tls, host, port, starttls, ehlo_name, timeout).await?;
+    let (not_after, fingerprint) = fetch(&tls, host, port, starttls, timeout).await?;
     let now = chrono::Utc::now().timestamp();
     Ok(CertInfo {
         not_after,
@@ -342,9 +326,9 @@ fn host_port(target: &str) -> Option<(String, u16)> {
 #[must_use]
 pub fn monitor_endpoint(monitor: &crate::config::Monitor) -> Option<(String, u16)> {
     use crate::config::Kind;
-    match monitor.kind {
-        Kind::Http => host_port(&monitor.target),
-        Kind::Tcp => crate::config::split_host_port(&monitor.target)
+    match monitor.kind() {
+        Kind::Http => host_port(monitor.target()),
+        Kind::Tcp => crate::config::split_host_port(monitor.target())
             .map(|(host, port)| (host.to_owned(), port)),
         _ => None,
     }
@@ -437,12 +421,10 @@ async fn check_certs(
             }
             endpoint.map(|(host, port)| {
                 let tls = Arc::clone(tls);
-                let starttls = Starttls::for_monitor(monitor);
-                let ehlo_name = monitor.ehlo_name.clone();
+                let starttls = starttls_of(monitor).cloned();
                 let timeout = monitor.timeout();
                 async move {
-                    let result =
-                        fetch(&tls, &host, port, starttls, ehlo_name.as_deref(), timeout).await;
+                    let result = fetch(&tls, &host, port, starttls.as_ref(), timeout).await;
                     (index, result)
                 }
             })
@@ -784,7 +766,7 @@ mod tests {
             }
             commands
         });
-        let result = negotiate(&mut client, mode, ehlo_name).await;
+        let result = negotiate(&mut client, &mode, ehlo_name).await;
         drop(client);
         let commands = peer.await.unwrap_or_default();
         (result, commands)
@@ -794,7 +776,7 @@ mod tests {
     async fn smtp_negotiation_walks_ehlo_then_starttls() {
         // Multi-line EHLO reply, as real servers answer.
         let ok = scripted(
-            Starttls::Smtp,
+            Starttls::Smtp { ehlo_name: None },
             &[
                 "220 mail.example.org ESMTP\r\n",
                 "250-mail.example.org\r\n250-PIPELINING\r\n250 STARTTLS\r\n",
@@ -806,7 +788,7 @@ mod tests {
 
         // A server refusing STARTTLS is an error, never a silent plaintext read.
         let refused = scripted(
-            Starttls::Smtp,
+            Starttls::Smtp { ehlo_name: None },
             &[
                 "220 mail.example.org ESMTP\r\n",
                 "250 mail.example.org\r\n",
@@ -816,14 +798,14 @@ mod tests {
         .await;
         assert!(refused.is_err());
         // A wrong greeting fails immediately.
-        let bad = scripted(Starttls::Smtp, &["554 go away\r\n"]).await;
+        let bad = scripted(Starttls::Smtp { ehlo_name: None }, &["554 go away\r\n"]).await;
         assert!(bad.is_err());
     }
 
     #[tokio::test]
     async fn smtp_negotiation_announces_the_ehlo_name() {
         let (ok, commands) = scripted_commands(
-            Starttls::Smtp,
+            Starttls::Smtp { ehlo_name: None },
             "status.example.org",
             &[
                 "220 mail.example.org ESMTP\r\n",
@@ -870,11 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn starttls_parses_and_endpoints_resolve_per_kind() {
-        assert_eq!(Starttls::parse("smtp"), Some(Starttls::Smtp));
-        assert_eq!(Starttls::parse("imap"), Some(Starttls::Imap));
-        assert_eq!(Starttls::parse("ftp"), None);
-
+    fn starttls_and_endpoints_resolve_per_kind() {
         let config = crate::config::parse(
             r#"
             [page]
@@ -908,7 +886,7 @@ mod tests {
         .expect("config");
         let mail = &config.monitors[0];
         assert!(mail.checks_cert(), "starttls implies the cert check");
-        assert_eq!(Starttls::for_monitor(mail), Some(Starttls::Smtp));
+        assert_eq!(starttls_of(mail), Some(&Starttls::Smtp { ehlo_name: None }));
         assert_eq!(
             monitor_endpoint(mail),
             Some(("mail.example.org".to_owned(), 587))

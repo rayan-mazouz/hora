@@ -33,43 +33,40 @@ pub(crate) async fn probe(args: &[String]) -> Result<(), CliError> {
             Some(kind) => (kind, probe_target(kind, parsed.target)),
             None => infer_probe(parsed.target),
         };
-        hora_core::config::Monitor::ad_hoc(kind, target)
+        hora_core::config::Monitor::ad_hoc(kind, target).map_err(|err| usage(format!("{err:#}")))?
     };
-    // Push and exec monitors are evaluated from heartbeats / an external
-    // command, not a live network probe - reject them whichever way the monitor
-    // was resolved (a configured id, or an inferred kind).
-    if matches!(
-        monitor.kind,
-        hora_core::config::Kind::Push | hora_core::config::Kind::Exec
-    ) {
-        return Err(CliError::Failed(format!(
-            "hora probe runs a live network check, but {:?} is a {} monitor (no active probe)",
-            monitor.id,
-            monitor.kind.as_str()
-        )));
-    }
     // Force confirmation on regardless of the monitor's own setting: the flag
     // is the explicit ask. confirm_with_peers is read by confirm::enabled only.
     if parsed.confirm {
         monitor.confirm_with_peers = Some(true);
     }
+    // Push and exec monitors are evaluated from heartbeats / an external
+    // command, not a live network probe - reject them whichever way the monitor
+    // was resolved (a configured id, or an inferred kind).
+    let Some(probe) = monitor.spec.network() else {
+        return Err(CliError::Failed(format!(
+            "hora probe runs a live network check, but {:?} is a {} monitor (no active probe)",
+            monitor.id,
+            monitor.kind().as_str()
+        )));
+    };
 
     let header = if configured.is_some() {
         format!(
             "{} ({}, {})",
             monitor.name,
-            monitor.kind.as_str(),
-            monitor.target
+            monitor.kind().as_str(),
+            monitor.target()
         )
     } else {
-        format!("{} {}", monitor.kind.as_str(), monitor.target)
+        format!("{} {}", monitor.kind().as_str(), monitor.target())
     };
     println!("hora probe - {header}");
     println!();
 
-    let client = hora_core::http::probe_client(monitor.proxy.as_deref())
-        .context("building the probe HTTP client")?;
-    let outcome = hora_core::probe::run(&client, &monitor).await;
+    let client =
+        hora_core::http::probe_client(monitor.proxy()).context("building the probe HTTP client")?;
+    let outcome = hora_core::probe::run(&client, &monitor, probe).await;
     print_probe_report(&monitor, &outcome).await;
 
     if parsed.confirm {
@@ -172,21 +169,14 @@ async fn print_probe_report(
     // means the cert handshake would just hit the same timeout twice.
     let reached_server = outcome.is_up() || outcome.status_code.is_some();
     let https =
-        monitor.kind == hora_core::config::Kind::Http && monitor.target.starts_with("https://");
-    let starttls = hora_core::cert::Starttls::for_monitor(monitor);
+        monitor.kind() == hora_core::config::Kind::Http && monitor.target().starts_with("https://");
+    let starttls = hora_core::cert::starttls_of(monitor);
     if reached_server && (https || starttls.is_some()) {
         // STARTTLS tcp monitors read their certificate exactly like the
         // watcher: negotiate in plaintext, then handshake.
         let cert = match hora_core::cert::monitor_endpoint(monitor) {
             Some((host, port)) => {
-                hora_core::cert::inspect_endpoint(
-                    &host,
-                    port,
-                    starttls,
-                    monitor.ehlo_name.as_deref(),
-                    monitor.timeout(),
-                )
-                .await
+                hora_core::cert::inspect_endpoint(&host, port, starttls, monitor.timeout()).await
             }
             None => Err(anyhow::anyhow!("cannot determine host:port")),
         };

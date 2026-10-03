@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt as _;
 
-use crate::config::Monitor;
+use crate::config::{ExecSpec, Monitor};
 use crate::probe::{FailureKind, Outcome};
 
 /// Cap on the output kept from a plugin (the first line becomes the
@@ -40,14 +40,8 @@ const OUTPUT_GRACE: Duration = Duration::from_millis(500);
 /// the probe itself can never break the scheduler loop.
 ///
 /// `exec_dir` is the canonical `HORA_EXEC_DIR` (resolved once at config load).
-pub(crate) async fn run(exec_dir: &Path, monitor: &Monitor) -> Outcome {
-    let Some(name) = monitor.command.first() else {
-        // Config validation rejects this; defensive only.
-        return Outcome::down(
-            FailureKind::Plugin,
-            "exec monitor has no command".to_owned(),
-        );
-    };
+pub(crate) async fn run(exec_dir: &Path, monitor: &Monitor, spec: &ExecSpec) -> Outcome {
+    let name = &spec.program;
     let program = match resolve(exec_dir, name).await {
         Ok(program) => program,
         Err(reason) => return Outcome::down(FailureKind::Plugin, reason),
@@ -56,7 +50,7 @@ pub(crate) async fn run(exec_dir: &Path, monitor: &Monitor) -> Outcome {
     let start = Instant::now();
     let mut command = tokio::process::Command::new(&program);
     command
-        .args(&monitor.command[1..])
+        .args(&spec.args)
         .current_dir(exec_dir)
         // A scrubbed environment: the daemon's env carries channel tokens
         // (`${VAR}` interpolation); a plugin gets the bare POSIX minimum.
@@ -302,6 +296,13 @@ mod tests {
         .remove(0)
     }
 
+    async fn run_exec(dir: &Path, monitor: &Monitor) -> Outcome {
+        let crate::config::MonitorKind::Exec(spec) = &monitor.spec else {
+            panic!("not an exec monitor");
+        };
+        run(dir, monitor, spec).await
+    }
+
     #[tokio::test]
     async fn exit_codes_follow_the_monitoring_plugins_convention() {
         let fixture = Fixture::new("codes");
@@ -310,22 +311,22 @@ mod tests {
         fixture.script("crit", r#"echo "DISK CRITICAL - 99% used"; exit 2"#);
         fixture.script("silent-crit", "exit 3");
 
-        let up = run(&fixture.dir, &exec_monitor(&["ok"], 5)).await;
+        let up = run_exec(&fixture.dir, &exec_monitor(&["ok"], 5)).await;
         assert!(up.is_up() && !up.is_degraded());
         assert_eq!(up.error, None);
         assert!(up.latency_ms.is_some());
 
         // Exit 1: degraded, message kept, perfdata-free.
-        let warn = run(&fixture.dir, &exec_monitor(&["warn"], 5)).await;
+        let warn = run_exec(&fixture.dir, &exec_monitor(&["warn"], 5)).await;
         assert!(warn.is_up() && warn.is_degraded());
         assert_eq!(warn.error.as_deref(), Some("DISK WARNING - 85% used"));
 
-        let crit = run(&fixture.dir, &exec_monitor(&["crit"], 5)).await;
+        let crit = run_exec(&fixture.dir, &exec_monitor(&["crit"], 5)).await;
         assert!(!crit.is_up());
         assert_eq!(crit.error.as_deref(), Some("DISK CRITICAL - 99% used"));
 
         // No output: a synthesized reason carries the exit code.
-        let silent = run(&fixture.dir, &exec_monitor(&["silent-crit"], 5)).await;
+        let silent = run_exec(&fixture.dir, &exec_monitor(&["silent-crit"], 5)).await;
         assert!(!silent.is_up());
         assert!(silent.error.as_deref().unwrap().contains("exit 3"));
     }
@@ -334,7 +335,7 @@ mod tests {
     async fn arguments_reach_the_plugin_and_perfdata_is_stripped() {
         let fixture = Fixture::new("args");
         fixture.script("echoer", r#"echo "got $1 $2 | perf=1"; exit 2"#);
-        let outcome = run(&fixture.dir, &exec_monitor(&["echoer", "-H", "x.org"], 5)).await;
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["echoer", "-H", "x.org"], 5)).await;
         assert_eq!(outcome.error.as_deref(), Some("got -H x.org"));
     }
 
@@ -343,7 +344,7 @@ mod tests {
         let fixture = Fixture::new("stuck");
         fixture.script("hang", "sleep 60");
         let started = std::time::Instant::now();
-        let outcome = run(&fixture.dir, &exec_monitor(&["hang"], 1)).await;
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["hang"], 1)).await;
         assert!(!outcome.is_up());
         assert!(outcome.error.as_deref().unwrap().contains("timed out"));
         assert!(started.elapsed().as_secs() < 5, "killed promptly");
@@ -357,7 +358,7 @@ mod tests {
             "flood",
             r#"echo "still fine"; i=0; while [ $i -lt 4000 ]; do printf '%4096s' x; i=$((i+1)); done; exit 0"#,
         );
-        let outcome = run(&fixture.dir, &exec_monitor(&["flood"], 10)).await;
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["flood"], 10)).await;
         assert!(outcome.is_up(), "{:?}", outcome.error);
     }
 
@@ -367,7 +368,7 @@ mod tests {
         // A symlink inside the dir pointing outside it: refused even though
         // the *name* looks legitimate.
         std::os::unix::fs::symlink("/bin/sh", fixture.dir.join("sneaky")).expect("symlink");
-        let outcome = run(&fixture.dir, &exec_monitor(&["sneaky"], 5)).await;
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["sneaky"], 5)).await;
         assert!(!outcome.is_up());
         assert!(
             outcome.error.as_deref().unwrap().contains("escapes"),
@@ -379,12 +380,12 @@ mod tests {
     #[tokio::test]
     async fn missing_plugins_and_missing_dirs_are_clean_downs() {
         let fixture = Fixture::new("missing");
-        let outcome = run(&fixture.dir, &exec_monitor(&["nope"], 5)).await;
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["nope"], 5)).await;
         assert!(!outcome.is_up());
         assert!(outcome.error.as_deref().unwrap().contains("not found"));
 
         let gone = std::path::Path::new("/nonexistent-hora-exec-dir");
-        let outcome = run(gone, &exec_monitor(&["nope"], 5)).await;
+        let outcome = run_exec(gone, &exec_monitor(&["nope"], 5)).await;
         assert!(!outcome.is_up());
         assert!(outcome.error.as_deref().unwrap().contains("not found"));
     }
@@ -399,7 +400,7 @@ mod tests {
             "wrapper",
             &format!("sleep 60 &\necho $! > {}\nwait", pidfile.display()),
         );
-        let outcome = run(&fixture.dir, &exec_monitor(&["wrapper"], 1)).await;
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["wrapper"], 1)).await;
         assert!(outcome.error.as_deref().unwrap().contains("timed out"));
 
         let pid: i32 = std::fs::read_to_string(&pidfile)
@@ -426,7 +427,7 @@ mod tests {
         // the pipe open far past the timeout.
         fixture.script("daemonizes", "sleep 30 &\necho \"all good\"\nexit 0");
         let started = std::time::Instant::now();
-        let outcome = run(&fixture.dir, &exec_monitor(&["daemonizes"], 5)).await;
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["daemonizes"], 5)).await;
         assert!(outcome.is_up(), "{:?}", outcome.error);
         assert!(started.elapsed().as_secs() < 3, "waited for the pipe");
     }
@@ -441,7 +442,7 @@ mod tests {
             "leak",
             r#"if [ -n "$CARGO_PKG_NAME$CARGO_MANIFEST_DIR$HORA_LOG" ]; then echo "LEAKED"; exit 2; else echo "clean"; exit 0; fi"#,
         );
-        let outcome = run(&fixture.dir, &exec_monitor(&["leak"], 5)).await;
+        let outcome = run_exec(&fixture.dir, &exec_monitor(&["leak"], 5)).await;
         assert!(outcome.is_up(), "{:?}", outcome.error);
     }
 }
