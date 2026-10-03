@@ -17,6 +17,7 @@ pub mod email;
 pub mod freemobile;
 pub mod gotify;
 pub mod matrix;
+mod message;
 pub mod ntfy;
 pub mod pushover;
 pub mod slack;
@@ -362,6 +363,15 @@ impl Dispatcher {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut triggered = Vec::new();
             for (channel, outcome) in targets.iter().zip(outcomes.iter()) {
+                // A payload the API refused (400/413) says nothing about the
+                // channel's health - the channel answered - so it neither
+                // extends nor forgives the current streak.
+                if outcome
+                    .as_ref()
+                    .is_err_and(anyhow::Error::is::<util::PayloadRejected>)
+                {
+                    continue;
+                }
                 let entry = map.entry(channel.name.clone()).or_default();
                 if outcome.is_ok() {
                     entry.consecutive_failures = 0;
@@ -398,7 +408,10 @@ impl Dispatcher {
             let elapsed = health
                 .first_failure_at
                 .and_then(|since| SystemTime::now().duration_since(since).ok())
-                .map_or_else(|| "unknown".to_owned(), |d| human_elapsed(d.as_secs()));
+                .map_or_else(
+                    || "unknown".to_owned(),
+                    |d| util::human_duration(d.as_secs()),
+                );
             let message = format!(
                 "{} consecutive delivery failure{} (since {})",
                 health.consecutive_failures,
@@ -449,19 +462,6 @@ impl Dispatcher {
     }
 }
 
-/// `"2d 3h"`, `"6h"`, `"45m"`, `"30s"` — coarse, for the watchdog message.
-fn human_elapsed(secs: u64) -> String {
-    if secs >= 2 * 86_400 {
-        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
-    } else if secs >= 3600 {
-        format!("{}h", secs / 3600)
-    } else if secs >= 60 {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{secs}s")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,15 +505,6 @@ mod tests {
 
     fn channel(name: &'static str, fail: bool) -> (String, Box<dyn Notifier>) {
         (name.to_owned(), Box::new(MockNotifier::new(name, fail)))
-    }
-
-    #[test]
-    fn human_elapsed_formats() {
-        assert_eq!(human_elapsed(30), "30s");
-        assert_eq!(human_elapsed(90), "1m");
-        assert_eq!(human_elapsed(3600), "1h");
-        assert_eq!(human_elapsed(9000), "2h");
-        assert_eq!(human_elapsed(200_000), "2d 7h");
     }
 
     #[tokio::test]
@@ -611,6 +602,55 @@ mod tests {
         // "new" has no entry yet (it gets one on first dispatch).
         d.dispatch(Event::Recovered { monitor: "x" }, None).await;
         assert!(d.health.lock().unwrap().contains_key("new"));
+    }
+
+    /// A channel whose API refuses every payload (HTTP 400/413).
+    struct RejectingNotifier;
+
+    #[async_trait]
+    impl Notifier for RejectingNotifier {
+        fn name(&self) -> &'static str {
+            "rejecting"
+        }
+
+        async fn notify(&self, _event: Event<'_>) -> anyhow::Result<()> {
+            Err(util::PayloadRejected("rejected (HTTP 400 Bad Request)".to_owned()).into())
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_payloads_do_not_trip_the_watchdog() {
+        let d = Dispatcher::new(
+            vec![
+                (
+                    "big".to_owned(),
+                    Box::new(RejectingNotifier) as Box<dyn Notifier>,
+                ),
+                channel("ok", false),
+            ],
+            2,
+        );
+        for _ in 0..3 {
+            let failed = d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+            // Still reported as a failed delivery (test-alert's exit code)...
+            assert_eq!(failed, ["big"]);
+        }
+        // ...but not as a failing channel.
+        let health = &d.health_snapshot()[0].health;
+        assert_eq!(health.consecutive_failures, 0);
+        assert!(!health.watchdog_alerted);
+
+        // Nor does it forgive a streak that real failures started.
+        d.health.lock().unwrap().insert(
+            "big".to_owned(),
+            ChannelHealth {
+                consecutive_failures: 1,
+                first_failure_at: Some(SystemTime::now()),
+                watchdog_alerted: false,
+            },
+        );
+        d.dispatch(Event::Recovered { monitor: "x" }, None).await;
+        assert_eq!(d.health_snapshot()[0].health.consecutive_failures, 1);
     }
 
     #[tokio::test]

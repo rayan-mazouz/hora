@@ -8,13 +8,16 @@
 use async_trait::async_trait;
 use reqwest::Client;
 
-use crate::util::{
-    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, event_suffix,
-    latency_suffix, send_retrying, topology_suffix, vantage_suffix,
-};
+use crate::message::Message;
+use crate::util::{Unit, send_retrying};
 use crate::{Event, Notifier};
 
 const ENDPOINT: &str = "https://smsapi.free-mobile.fr/sendmsg";
+
+/// About three concatenated SMS parts (153 GSM-7 characters each): enough
+/// for any alert, and a digest is better read elsewhere than as ten texts.
+const HEAD_MAX: usize = 120;
+const BODY_MAX: usize = 340;
 
 /// Sends alerts as an SMS to the subscriber's own number via the Free Mobile API.
 pub struct FreeMobileNotifier {
@@ -29,75 +32,14 @@ impl FreeMobileNotifier {
         Self { client, user, pass }
     }
 
-    /// Plain-text, no emoji: an SMS with any non-GSM character is billed as the
-    /// pricier UCS-2 encoding (70 chars per part instead of 160).
+    /// Plain text, no emoji: an SMS with any non-GSM character is billed as the
+    /// pricier UCS-2 encoding (70 chars per part instead of 160) - which is
+    /// also why a cut ends with `...` rather than the `…` character.
     fn render(event: Event<'_>) -> String {
-        match event {
-            Event::Down {
-                monitor,
-                error,
-                cause,
-                impacted,
-                vantage,
-                event,
-            } => {
-                format!(
-                    "DOWN: {monitor} - {}{}{}{}",
-                    error.unwrap_or("no response"),
-                    topology_suffix(cause, impacted),
-                    vantage_suffix(vantage),
-                    event_suffix(event)
-                )
-            }
-            Event::Degraded {
-                monitor,
-                latency_ms,
-            } => format!("SLOW: {monitor}{}", latency_suffix(latency_ms)),
-            Event::Recovered { monitor } => format!("UP: {monitor} recovered"),
-            Event::CertExpiring { monitor, days_left } => {
-                format!("CERT: {monitor} {}", cert_expiry_phrase(days_left))
-            }
-            Event::DomainExpiring {
-                monitor,
-                domain,
-                days_left,
-            } => format!(
-                "DOMAIN: {monitor} {}",
-                domain_expiry_phrase(domain, days_left)
-            ),
-            Event::ReleaseAvailable(release) => format!(
-                "RELEASE: {}: {}",
-                release.monitor,
-                crate::util::release_phrase(&release)
-            ),
-            Event::Digest { period, summary } => format!("DIGEST {period}: {summary}"),
-            Event::PeerLinkDegraded { peer, witness } => {
-                format!("LINK: {peer} unreachable here, seen up by {witness}")
-            }
-            Event::CertChanged {
-                monitor,
-                old_fingerprint: _,
-                new_fingerprint: _,
-            } => {
-                format!("CERT: {monitor} certificate changed unexpectedly")
-            }
-            Event::BudgetBurn {
-                monitor,
-                burn_rate_x10,
-                window,
-                exhausted_in_secs,
-            } => format!(
-                "BUDGET: {monitor} {}",
-                budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)
-            ),
-            // No emoji: keep the SMS in the cheaper GSM-7 encoding.
-            Event::Alert {
-                monitor,
-                severity,
-                title,
-                message,
-            } => alert_phrase(monitor, severity, title, message),
-        }
+        Message::render(event)
+            .fit(HEAD_MAX, BODY_MAX, Unit::Chars)
+            .plain()
+            .replace('…', "...")
     }
 }
 
@@ -118,7 +60,7 @@ impl Notifier for FreeMobileNotifier {
         ];
         send_retrying(
             || self.client.get(ENDPOINT).query(&params),
-            "freemobile",
+            self.name(),
             &[self.pass.as_str(), self.user.as_str()],
         )
         .await
@@ -139,7 +81,7 @@ mod tests {
             vantage: None,
             event: None,
         });
-        assert!(down.starts_with("DOWN: API") && down.contains("boom"));
+        assert_eq!(down, "API is DOWN\nboom");
 
         let recovered = FreeMobileNotifier::render(Event::Recovered { monitor: "API" });
         assert!(recovered.contains("recovered"));
@@ -151,5 +93,24 @@ mod tests {
         assert!(cert.contains("expires in 3 days"));
         // No emoji, to keep the SMS in the cheaper GSM-7 encoding.
         assert!(down.is_ascii() && recovered.is_ascii() && cert.is_ascii());
+    }
+
+    #[test]
+    fn keeps_fingerprints_and_caps_length() {
+        // The fingerprints used to be dropped from the SMS.
+        let changed = FreeMobileNotifier::render(Event::CertChanged {
+            monitor: "API",
+            old_fingerprint: "aa:bb",
+            new_fingerprint: "cc:dd",
+        });
+        assert!(changed.contains("old: aa:bb\nnew: cc:dd"), "{changed}");
+
+        let summary = "x".repeat(5000);
+        let digest = FreeMobileNotifier::render(Event::Digest {
+            period: "week",
+            summary: &summary,
+        });
+        assert!(digest.len() <= HEAD_MAX + BODY_MAX + 3, "{}", digest.len());
+        assert!(digest.is_ascii() && digest.ends_with("..."));
     }
 }

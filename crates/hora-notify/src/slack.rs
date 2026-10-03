@@ -4,11 +4,28 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::util::{
-    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, escape,
-    event_suffix, latency_suffix, post_json, topology_suffix, vantage_suffix,
-};
+use crate::message::{Markup, Message};
+use crate::util::{Unit, escape, post_json};
 use crate::{Event, Notifier};
+
+/// Slack mrkdwn: `& < >` escaped everywhere, `*bold*`, backtick code (a
+/// backtick inside code would close it early).
+const MRKDWN: Markup = Markup {
+    text: escape,
+    code: escape_code,
+    bold: ("*", "*"),
+    block: ("```", "```"),
+    inline: ("`", "`"),
+};
+
+fn escape_code(code: &str) -> String {
+    escape(code).replace('`', "'")
+}
+
+/// Slack cuts `text` at 40 000 characters; escaping can grow the text up to
+/// five-fold (`&` -> `&amp;`), so cap the raw text well below a fifth of it.
+const HEAD_MAX: usize = 512;
+const BODY_MAX: usize = 7000;
 
 /// Posts alerts to a Slack channel through an incoming webhook.
 pub struct SlackNotifier {
@@ -26,93 +43,9 @@ impl SlackNotifier {
     }
 
     fn render(event: Event<'_>) -> String {
-        match event {
-            Event::Down {
-                monitor,
-                error,
-                cause,
-                impacted,
-                vantage,
-                event,
-            } => format!(
-                ":red_circle: *{}* is DOWN\n```{}```{}{}{}",
-                escape(monitor),
-                escape(error.unwrap_or("no response")).replace('`', "'"),
-                topology_suffix(cause, impacted),
-                escape(&vantage_suffix(vantage)),
-                escape(&event_suffix(event)),
-            ),
-            Event::Degraded {
-                monitor,
-                latency_ms,
-            } => format!(
-                ":large_orange_circle: *{}* is slow{}",
-                escape(monitor),
-                latency_suffix(latency_ms)
-            ),
-            Event::Recovered { monitor } => {
-                format!(":large_green_circle: *{}* recovered", escape(monitor))
-            }
-            Event::CertExpiring { monitor, days_left } => format!(
-                ":lock: *{}* TLS certificate {}",
-                escape(monitor),
-                cert_expiry_phrase(days_left)
-            ),
-            Event::DomainExpiring {
-                monitor,
-                domain,
-                days_left,
-            } => format!(
-                ":globe_with_meridians: *{}* {}",
-                escape(monitor),
-                escape(&domain_expiry_phrase(domain, days_left))
-            ),
-            Event::ReleaseAvailable(release) => format!(
-                ":package: *{}*: {}\n{}",
-                escape(release.monitor),
-                escape(&crate::util::release_phrase(&release)),
-                escape(release.url)
-            ),
-            Event::Digest { period, summary } => format!(
-                ":bar_chart: *Hora digest* ({})\n{}",
-                escape(period),
-                escape(summary)
-            ),
-            Event::PeerLinkDegraded { peer, witness } => format!(
-                ":large_yellow_circle: *{}* link degraded\nunreachable from here, but seen up by {}",
-                escape(peer),
-                escape(witness),
-            ),
-            Event::CertChanged {
-                monitor,
-                old_fingerprint,
-                new_fingerprint,
-            } => format!(
-                ":warning: *{}* TLS certificate changed unexpectedly\nold: `{}`\nnew: `{}`",
-                escape(monitor),
-                old_fingerprint,
-                new_fingerprint,
-            ),
-            Event::BudgetBurn {
-                monitor,
-                burn_rate_x10,
-                window,
-                exhausted_in_secs,
-            } => format!(
-                ":fire: *{}* {}",
-                escape(monitor),
-                budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs),
-            ),
-            Event::Alert {
-                monitor,
-                severity,
-                title,
-                message,
-            } => format!(
-                ":bell: {}",
-                escape(&alert_phrase(monitor, severity, title, message))
-            ),
-        }
+        Message::render(event)
+            .fit(HEAD_MAX, BODY_MAX, Unit::Chars)
+            .text_with(&MRKDWN)
     }
 }
 
@@ -134,7 +67,7 @@ impl Notifier for SlackNotifier {
             &self.client,
             &self.webhook_url,
             &payload,
-            "slack",
+            self.name(),
             &[self.webhook_url.as_str()],
         )
         .await
@@ -155,7 +88,7 @@ mod tests {
             vantage: None,
             event: None,
         });
-        assert!(down.contains("is DOWN") && down.contains("boom"));
+        assert_eq!(down, "\u{1F534} *API* is DOWN\n```boom```");
 
         let recovered = SlackNotifier::render(Event::Recovered { monitor: "API" });
         assert!(recovered.contains("recovered"));
@@ -165,5 +98,27 @@ mod tests {
             days_left: 3,
         });
         assert!(cert.contains("expires in 3 days"));
+    }
+
+    #[test]
+    fn escapes_topology_and_fingerprints() {
+        // The topology line and the fingerprints used to go out unescaped.
+        let down = SlackNotifier::render(Event::Down {
+            monitor: "API",
+            error: Some("x"),
+            cause: Some("<!channel>"),
+            impacted: &[],
+            vantage: None,
+            event: None,
+        });
+        assert!(down.contains("caused by &lt;!channel&gt;"), "{down}");
+
+        let changed = SlackNotifier::render(Event::CertChanged {
+            monitor: "API",
+            old_fingerprint: "<a>",
+            new_fingerprint: "b`c",
+        });
+        assert!(changed.contains("old: `&lt;a&gt;`"), "{changed}");
+        assert!(changed.contains("new: `b'c`"), "{changed}");
     }
 }

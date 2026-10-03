@@ -215,7 +215,7 @@ impl Notifier for WebhookNotifier {
             &self.client,
             &self.url,
             &payload,
-            "webhook",
+            self.name(),
             &[self.url.as_str()],
         )
         .await

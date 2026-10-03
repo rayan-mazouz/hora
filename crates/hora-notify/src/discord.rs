@@ -4,10 +4,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, event_suffix, latency_suffix,
-    post_json, topology_suffix, vantage_suffix,
-};
+use crate::message::{Kind, Markup, Message};
+use crate::util::{Unit, post_json};
 use crate::{AlertSeverity, Event, Notifier};
 
 // Embed accent colours, matching the status badges: red / green / orange.
@@ -17,23 +15,29 @@ const COLOR_CERT: u32 = 0x00FE_7D37;
 const COLOR_DEGRADED: u32 = 0x00DF_B317;
 const COLOR_INFO: u32 = 0x0035_82F6;
 
+/// Discord markdown for the embed description. Text is passed as is (an embed
+/// never pings); a backtick inside code would close the fence early.
+const MARKDOWN: Markup = Markup {
+    text: str::to_owned,
+    code: neutralise_backticks,
+    bold: ("", ""),
+    block: ("```", "```"),
+    inline: ("`", "`"),
+};
+
+fn neutralise_backticks(code: &str) -> String {
+    code.replace('`', "'")
+}
+
+/// Embed limits: title 256 characters, description 4096. The margins cover
+/// the icon in the title and the fences in the description.
+const TITLE_MAX: usize = 250;
+const DESCRIPTION_MAX: usize = 4000;
+
 /// Posts alerts to a Discord channel through an incoming webhook.
 pub struct DiscordNotifier {
     client: Client,
     webhook_url: String,
-}
-
-/// A release event's embed: what is out and what runs, the notes one click away.
-fn release_embed(release: &crate::Release<'_>) -> Embed {
-    Embed {
-        title: format!(
-            "\u{1F4E6} {}: {}",
-            release.monitor,
-            crate::util::release_phrase(release)
-        ),
-        description: Some(release.url.to_owned()),
-        color: COLOR_CERT,
-    }
 }
 
 impl DiscordNotifier {
@@ -46,115 +50,27 @@ impl DiscordNotifier {
     }
 
     fn embed(event: Event<'_>) -> Embed {
-        match event {
-            Event::Down {
-                monitor,
-                error,
-                cause,
-                impacted,
-                vantage,
-                event,
-            } => Embed {
-                description: Some(format!(
-                    "```{}```{}{}{}",
-                    error.unwrap_or("no response").replace('`', "'"),
-                    topology_suffix(cause, impacted),
-                    vantage_suffix(vantage),
-                    event_suffix(event)
-                )),
-                title: format!("\u{1F534} {monitor} is DOWN"),
-                color: COLOR_DOWN,
-            },
-            Event::Degraded {
-                monitor,
-                latency_ms,
-            } => Embed {
-                title: format!("\u{1F7E0} {monitor} is slow{}", latency_suffix(latency_ms)),
-                description: None,
-                color: COLOR_DEGRADED,
-            },
-            Event::Recovered { monitor } => Embed {
-                title: format!("\u{1F7E2} {monitor} recovered"),
-                description: None,
-                color: COLOR_UP,
-            },
-            Event::CertExpiring { monitor, days_left } => Embed {
-                title: format!(
-                    "\u{1F510} {monitor} TLS certificate {}",
-                    cert_expiry_phrase(days_left)
-                ),
-                description: None,
-                color: COLOR_CERT,
-            },
-            Event::DomainExpiring {
-                monitor,
-                domain,
-                days_left,
-            } => Embed {
-                title: format!(
-                    "\u{1F310} {monitor} {}",
-                    domain_expiry_phrase(domain, days_left)
-                ),
-                description: None,
-                color: COLOR_CERT,
-            },
-            Event::ReleaseAvailable(release) => release_embed(&release),
-            Event::Digest { period, summary } => Embed {
-                title: format!("\u{1F4CA} Hora digest ({period})"),
-                description: Some(summary.to_owned()),
-                color: COLOR_UP,
-            },
-            Event::PeerLinkDegraded { peer, witness } => Embed {
-                title: format!("\u{1F7E1} {peer} link degraded"),
-                description: Some(format!(
-                    "Unreachable from here, but still seen up by {witness} (likely a network partition)."
-                )),
-                color: COLOR_DEGRADED,
-            },
-            Event::CertChanged {
-                monitor,
-                old_fingerprint,
-                new_fingerprint,
-            } => Embed {
-                title: format!("\u{26A0}\u{FE0F} {monitor} TLS certificate changed"),
-                description: Some(format!(
-                    "old: `{old_fingerprint}`\nnew: `{new_fingerprint}`"
-                )),
-                color: COLOR_CERT,
-            },
-            Event::BudgetBurn {
-                monitor,
-                burn_rate_x10,
-                window,
-                exhausted_in_secs,
-            } => Embed {
-                title: format!("\u{1F525} {monitor} error budget burn"),
-                description: Some(budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)),
-                color: COLOR_DEGRADED,
-            },
-            Event::Alert {
-                monitor,
-                severity,
-                title,
-                message,
-            } => Self::alert_embed(monitor, severity, title, message),
+        let message = Message::render(event).fit(TITLE_MAX, DESCRIPTION_MAX, Unit::Chars);
+        let description = message.body_with(&MARKDOWN);
+        Embed {
+            // Titles take no markdown: plain headline behind the icon.
+            title: format!("{} {}", message.kind.icon(), message.headline()),
+            description: (!description.is_empty()).then_some(description),
+            color: color(message.kind),
         }
     }
+}
 
-    /// The embed for a pushed alert: a bell-prefixed title and a severity colour.
-    fn alert_embed(monitor: &str, severity: AlertSeverity, title: &str, message: &str) -> Embed {
-        Embed {
-            title: format!(
-                "\u{1F514} [{}] {monitor}: {title}",
-                severity.as_str().to_ascii_uppercase()
-            ),
-            description: (!message.is_empty()).then(|| message.to_owned()),
-            color: match severity {
-                AlertSeverity::Info => COLOR_INFO,
-                AlertSeverity::Warning => COLOR_DEGRADED,
-                AlertSeverity::Error | AlertSeverity::Critical => COLOR_DOWN,
-            },
-        }
+fn color(kind: Kind) -> u32 {
+    match kind {
+        Kind::Down | Kind::Alert(AlertSeverity::Error | AlertSeverity::Critical) => COLOR_DOWN,
+        Kind::Recovered | Kind::Digest => COLOR_UP,
+        Kind::CertExpiring | Kind::DomainExpiring | Kind::Release | Kind::CertChanged => COLOR_CERT,
+        Kind::Degraded
+        | Kind::PeerLinkDegraded
+        | Kind::BudgetBurn
+        | Kind::Alert(AlertSeverity::Warning) => COLOR_DEGRADED,
+        Kind::Alert(AlertSeverity::Info) => COLOR_INFO,
     }
 }
 
@@ -197,7 +113,7 @@ impl Notifier for DiscordNotifier {
             &self.client,
             &self.webhook_url,
             &payload,
-            "discord",
+            self.name(),
             &[self.webhook_url.as_str()],
         )
         .await
@@ -213,13 +129,16 @@ mod tests {
         let down = DiscordNotifier::embed(Event::Down {
             monitor: "API",
             error: Some("boom"),
-            cause: None,
+            cause: Some("DB"),
             impacted: &[],
             vantage: None,
             event: None,
         });
-        assert!(down.title.contains("is DOWN"));
-        assert!(down.description.expect("down has a body").contains("boom"));
+        assert_eq!(down.title, "\u{1F534} API is DOWN");
+        assert_eq!(
+            down.description.as_deref(),
+            Some("```boom```\ncaused by DB")
+        );
         assert_eq!(down.color, COLOR_DOWN);
 
         let recovered = DiscordNotifier::embed(Event::Recovered { monitor: "API" });
@@ -240,6 +159,16 @@ mod tests {
         });
         assert!(degraded.title.contains("slow") && degraded.title.contains("1234ms"));
         assert_eq!(degraded.color, COLOR_DEGRADED);
+
+        let alert = DiscordNotifier::embed(Event::Alert {
+            monitor: "API",
+            severity: AlertSeverity::Info,
+            title: "deploy",
+            message: "v2",
+        });
+        assert_eq!(alert.title, "\u{1F514} [INFO] API: deploy");
+        assert_eq!(alert.description.as_deref(), Some("v2"));
+        assert_eq!(alert.color, COLOR_INFO);
     }
 
     #[test]
@@ -257,5 +186,27 @@ mod tests {
             body.contains("''' injection"),
             "backticks not stripped: {body}"
         );
+    }
+
+    #[test]
+    fn long_alerts_fit_the_embed_limits() {
+        let name = "n".repeat(100);
+        let title = "t".repeat(200);
+        let summary = "s".repeat(10_000);
+        let alert = DiscordNotifier::embed(Event::Alert {
+            monitor: &name,
+            severity: AlertSeverity::Critical,
+            title: &title,
+            message: &summary,
+        });
+        assert!(alert.title.chars().count() <= 256);
+        let description = alert.description.expect("has a body");
+        assert!(description.chars().count() <= 4096);
+
+        let digest = DiscordNotifier::embed(Event::Digest {
+            period: "week",
+            summary: &summary,
+        });
+        assert!(digest.description.expect("has a body").chars().count() <= 4096);
     }
 }

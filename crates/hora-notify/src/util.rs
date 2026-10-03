@@ -4,26 +4,6 @@ use reqwest::{Client, RequestBuilder};
 use serde::Serialize;
 use tracing::warn;
 
-use crate::AlertSeverity;
-
-/// The text of a pushed-alert notification, shared so every channel words it
-/// identically: `"[ERROR] Monitor: title"`, then the message on its own line
-/// when the producer sent one. The per-channel emoji/markup wraps around this.
-pub(crate) fn alert_phrase(
-    monitor: &str,
-    severity: AlertSeverity,
-    title: &str,
-    message: &str,
-) -> String {
-    let label = severity.as_str().to_ascii_uppercase();
-    let head = format!("[{label}] {monitor}: {title}");
-    if message.is_empty() {
-        head
-    } else {
-        format!("{head}\n{message}")
-    }
-}
-
 /// Escape the characters special to HTML / Slack mrkdwn (`& < >`).
 pub(crate) fn escape(input: &str) -> String {
     input
@@ -32,62 +12,9 @@ pub(crate) fn escape(input: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// `" (1234ms)"` for a known latency, empty otherwise - appended to a degraded
-/// alert so the message says *how* slow the monitor got.
-pub(crate) fn latency_suffix(latency_ms: Option<i64>) -> String {
-    latency_ms.map_or_else(String::new, |ms| format!(" ({ms}ms)"))
-}
-
-/// Topology annotation for a down alert: `"caused by X"` when the monitor is a
-/// symptom, `"impacts N: a, b, c"` when it is a root cause, empty otherwise.
-pub(crate) fn topology_suffix(cause: Option<&str>, impacted: &[&str]) -> String {
-    if let Some(cause) = cause {
-        return format!("\ncaused by {cause}");
-    }
-    if impacted.is_empty() {
-        return String::new();
-    }
-    format!("\nimpacts {}: {}", impacted.len(), impacted.join(", "))
-}
-
-/// Multi-vantage annotation for a down alert (`"\n<verdict>"`), empty when no
-/// peers were asked - so every channel words the vantage line the same way.
-pub(crate) fn vantage_suffix(vantage: Option<&str>) -> String {
-    vantage.map_or_else(String::new, |verdict| format!("\n{verdict}"))
-}
-
-/// Event-correlation annotation for a down alert
-/// (`"\nrecent change: deploy api v2.3, 3m before"`), empty when no event was
-/// recorded shortly before the down - one wording for every channel.
-pub(crate) fn event_suffix(event: Option<&str>) -> String {
-    event.map_or_else(String::new, |event| format!("\nrecent change: {event}"))
-}
-
-/// Human phrasing for a budget-burn event, shared so every channel words the
-/// rate and the exhaustion estimate the same way:
-/// `"burning error budget at 14.4x (1h) - exhausted in ~23h at this rate"`.
-pub(crate) fn budget_burn_phrase(
-    burn_rate_x10: i64,
-    window: &str,
-    exhausted_in_secs: Option<i64>,
-) -> String {
-    let rate = if burn_rate_x10 % 10 == 0 {
-        format!("{}x", burn_rate_x10 / 10)
-    } else {
-        format!("{}.{}x", burn_rate_x10 / 10, burn_rate_x10 % 10)
-    };
-    let eta = exhausted_in_secs.map_or_else(String::new, |secs| {
-        if secs == 0 {
-            " - budget already exhausted".to_owned()
-        } else {
-            format!(" - exhausted in ~{} at this rate", human_duration(secs))
-        }
-    });
-    format!("burning error budget at {rate} ({window}){eta}")
-}
-
-/// `"2d 3h"`, `"6h"`, `"45m"`, `"30s"` - coarse on purpose, it's an estimate.
-fn human_duration(secs: i64) -> String {
+/// `"2d 3h"`, `"6h"`, `"45m"`, `"30s"` - coarse on purpose: it phrases a burn
+/// estimate and how long a channel has been failing, not a measurement.
+pub(crate) fn human_duration(secs: u64) -> String {
     if secs >= 2 * 86_400 {
         format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
     } else if secs >= 3600 {
@@ -99,31 +26,75 @@ fn human_duration(secs: i64) -> String {
     }
 }
 
-/// Human phrasing for a certificate-expiry event.
-pub(crate) fn cert_expiry_phrase(days_left: i64) -> String {
-    if days_left <= 0 {
-        "has expired".to_owned()
-    } else if days_left == 1 {
-        "expires in 1 day".to_owned()
-    } else {
-        format!("expires in {days_left} days")
+/// What a channel's length limit counts: characters (most APIs) or UTF-8
+/// bytes (ntfy, which turns a longer body into an attachment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unit {
+    Chars,
+    Bytes,
+}
+
+/// The length of `text` in `unit`.
+pub(crate) fn measure(text: &str, unit: Unit) -> usize {
+    match unit {
+        Unit::Chars => text.chars().count(),
+        Unit::Bytes => text.len(),
     }
 }
 
-/// Human phrasing for a domain-expiry event, shared so every channel words it
-/// the same way: `"domain example.com expires in 14 days"`.
-pub(crate) fn domain_expiry_phrase(domain: &str, days_left: i64) -> String {
-    format!("domain {domain} {}", cert_expiry_phrase(days_left))
+const ELLIPSIS: char = '…';
+
+/// `text` cut to at most `max` (in `unit`) on a char boundary, ending with an
+/// ellipsis when anything was cut so the reader knows there was more. Never
+/// splits a multi-byte character; a budget too small for the ellipsis itself
+/// yields a bare cut (or nothing at all for `max == 0`).
+pub(crate) fn truncate(text: &str, max: usize, unit: Unit) -> String {
+    if measure(text, unit) <= max {
+        return text.to_owned();
+    }
+    let ellipsis = match unit {
+        Unit::Chars => 1,
+        Unit::Bytes => ELLIPSIS.len_utf8(),
+    };
+    let (room, mark) = if max >= ellipsis {
+        (max - ellipsis, true)
+    } else {
+        (max, false)
+    };
+    let mut used = 0;
+    let mut out = String::with_capacity(room.min(text.len()) + 3);
+    for ch in text.chars() {
+        let cost = match unit {
+            Unit::Chars => 1,
+            Unit::Bytes => ch.len_utf8(),
+        };
+        if used + cost > room {
+            break;
+        }
+        used += cost;
+        out.push(ch);
+    }
+    if mark {
+        out.push(ELLIPSIS);
+    }
+    out
 }
 
-/// Human phrasing for a release event, shared so every channel words it the
-/// same way: `"owner/repo v1.9.2 is out (running v1.9.1)"`.
-pub(crate) fn release_phrase(release: &crate::Release<'_>) -> String {
-    format!(
-        "{} {} is out (running {})",
-        release.project, release.latest, release.current
-    )
+/// Marker error for a notification the API refused as malformed or too large
+/// (HTTP 400 / 413). The channel itself answered, so the dispatcher does not
+/// count it toward the channel's failure streak - one oversized alert must not
+/// make the watchdog report a healthy channel as broken. Still logged and
+/// returned as a delivery failure.
+#[derive(Debug)]
+pub(crate) struct PayloadRejected(pub String);
+
+impl std::fmt::Display for PayloadRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
+
+impl std::error::Error for PayloadRejected {}
 
 /// Delivery attempts: the initial send plus two retries. The caller marks the
 /// alert as sent regardless of the outcome, so a transient blip here would
@@ -165,7 +136,11 @@ where
                 let body = response.text().await.unwrap_or_default();
                 let detail = redact(&snippet(&body), secrets);
                 warn!("{channel} rejected the notification (HTTP {status}): {detail}");
-                anyhow::bail!("rejected (HTTP {status}): {detail}");
+                let message = format!("rejected (HTTP {status}): {detail}");
+                if payload_rejected(status) {
+                    return Err(PayloadRejected(message).into());
+                }
+                anyhow::bail!(message);
             }
             Err(err) => {
                 if attempt < MAX_ATTEMPTS {
@@ -179,6 +154,13 @@ where
         }
     }
     unreachable!("every iteration either returns, bails or continues within MAX_ATTEMPTS")
+}
+
+/// Whether `status` means "this request's content was refused" (see
+/// [`PayloadRejected`]) rather than "the channel is broken" (401/403/404:
+/// revoked token, deleted webhook - those must trip the watchdog).
+fn payload_rejected(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::PAYLOAD_TOO_LARGE
 }
 
 /// POST `payload` as JSON, retrying transient failures (see [`send_retrying`]).
@@ -269,24 +251,45 @@ mod tests {
     }
 
     #[test]
-    fn alert_phrasing() {
-        assert_eq!(
-            alert_phrase("API", AlertSeverity::Error, "boom", "stack trace"),
-            "[ERROR] API: boom\nstack trace"
-        );
-        // No message: just the head line, no trailing newline.
-        assert_eq!(
-            alert_phrase("API", AlertSeverity::Info, "deploy started", ""),
-            "[INFO] API: deploy started"
-        );
+    fn human_duration_formats() {
+        assert_eq!(human_duration(30), "30s");
+        assert_eq!(human_duration(90), "1m");
+        assert_eq!(human_duration(3600), "1h");
+        assert_eq!(human_duration(9000), "2h");
+        assert_eq!(human_duration(200_000), "2d 7h");
     }
 
     #[test]
-    fn cert_phrasing() {
-        assert_eq!(cert_expiry_phrase(-1), "has expired");
-        assert_eq!(cert_expiry_phrase(0), "has expired");
-        assert_eq!(cert_expiry_phrase(1), "expires in 1 day");
-        assert_eq!(cert_expiry_phrase(3), "expires in 3 days");
+    fn truncate_counts_chars_and_marks_the_cut() {
+        assert_eq!(truncate("hello", 5, Unit::Chars), "hello");
+        assert_eq!(truncate("hello", 4, Unit::Chars), "hel…");
+        // Multi-byte characters count once and are never split.
+        assert_eq!(truncate("héllo wörld", 4, Unit::Chars), "hél…");
+        assert_eq!(truncate("hello", 1, Unit::Chars), "…");
+        assert_eq!(truncate("hello", 0, Unit::Chars), "");
+    }
+
+    #[test]
+    fn truncate_by_bytes_stays_on_a_char_boundary() {
+        // "€" is 3 bytes; the ellipsis is 3 bytes too.
+        let cut = truncate("€€€€", 8, Unit::Bytes);
+        assert_eq!(cut, "€…");
+        assert!(cut.len() <= 8);
+        let cut = truncate("€€€€", 7, Unit::Bytes);
+        assert_eq!(cut, "€…");
+        // Too small for the ellipsis: a bare cut, still on a boundary.
+        assert_eq!(truncate("ab€", 2, Unit::Bytes), "ab");
+        assert_eq!(truncate("€€", 2, Unit::Bytes), "");
+    }
+
+    #[test]
+    fn payload_statuses_are_classified() {
+        assert!(payload_rejected(reqwest::StatusCode::BAD_REQUEST));
+        assert!(payload_rejected(reqwest::StatusCode::PAYLOAD_TOO_LARGE));
+        // A revoked token or deleted webhook is a broken channel, not a bad payload.
+        assert!(!payload_rejected(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(!payload_rejected(reqwest::StatusCode::FORBIDDEN));
+        assert!(!payload_rejected(reqwest::StatusCode::NOT_FOUND));
     }
 
     #[test]

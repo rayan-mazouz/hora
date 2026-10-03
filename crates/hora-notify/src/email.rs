@@ -6,10 +6,18 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials;
-use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+use lettre::{AsyncSmtpTransport, AsyncTransport, Message as Mail, Tokio1Executor};
 use tracing::warn;
 
-use crate::{AlertSeverity, Event, Notifier};
+use crate::message::Message;
+use crate::util::Unit;
+use crate::{Event, Notifier};
+
+/// Header lines over 998 characters break RFC 5322; lettre folds, but a
+/// subject this long is unreadable anyway.
+const SUBJECT_MAX: usize = 200;
+/// No relay rejects this, and a digest that long is no longer read.
+const BODY_MAX: usize = 60_000;
 
 /// Sends alerts as plain-text e-mails through an SMTP relay.
 pub struct EmailNotifier {
@@ -27,18 +35,6 @@ pub struct EmailConfig {
     pub from: String,
     pub to: String,
     pub implicit_tls: bool,
-}
-
-/// A release event's subject and body.
-fn release_mail(release: &crate::Release<'_>) -> (String, String) {
-    let what = crate::util::release_phrase(release);
-    (
-        format!("[RELEASE] {}: {what}", release.monitor),
-        format!(
-            "{what} (monitor {}).\n\nRelease notes: {}",
-            release.monitor, release.url
-        ),
-    )
 }
 
 impl EmailNotifier {
@@ -83,120 +79,18 @@ impl EmailNotifier {
         })
     }
 
+    /// Subject `[DOWN] API is DOWN` (a pushed alert: `[ERROR] API: title`);
+    /// body: the headline, a blank line, then the detail.
     fn render(event: Event<'_>) -> (String, String) {
-        match event {
-            Event::Down {
-                monitor,
-                error,
-                cause,
-                impacted,
-                vantage,
-                event,
-            } => {
-                let suffix = crate::util::topology_suffix(cause, impacted);
-                let vantage = crate::util::vantage_suffix(vantage);
-                let event = crate::util::event_suffix(event);
-                (
-                    format!("[DOWN] {monitor}"),
-                    format!(
-                        "{monitor} is DOWN\n\n{}{suffix}{vantage}{event}",
-                        error.unwrap_or("no response")
-                    ),
-                )
-            }
-            Event::Degraded {
-                monitor,
-                latency_ms,
-            } => (
-                format!("[SLOW] {monitor}"),
-                format!(
-                    "{monitor} is up but responding slowly{}.",
-                    crate::util::latency_suffix(latency_ms)
-                ),
-            ),
-            Event::Recovered { monitor } => (
-                format!("[OK] {monitor} recovered"),
-                format!("{monitor} recovered."),
-            ),
-            Event::CertExpiring { monitor, days_left } => {
-                let when = crate::util::cert_expiry_phrase(days_left);
-                (
-                    format!("[TLS] {monitor} certificate {when}"),
-                    format!("The TLS certificate for {monitor} {when}."),
-                )
-            }
-            Event::DomainExpiring {
-                monitor,
-                domain,
-                days_left,
-            } => {
-                let when = crate::util::domain_expiry_phrase(domain, days_left);
-                (
-                    format!("[DOMAIN] {monitor} {when}"),
-                    format!("The registered {when} (monitor {monitor}, via RDAP)."),
-                )
-            }
-            Event::ReleaseAvailable(release) => release_mail(&release),
-            Event::Digest { period, summary } => (
-                format!("[DIGEST] Hora digest ({period})"),
-                summary.to_owned(),
-            ),
-            Event::PeerLinkDegraded { peer, witness } => (
-                format!("[LINK] {peer} link degraded"),
-                format!(
-                    "{peer} is unreachable from here, but still seen up by {witness} \
-                     (likely a network partition rather than an outage)."
-                ),
-            ),
-            Event::CertChanged {
-                monitor,
-                old_fingerprint,
-                new_fingerprint,
-            } => (
-                format!("[TLS] {monitor} certificate changed unexpectedly"),
-                format!(
-                    "The TLS certificate for {monitor} has changed unexpectedly.\n\
-                     Old fingerprint: {old_fingerprint}\n\
-                     New fingerprint: {new_fingerprint}\n\n\
-                     This may indicate a MITM attack or an unexpected certificate renewal."
-                ),
-            ),
-            Event::BudgetBurn {
-                monitor,
-                burn_rate_x10,
-                window,
-                exhausted_in_secs,
-            } => (
-                format!("[BUDGET] {monitor} error budget burn"),
-                format!(
-                    "{monitor} is {}.",
-                    crate::util::budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)
-                ),
-            ),
-            Event::Alert {
-                monitor,
-                severity,
-                title,
-                message,
-            } => Self::alert_mail(monitor, severity, title, message),
-        }
-    }
-
-    /// Subject and body for a pushed alert: `[ERROR] Monitor: title`, with the
-    /// detail (if any) as the body.
-    fn alert_mail(
-        monitor: &str,
-        severity: AlertSeverity,
-        title: &str,
-        message: &str,
-    ) -> (String, String) {
-        let label = severity.as_str().to_ascii_uppercase();
-        let body = if message.is_empty() {
-            format!("{monitor}: {title}")
+        let message = Message::render(event).fit(SUBJECT_MAX, BODY_MAX, Unit::Chars);
+        let headline = message.headline();
+        let detail = message.plain_body();
+        let body = if detail.is_empty() {
+            headline
         } else {
-            format!("{monitor}: {title}\n\n{message}")
+            format!("{headline}\n\n{detail}")
         };
-        (format!("[{label}] {monitor}: {title}"), body)
+        (message.tagged_headline(), body)
     }
 }
 
@@ -208,7 +102,7 @@ impl Notifier for EmailNotifier {
 
     async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
         let (subject, body) = Self::render(event);
-        let message = match Message::builder()
+        let message = match Mail::builder()
             .from(self.from.clone())
             .to(self.to.clone())
             .subject(subject)
@@ -216,13 +110,13 @@ impl Notifier for EmailNotifier {
         {
             Ok(message) => message,
             Err(err) => {
-                warn!("email message build failed: {err}");
+                warn!("{} message build failed: {err}", self.name());
                 anyhow::bail!("message build failed: {err}");
             }
         };
         // The error carries the SMTP host/response, never the password.
         if let Err(err) = self.transport.send(message).await {
-            warn!("email send failed: {err}");
+            warn!("{} send failed: {err}", self.name());
             anyhow::bail!("send failed: {err}");
         }
         Ok(())
@@ -251,6 +145,15 @@ mod tests {
             days_left: 3,
         });
         assert!(subject.contains("expires in 3 days"));
+
+        let (subject, body) = EmailNotifier::render(Event::Alert {
+            monitor: "API",
+            severity: crate::AlertSeverity::Error,
+            title: "boom",
+            message: "stack trace",
+        });
+        assert_eq!(subject, "[ERROR] API: boom");
+        assert_eq!(body, "[ERROR] API: boom\n\nstack trace");
     }
 
     #[test]
