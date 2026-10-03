@@ -17,12 +17,15 @@ bind = "127.0.0.1:8787"
 database_path = "hora.db"
 # Browser origins allowed to call the JSON API (CORS). Empty = allow any (read-only, public data).
 allowed_origins = []
-# Trust this header for the client IP when rate limiting (e.g. behind Cloudflare).
-# Only safe if a proxy you control sets it and direct origin access is blocked.
-# Unset = smart detection (x-forwarded-for / x-real-ip / peer).
-# client_ip_header = "cf-connecting-ip"
-# Per-IP API rate limit (applied to /api/* only). One request slot is replenished
-# every `rate_limit_refill_secs` seconds, up to a burst of `rate_limit_burst`.
+# Trust this header for the client IP when rate limiting. Set it behind a reverse
+# proxy, or every visitor shares the proxy's address (and its rate-limit bucket).
+# Only safe if your proxy overwrites it and direct origin access is blocked.
+# Unset = the TCP peer address (forwarded headers are never trusted by default).
+# client_ip_header = "x-real-ip"          # nginx: proxy_set_header X-Real-IP $remote_addr;
+# client_ip_header = "cf-connecting-ip"   # behind Cloudflare
+# Per-IP rate limit. One request slot is replenished every
+# `rate_limit_refill_secs` seconds, up to a burst of `rate_limit_burst`, on /api/*;
+# pages, badges, reports and /metrics get four times both. Read once at startup.
 rate_limit_refill_secs = 1
 rate_limit_burst = 30
 # Token required to view private monitors (those with `public = false`), sent

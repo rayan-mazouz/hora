@@ -5,6 +5,173 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+A hardening release: the findings of a full audit of the codebase, fixed.
+Alerting gets its edge cases right (no lost recovery, no duplicate down),
+secrets stay on their origin, and the web layer gets one visibility rule
+instead of five. See [UPGRADES.md](UPGRADES.md#0100--0110) for what to check
+before upgrading.
+
+### Added
+
+- **`/api/announce` takes `until` as a time of day** (`18:00`, UTC, the next
+  occurrence) as well as a duration (`4h`), like `hora announce`; the hint
+  in `hora top` is now true.
+- **Silence a watched peer**: `POST /api/silence` and `hora silence` accept a
+  peer's `listen_id`, and ad-hoc silences now mute peer-watch alerts too.
+- **Degraded alerts say why**: a push with `status=degraded&msg=...` or an
+  exec plugin's WARNING output is carried into the alert (and into the
+  webhook's `message` field, now set on `degraded` events).
+- **`hora_monitor_status{id,name,status}`** Prometheus gauge, set for every
+  monitor including the ones whose status is still unknown.
+- `Permissions-Policy` and `Cross-Origin-Opener-Policy` response headers.
+- `hora event -- <title>` and `hora announce -- <title>` record a title that
+  starts with a subcommand word (`hora announce clear skies` used to clear
+  every banner).
+- `just deps`: a report-only freshness check across crates, docs packages,
+  pinned Actions and base images.
+
+### Changed
+
+- **Push heartbeats drive alerting with their own verdict.** A push with
+  `status=down` makes the monitor down on the next tick (confirmed after
+  `fail_threshold`), with the job's `msg` as the reason; `status=degraded`
+  counts as degraded, so `alert_on_degraded` works for push monitors. It
+  used to be read as a heartbeat like any other, so the alert came one
+  interval late, as a missed heartbeat, without the message.
+- **A push monitor or watched peer that never sent a heartbeat alerts**
+  ("no heartbeat received yet") once its interval (or its first scheduled
+  run plus grace) has passed since Hora first watched it - across restarts.
+  It used to stay grey forever.
+- **Alert state survives edits and restarts.** Editing a monitor or peer no
+  longer re-sends a down for an ongoing outage, nor loses its recovery; a
+  daemon restart mid-outage does not announce the down again (it is seeded
+  from the open incident) and still sends the recovery. Monitor tasks that
+  die are restarted and logged.
+- **Notifications are worded once for every channel.** The ten channels
+  render from one neutral message and only add their own markup and
+  priority, so wording no longer drifts between them. Visible changes: ntfy,
+  Gotify and Pushover bodies read `API is DOWN` / `API is slow (812ms)` /
+  `API recovered` instead of `DOWN: API` / `DEGRADED:` / `RECOVERED:`; Free
+  Mobile SMS use the same text (no emoji), now with fingerprints; email
+  subjects are `[TAG] <headline>` (`[DOWN] API is DOWN`); Slack uses Unicode
+  emoji; a certificate change carries the MITM / renewal hint everywhere.
+- **Oversized notifications are cut to each API's limits** (Discord 256/4096,
+  Telegram 4096, Pushover 1024, ntfy 4 KB...) with an ellipsis, instead of
+  being refused with a 400 that then counted against the channel. A 413 no
+  longer counts toward the failing-channel watchdog.
+- **Removed monitors keep their history for 7 days.** Taking an id out of
+  the config (a rename, a monitor commented out for an afternoon) used to
+  delete its checks, aggregates and incidents at the next 6-hourly prune. A
+  warning now names the ids and the deletion date; restoring the id within
+  the week keeps everything.
+- **One duration format everywhere** (`2h 5m`, `3m 10s`): the monthly report
+  used to print `2h 05m` and incident phrases `1h13m`.
+- **Page rate limit.** Every non-static route (pages, history, timeline,
+  feed, reports, badges, heatmaps, `/metrics`, `/healthz`) is now limited per
+  client IP, at four times the API burst and refill. `/report/{month}` and
+  the heatmap SVG are cached for 60 seconds, and reports older than the
+  12-month aggregate retention answer 400.
+- **`/healthz` answers 503 when the node is degraded** (stalled scheduler,
+  broken database), body unchanged - so the image's `HEALTHCHECK`, and any
+  orchestrator probing it, now sees an unhealthy node.
+- **Prometheus**: `hora_monitor_up` / `hora_monitor_degraded` are omitted
+  while a monitor's status is unknown (they read as down after every
+  deploy); `hora_monitor_latency_ms` is typed `gauge`.
+- **Atom feed** content is escaped HTML as RFC 4287 requires, entry ids point
+  at `/incident/{id}` (they said `/incidents/`), each entry links to its
+  post-mortem, and the feed is titled after `page.title`.
+- **`POST /api/push/{id}`** answers 400 on an unknown `status` (`dwon` was
+  recorded as up) or a negative `ping`. Two pushes in the same second: the
+  last one wins, and a push replaces a recorded miss of the same second.
+- **Config bounds**: `interval_secs`, `timeout_secs`, `expect_every_secs`
+  and `health.interval_secs` are capped at 30 days, `expected_status` must be
+  100-599, an IPv6 tcp target must be bracketed (`[::1]:80`) and
+  `dns_resolver` must be an IP and port. A warning flags `timeout_secs`
+  above `interval_secs`.
+- `hora top` never blocks on the network: requests run in the background,
+  `q` and Ctrl-C always answer, and the header colour follows the API's
+  `overall` state.
+- Multi-vantage confirmation is never attempted for exec monitors; a peer
+  asked to probe an exec or push monitor answers 400.
+- Cert checks run eight at a time under a 5-minute deadline and stop on
+  shutdown; monitor stagger phases shift once (a stable hash replaces
+  `DefaultHasher`).
+- Image: the build context is an allowlist, the cargo registry and target
+  directory are BuildKit cache mounts, and the published image carries
+  build provenance and an SBOM. CI Actions are pinned to commit SHAs.
+- Dependencies: utoipa 6, nix 0.31 (process-group kill), docs on Astro 7.3
+  and Starlight 0.42.
+
+### Deprecated
+
+- **`?token=` on write endpoints** (push, alert, announce, silence, event).
+  It still works, but the response carries `Deprecation: true` and a `Link`
+  to the [authentication docs](https://uplg.github.io/hora/reference/api/#authentication),
+  and Hora logs one warning per endpoint. Send `Authorization: Bearer` (or
+  `X-Push-Token` for push and alert) instead. Read-only views keep
+  `?token=`.
+
+### Fixed
+
+- **Group pages leaked operator data**: a group token saw every group's
+  deploy markers in the sparklines and the names of other groups' private
+  monitors in "caused by" / "impacts". A group audience now names only
+  public monitors and its own.
+- **Monthly report and digest under-counted older months**: they looked at
+  the 1000 (500) most recent incidents only; they now query the incidents
+  that overlap the period, and the report stops at the month's end.
+- **Exec monitors were "confirmed down from N/N vantage points"** when
+  `[health].confirm_with_peers` was on: peers answered "not a network probe"
+  as down.
+- **Certificate pin mismatch accepted for good** when first seen during
+  maintenance, or when the alert failed to deliver. It now alerts after the
+  window and retries every check, and changing `cert_pin` to another value
+  that still does not match alerts again.
+- **`expected_status = 301`** (or any 3xx) could never pass: redirects were
+  always followed.
+- **`dns_resolver = "[2620:fe::fe]:53"`** passed validation but failed every
+  probe; a hostname resolver now fails validation instead of every probe.
+- **Exec timeouts left grandchildren running**: the plugin now runs in its
+  own process group, killed as a whole; a plugin that exits while a
+  background child holds stdout reports its real result, not "timed out".
+- A cron push heartbeat that arrived slightly before its run counted as
+  missed.
+- A body cut mid-read was reported as a failed assertion ("keyword missing")
+  instead of an invalid response body.
+- Sparkline buckets jittered on every refresh.
+- Cert checks did not work for HTTP monitors on an IPv6 literal.
+- RDAP and release lookups: relative redirects work, an https-to-http hop is
+  refused, and answers are capped at 1 MiB.
+- The alert endpoint told unknown ids (404) from private ones (401).
+- History and timeline pages showed fewer entries than they should when
+  private monitors filled the limit.
+- The plain-text page's columns were not aligned, and `/status/{group}` now
+  serves it to curl too. The empty sparkline text is no longer stretched.
+- `hora import kuma`: valid TOML for any name, unique ids, bracketed IPv6.
+- The CLI no longer exits from deep inside a command, so the database pool
+  closes cleanly; the silence reason is capped at 500 characters like the API.
+
+### Security
+
+- **Secrets stay on their origin.** Notifier, webhook and mesh requests
+  follow a redirect only within the same origin (or an http-to-https upgrade
+  on the same host): reqwest strips `Authorization` across hosts but not
+  `X-Push-Token`, the Gotify key, or a Pushover body re-sent on 307/308.
+  A webhook URL that redirects to another host now fails delivery.
+- **Failure snapshots redact credential headers** (`Set-Cookie`,
+  `Authorization`, `WWW-Authenticate`, API-key headers...) before they reach
+  incidents, `/history` and post-mortems.
+- Monitor and release-watch `Debug` output masks URL query values;
+  `peers.witness_url` is a secret.
+- `hora backup` creates the file `0600` atomically instead of tightening it
+  after the copy.
+- A malformed inbound `x-request-id` is replaced instead of echoed; CSP
+  `img-src` no longer allows `data:`.
+- CI checkouts no longer persist the token, and the Pages write permission
+  is scoped to the deploy job.
+
 ## [0.10.0] - 2026-09-21
 
 ### Added
@@ -951,7 +1118,24 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/uplg/hora/compare/v0.9.6...v0.10.0
+[0.9.6]: https://github.com/uplg/hora/compare/v0.9.5...v0.9.6
+[0.9.5]: https://github.com/uplg/hora/compare/v0.9.4...v0.9.5
+[0.9.4]: https://github.com/uplg/hora/compare/v0.9.3...v0.9.4
+[0.9.3]: https://github.com/uplg/hora/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/uplg/hora/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/uplg/hora/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/uplg/hora/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/uplg/hora/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/uplg/hora/compare/v0.7.2...v0.8.0
+[0.7.2]: https://github.com/uplg/hora/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/uplg/hora/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/uplg/hora/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/uplg/hora/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/uplg/hora/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/uplg/hora/compare/v0.4.2...v0.5.0
+[0.4.2]: https://github.com/uplg/hora/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/uplg/hora/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/uplg/hora/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/uplg/hora/compare/v0.2.4...v0.3.0

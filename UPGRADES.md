@@ -4,6 +4,43 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.10.0 → 0.11.0
+
+One schema migration (`0019`, a `source` column on `checks` telling probes,
+pushes and recorded misses apart) applies automatically; rows written before
+it are read exactly as before. No new config key. Check these before you
+roll out:
+
+- **Configs that no longer load.** `interval_secs`, `timeout_secs`,
+  `expect_every_secs` or `health.interval_secs` above 30 days
+  (2592000), an `expected_status` outside 100-599, an IPv6 tcp target
+  without brackets (`::1:80` → `[::1]:80`), or a `dns_resolver` given as a
+  hostname. Run `hora check` against your config with the new binary first;
+  a hot reload that fails validation keeps the previous config.
+- **Push monitors and peers that never sent a heartbeat start alerting**
+  ("no heartbeat received yet") once their interval has passed. If you
+  have monitors declared for jobs that do not run yet, comment them out
+  until they do.
+- **Write endpoints and `?token=`.** Push, alert, announce, silence and event
+  still accept the token in the query string, but answer with a
+  `Deprecation` header and log a warning once per endpoint. Move scripts to
+  `Authorization: Bearer` (or `X-Push-Token` for push and alert) - see the
+  [authentication docs](https://uplg.github.io/hora/reference/api/#authentication).
+- **Rate limit on pages.** Pages, badges, reports and `/metrics` are now
+  limited per client IP. Behind a reverse proxy, set
+  `server.client_ip_header` (`x-real-ip` set by your proxy, or
+  `cf-connecting-ip` behind Cloudflare), otherwise every visitor shares the
+  proxy's address - and its bucket.
+- **Notification wording changed** on several channels (`DOWN: API` → `API
+  is DOWN` on ntfy, Gotify and Pushover; `[TAG] <headline>` email
+  subjects). Update any client-side filter that matched the old prefixes.
+- **Atom readers** show existing incidents once more as new: entry ids now
+  point at `/incident/{id}`.
+- **`/healthz` answers 503** on a degraded node. The image's `HEALTHCHECK`
+  relies on it; an external monitor that matched the body still works.
+- Removed monitors now keep their history for 7 days before it is deleted
+  (a warning names them and the date).
+
 ## 0.9.6 → 0.10.0
 
 One schema migration, applied automatically at start (`0018`: the

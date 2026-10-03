@@ -298,10 +298,10 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /report/{YYYY-MM}` | Printable monthly SLA report: uptime per monitor/group, incidents, MTTR, error budget. `?group=` scopes it (group token accepted). |
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
-| `POST /api/push/{id}` | Record a heartbeat for a push monitor. Send the token as an `X-Push-Token` header (preferred - it stays out of proxy access logs) or as `?token=…`. Optional `status=up\|down\|degraded`, `msg`, `ping`. 401 on a wrong token, 404 if not a push monitor. |
+| `POST /api/push/{id}` | Record a heartbeat for a push monitor. Send the token as an `X-Push-Token` header (`?token=` is deprecated on writes). Optional `status=up\|down\|degraded`, `msg`, `ping`. 401 on a wrong token, 404 if not a push monitor. |
 | `POST /api/monitors/{id}/alert` | Push an ad-hoc alert (a producer's own failure) to a monitor's channels: JSON `{severity, title, message?, dedup_key?, tags?}`. Fans out immediately and records a `/history` timeline line, but never changes the monitor's status. `severity` maps to backend priority (ntfy/Pushover/Gotify); `dedup_key` coalesces repeats within `alerts.push_alert_window_secs`. Auth with the monitor's `push_token` (`X-Push-Token`) or `server.auth_token`. Answers 202. |
-| `POST /api/silence?monitors=api,web&duration=10m` | Mute alerts ad hoc (deploy hook): `monitors` is a comma-separated id list or `all`, `duration` like `10m`/`1h30m` (max 7d), optional `reason`. **Requires `server.auth_token`** (as `Authorization: Bearer` or `?token=`); without one configured the endpoint is closed. |
-| `POST /api/announce?title=...&severity=warning&until=4h` | Pin a public banner on the status page (`DELETE` clears them all). **Requires `server.auth_token`.** |
+| `POST /api/silence?monitors=api,web&duration=10m` | Mute alerts ad hoc (deploy hook): `monitors` is a comma-separated list of monitor ids or peer `listen_id`s, or `all`, `duration` like `10m`/`1h30m` (max 7d), optional `reason`. **Requires `server.auth_token`** as `Authorization: Bearer`; without one configured the endpoint is closed. |
+| `POST /api/announce?title=...&severity=warning&until=4h` | Pin a public banner on the status page (`DELETE` clears them all); `until` is a duration or a UTC time of day (`18:00`). **Requires `server.auth_token`.** |
 | `POST /api/event?title=deploy+api+v2.3` | Record an event marker from a CI/deploy hook ("what changed?"): overlaid on the latency charts, listed on `/history` (authenticated view), correlated into incidents confirming within the hour. **Requires `server.auth_token`.** |
 | `POST /api/peer/probe` | Multi-vantage confirmation between Hora nodes: probe a target *present in this node's own config* and answer with the verdict. Requires the requesting peer's `listen_token` (`X-Push-Token`). Never probes arbitrary targets. |
 | `GET /api/peer/monitors?from=<peer-id>` | Mesh exchange behind `hora peers diff` and the per-vantage display: this node's probeable monitors (kind + target) with its own view of each (status, 24h median). Same strict peer authentication as `/api/peer/probe`. |
@@ -311,16 +311,11 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /api/openapi.json` | The OpenAPI 3.1 spec, generated from the code (`utoipa`). |
 | `GET /healthz` | Liveness probe. |
 
-The `/api/*` endpoints (summary, latency, push, alert) are **rate-limited per client IP**
-(configurable; read once at startup) and send `x-ratelimit-*` / `retry-after`
-headers; the badges and `/api/openapi.json` are not. The client IP is taken from
-`X-Forwarded-For` / `X-Real-IP` by default, so run Hora behind a proxy that sets
-it - a direct client could otherwise spoof it. Behind Cloudflare, set
-`server.client_ip_header = "cf-connecting-ip"` and lock the origin to Cloudflare.
-`allowed_origins` controls CORS (empty = allow any, since the data is read-only and
-public). Responses carry a strict CSP, `X-Content-Type-Options: nosniff` and
-`X-Frame-Options: DENY`, plus an `x-request-id` (an inbound one is honoured,
-otherwise a fresh id is minted) echoed on the response for log correlation.
+Every route but static assets is **rate-limited per client IP**. Behind a
+reverse proxy, set `server.client_ip_header` to a header your proxy sets
+(`x-real-ip`, or `cf-connecting-ip` behind Cloudflare) - otherwise every visitor
+shares the proxy's address. Security headers, HSTS (set it on the proxy) and
+authentication: see the [HTTP API reference](https://uplg.github.io/hora/reference/api/).
 
 Point any client (Bruno, Insomnia, Scalar, Swagger Editor…) at `/api/openapi.json`.
 

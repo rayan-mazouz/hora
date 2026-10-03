@@ -24,7 +24,7 @@ Editor...) at it.
 | `POST /api/monitors/{id}/alert` | Push an ad-hoc alert to a monitor's channels (a producer's own failure); records a timeline line, never changes the monitor's status. |
 | `POST /api/silence` | Mute alerts ad hoc (deploy hook). |
 | `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
-| `POST /api/announce` | Pin a public status-page banner (`DELETE` clears); auto-expiry via `until`. Requires `server.auth_token`. |
+| `POST /api/announce` | Pin a public status-page banner (`DELETE` clears); auto-expiry via `until`, a duration (`4h`) or a UTC time of day (`18:00`). Requires `server.auth_token`. |
 | `POST /api/peer/probe` | [Multi-vantage confirmation](../../guides/peers/#multi-vantage-confirmation) between nodes: probe a target *from this node's own config* and answer with the verdict. Requires the requesting peer's `listen_token`. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge. |
 | `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge. |
@@ -33,18 +33,32 @@ Editor...) at it.
 
 ## Authentication
 
-With `server.auth_token` set, the page, `/api/summary`,
-`/api/monitors/{id}/latency`, `/metrics`, `/history` and `/history.atom`
-accept the token - as `Authorization: Bearer <token>` (preferred) or
-`?token=` - to include monitors marked `public = false`. Without it they
-serve the public subset only; a private monitor answers exactly like a
-missing one (404), so its existence is not revealed either way.
+Hora knows three kinds of token, each sent in a header:
+
+| Token | Header | Opens |
+| --- | --- | --- |
+| `server.auth_token` (operator) | `Authorization: Bearer <token>` | Private monitors on every read view; announce, silence, event and alert writes. |
+| A monitor's `push_token` | `X-Push-Token: <token>` | `POST /api/push/{id}` and `POST /api/monitors/{id}/alert` for that monitor. |
+| A group token | `Authorization: Bearer <token>` | `/status/{group}` and `/report/{month}?group=` with that group's full detail. |
+
+Without a token, read views serve the public subset only, and a private
+monitor answers exactly like a missing one (404), so its existence is not
+revealed.
+
+**Query-string tokens.** Read-only views (the page, `/history`,
+`/history.atom`, `/timeline`, `/metrics`, `/api/summary`, latency) also
+accept `?token=`, which is handy for a kiosk screen or a feed reader that
+cannot set headers. On **write** endpoints `?token=` is **deprecated**: it
+still works, but the response carries `Deprecation: true` and a `Link` to
+this section, and Hora logs one warning per endpoint. A token in a URL ends
+up in proxy access logs, browser history and shell history - send the
+header instead.
 
 ## `POST /api/push/{id}`
 
 Record a heartbeat for a push monitor (or a watched peer). Send the token as
-an `X-Push-Token` header - preferred, it stays out of proxy access logs - or
-as `?token=`:
+an `X-Push-Token` header (`?token=` still works but is
+[deprecated](#authentication)):
 
 ```sh
 curl -fsS -X POST -H "X-Push-Token: ${TOKEN}" \
@@ -64,8 +78,9 @@ monitor's `notify` channels immediately, adds a line to that monitor's
 timeline (shown on `/history`), and **never** marks the monitor down: status
 stays driven by probes/heartbeats alone.
 
-Authenticate with the monitor's own `push_token` as an `X-Push-Token` header
-(preferred), or with `server.auth_token` as `Authorization: Bearer` / `?token=`.
+Authenticate with the monitor's own `push_token` as an `X-Push-Token` header,
+or with `server.auth_token` as `Authorization: Bearer` (`?token=` is
+[deprecated](#authentication)).
 The endpoint is closed unless one of those is configured and matches.
 
 ```sh
@@ -108,7 +123,8 @@ curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
   "https://status.example.com/api/silence?monitors=api,web&duration=10m&reason=deploy"
 ```
 
-`monitors` is a comma-separated id list or `all`; `duration` looks like
+`monitors` is a comma-separated list of monitor ids or watched peers'
+`listen_id`s, or `all`; `duration` looks like
 `10m` / `1h30m` (max 7 days); `reason` is optional. **Strictly requires
 `server.auth_token`** - muting alerts is an operator action, so without a
 configured token the endpoint is closed. Unknown ids answer 404 (a typo'd
@@ -117,19 +133,39 @@ alerting is muted.
 
 ## Rate limiting & security headers
 
-The `/api/*` endpoints (summary, latency, push, alert, silence) are
-**rate-limited per client IP** (configurable; read once at startup) and send
-`x-ratelimit-*` / `retry-after` headers; the badges and `/api/openapi.json`
-are not. The client IP is taken from `X-Forwarded-For` / `X-Real-IP` by
-default, so run Hora behind a proxy that sets it - a direct client could
-otherwise spoof it. Behind Cloudflare, set
-`server.client_ip_header = "cf-connecting-ip"` and lock the origin down.
+Every route except static assets and `/api/openapi.json` is **rate-limited
+per client IP**, with `x-ratelimit-*` / `retry-after` headers. The `/api/*`
+endpoints use `rate_limit_burst` / `rate_limit_refill_secs`; pages, badges,
+reports, heatmaps, `/metrics` and `/healthz` get four times the burst and
+refill. These settings are read once at startup.
+
+**Client IP behind a proxy.** By default the client is the TCP peer, never a
+forwarded header a direct client could forge. Behind a reverse proxy that
+means every visitor shares the proxy's address - and its bucket - so tell
+Hora which header your proxy sets:
+
+```toml
+[server]
+client_ip_header = "x-real-ip"          # nginx: proxy_set_header X-Real-IP $remote_addr;
+# client_ip_header = "cf-connecting-ip" # behind Cloudflare
+```
+
+Only name a header your proxy overwrites, and block direct access to the
+origin. Hora takes the first address of the header, so `x-forwarded-for`
+is safe only with a proxy that replaces it (Caddy's default) rather than
+appending to what the client sent (nginx's `$proxy_add_x_forwarded_for`).
 
 `allowed_origins` controls CORS (empty = allow any, since the data is
 read-only and public). Responses carry a strict CSP,
-`X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`, plus an
-`x-request-id` (an inbound one is honoured, otherwise minted) echoed on the
-response for log correlation.
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+`Permissions-Policy` and `Cross-Origin-Opener-Policy`, plus an
+`x-request-id` (a well-formed inbound one is honoured, otherwise minted)
+echoed on the response for log correlation.
+
+**HTTPS and HSTS** belong to the reverse proxy that terminates TLS: Hora
+serves plain HTTP. Set `Strict-Transport-Security` there, for example
+`header Strict-Transport-Security "max-age=31536000"` in Caddy or
+`add_header Strict-Transport-Security "max-age=31536000" always;` in nginx.
 
 ## Badges
 
