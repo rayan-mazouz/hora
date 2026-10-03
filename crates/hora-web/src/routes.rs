@@ -1,9 +1,9 @@
 //! The axum router and request-scoped middleware.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use axum::http::{HeaderValue, Method, Request, header};
+use axum::http::{HeaderName, HeaderValue, Method, Request, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -20,15 +20,28 @@ use crate::handlers::{
     peer_probe, post_alert, post_event, push, report_page, silence, status_badge, summary_json,
     timeline_page, uptime_badge,
 };
-use crate::{AppState, CSP, ConfiguredIp};
+use crate::{AppState, CSP, ConfiguredIp, PERMISSIONS_POLICY};
+
+/// How much more generous the page limiter is than the API one, in both burst
+/// and refill rate: a history page pulls one heatmap image per monitor, and a
+/// status page refreshes itself, so a real visitor needs more headroom than an
+/// API client - while a loop hammering `/report/...` still hits a wall.
+const PAGE_LIMIT_FACTOR: u32 = 4;
 
 /// Build the axum router: page, rate-limited JSON API, `OpenAPI`, static assets,
 /// CORS, security headers and tracing.
+///
+/// The `[server]` settings read here (`allowed_origins`, `rate_limit_*`,
+/// `client_ip_header`) are fixed for the router's lifetime: changing them
+/// needs a restart, unlike the rest of the config, which handlers read live.
 pub fn router(state: AppState) -> Router {
     let config = state.config.borrow().clone();
     let cors = build_cors(&config.server.allowed_origins);
+    let key = ConfiguredIp::from_config(config.server.client_ip_header.as_deref());
+    let refill = Duration::from_secs(config.server.rate_limit_refill_secs.max(1));
+    let burst = config.server.rate_limit_burst.max(1);
 
-    let mut api = Router::new()
+    let api = Router::new()
         .route("/api/summary", get(summary_json))
         .route("/api/monitors/{id}/latency", get(latency_json))
         .route("/api/monitors/{id}/alert", post(post_alert))
@@ -38,40 +51,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/event", post(post_event))
         .route("/api/peer/probe", post(peer_probe))
         .route("/api/peer/monitors", get(peer_monitors));
+    let api = rate_limited(api, refill, burst, key.clone());
 
-    // Parameters are clamped to >= 1, so `finish` always succeeds; if it ever
-    // did not, the API simply runs without a rate limit rather than panicking.
-    if let Some(governor) = GovernorConfigBuilder::default()
-        .per_second(config.server.rate_limit_refill_secs.max(1))
-        .burst_size(config.server.rate_limit_burst.max(1))
-        .key_extractor(ConfiguredIp::from_config(
-            config.server.client_ip_header.as_deref(),
-        ))
-        .use_headers()
-        .finish()
-    {
-        // Periodically drop idle per-IP buckets so memory stays bounded.
-        let limiter = governor.limiter().clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_mins(1));
-            loop {
-                ticker.tick().await;
-                limiter.retain_recent();
-            }
-        });
-        api = api.layer(GovernorLayer::new(governor));
-    }
-
-    Router::new()
+    // Every other dynamic route reads the database (the report and heatmaps
+    // scan weeks of history), so it gets its own, more generous, per-IP limit.
+    let pages = Router::new()
         .route("/", get(page))
         .route("/healthz", get(healthz))
-        .route("/favicon.svg", get(favicon))
-        .route("/assets/CalSans-SemiBold.woff2", get(font))
-        .route("/api/openapi.json", get(openapi))
         .route("/api/badge/{id}/status", get(status_badge))
         .route("/api/badge/{id}/uptime", get(uptime_badge))
-        // With the badges (outside the rate limiter): the history page embeds
-        // one <img> per monitor, which would eat a per-IP burst on its own.
         .route("/api/monitors/{id}/heatmap.svg", get(heatmap_svg))
         .route("/metrics", get(metrics_prometheus))
         .route("/history", get(history_page))
@@ -79,7 +67,20 @@ pub fn router(state: AppState) -> Router {
         .route("/incident/{id}", get(incident_page))
         .route("/timeline", get(timeline_page))
         .route("/status/{group}", get(group_page))
-        .route("/report/{month}", get(report_page))
+        .route("/report/{month}", get(report_page));
+    let pages = rate_limited(
+        pages,
+        refill / PAGE_LIMIT_FACTOR,
+        burst.saturating_mul(PAGE_LIMIT_FACTOR),
+        key,
+    );
+
+    Router::new()
+        // Static: compiled-in assets and the generated document, never limited.
+        .route("/favicon.svg", get(favicon))
+        .route("/assets/CalSans-SemiBold.woff2", get(font))
+        .route("/api/openapi.json", get(openapi))
+        .merge(pages)
         .merge(api)
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
@@ -97,27 +98,75 @@ pub fn router(state: AppState) -> Router {
             header::REFERRER_POLICY,
             HeaderValue::from_static("no-referrer"),
         ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static(PERMISSIONS_POLICY),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("cross-origin-opener-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
         .layer(cors)
         // The trace span carries the request id so every log line emitted while
         // handling a request can be correlated back to it.
         .layer(TraceLayer::new_for_http().make_span_with(make_request_span))
-        // Outermost: stamp each request with an id (honouring an inbound
-        // `x-request-id`) before any other layer runs, and echo it on the response.
+        // Outermost: stamp each request with an id (honouring a well-formed
+        // inbound `x-request-id`) before any other layer runs, and echo it on
+        // the response.
         .layer(middleware::from_fn(request_id))
         .with_state(state)
+}
+
+/// Put `routes` behind a per-IP token bucket (`burst` requests, one more every
+/// `period`), answering 429 with `x-ratelimit-*` headers past it.
+fn rate_limited(
+    routes: Router<AppState>,
+    period: Duration,
+    burst: u32,
+    key: ConfiguredIp,
+) -> Router<AppState> {
+    // Parameters are clamped above zero, so `finish` always succeeds; if it
+    // ever did not, the routes simply run without a rate limit rather than
+    // panicking.
+    let Some(governor) = GovernorConfigBuilder::default()
+        .period(period.max(Duration::from_millis(1)))
+        .burst_size(burst.max(1))
+        .key_extractor(key)
+        .use_headers()
+        .finish()
+    else {
+        return routes;
+    };
+    // Periodically drop idle per-IP buckets so memory stays bounded. The task
+    // holds the limiter weakly and ends once the router (the layer owning
+    // it) is dropped - at shutdown, or when a test discards its app.
+    let limiter = Arc::downgrade(governor.limiter());
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_mins(1));
+        loop {
+            ticker.tick().await;
+            let Some(limiter) = limiter.upgrade() else {
+                break;
+            };
+            limiter.retain_recent();
+        }
+    });
+    routes.layer(GovernorLayer::new(governor))
 }
 
 /// The header carrying the per-request correlation id.
 pub(crate) const REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Stamp the request with a correlation id and echo it on the response. An
-/// inbound `x-request-id` (e.g. from a front proxy) is preserved; otherwise a
-/// fresh opaque id is minted. Runs outermost, so every inner layer - including
-/// the trace span - sees the id.
+/// inbound `x-request-id` (e.g. from a front proxy) is preserved when it looks
+/// like an id; anything else is replaced by a fresh opaque id, so a client
+/// cannot forge arbitrary text into every log line. Runs outermost, so every
+/// inner layer - including the trace span - sees the id.
 pub(crate) async fn request_id(mut request: Request<Body>, next: Next) -> Response {
     let id = request
         .headers()
         .get(REQUEST_ID_HEADER)
+        .filter(|value| is_valid_request_id(value.as_bytes()))
         .cloned()
         .unwrap_or_else(|| {
             HeaderValue::from_str(&new_request_id())
@@ -127,6 +176,15 @@ pub(crate) async fn request_id(mut request: Request<Body>, next: Next) -> Respon
     let mut response = next.run(request).await;
     response.headers_mut().insert(REQUEST_ID_HEADER, id);
     response
+}
+
+/// Whether an inbound request id is acceptable: 1 to 64 of `[A-Za-z0-9._-]`
+/// (covers UUIDs, hex trace ids and the usual proxy formats).
+fn is_valid_request_id(raw: &[u8]) -> bool {
+    (1..=64).contains(&raw.len())
+        && raw
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// Mint an opaque request id: a per-process random prefix (so ids never collide
@@ -252,10 +310,15 @@ mod tests {
         let app = router(AppState::new(
             pool.clone(),
             rx,
-            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(fresh_tick())),
             notifier,
         ));
         (app, pool)
+    }
+
+    /// A scheduler beacon that just ticked, so `/healthz` reports ok.
+    fn fresh_tick() -> u64 {
+        u64::try_from(chrono::Utc::now().timestamp()).expect("positive")
     }
 
     /// The rate limiter keys on the peer address; oneshot has no real
@@ -277,6 +340,20 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn healthz_is_503_when_degraded_with_the_same_body() {
+        // The scheduler never ticked although monitors are configured: a
+        // degraded node must fail a plain HTTP health check.
+        let res = app_from(&vantage_config(9))
+            .await
+            .oneshot(get("/healthz"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_text(res).await;
+        assert!(body.contains(r#""status":"degraded""#), "{body}");
+    }
+
     fn push(uri: &str) -> Request<Body> {
         Request::builder()
             .method("POST")
@@ -294,6 +371,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn push_rejects_unknown_status_and_negative_ping() {
+        let (app, pool) = test_app_with_pool().await;
+        for bad in [
+            "/api/push/beat?token=s3cret&status=dwon",
+            "/api/push/beat?token=s3cret&status=0",
+            "/api/push/beat?token=s3cret&ping=-5",
+        ] {
+            let res = app.clone().oneshot(push(bad)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
+        }
+        // Nothing was recorded by the rejected pushes.
+        let recorded = hora_core::db::recent_checks(&pool, "beat", 10)
+            .await
+            .unwrap();
+        assert!(recorded.is_empty());
+
+        for good in [
+            "/api/push/beat?token=s3cret",
+            "/api/push/beat?token=s3cret&status=down&ping=0",
+            "/api/push/beat?token=s3cret&status=degraded",
+        ] {
+            let res = app.clone().oneshot(push(good)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{good}");
+        }
     }
 
     #[tokio::test]
@@ -435,6 +539,29 @@ mod tests {
                 res.status(),
                 StatusCode::UNAUTHORIZED,
                 "{push_token:?} {bearer:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn alert_does_not_reveal_which_ids_exist() {
+        // Without the operator token, an unknown id, a private monitor and a
+        // public one all answer the same 401 - no existence oracle.
+        for uri in [
+            "/api/monitors/nope/alert",
+            "/api/monitors/intra/alert",
+            "/api/monitors/web/alert",
+        ] {
+            let res = test_app()
+                .await
+                .oneshot(alert(uri, r#"{"title":"x"}"#, Some("guess"), None))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            assert_eq!(
+                body_text(res).await,
+                "alerting requires the monitor's push_token (X-Push-Token) or server.auth_token",
+                "{uri}"
             );
         }
     }
@@ -744,23 +871,37 @@ mod tests {
         );
     }
 
+    /// This month, as the report route spells it.
+    fn this_month() -> String {
+        chrono::Utc::now().format("%Y-%m").to_string()
+    }
+
     #[tokio::test]
     async fn report_renders_and_rejects_bad_months() {
+        let month = this_month();
         let res = test_app()
             .await
-            .oneshot(get("/report/2021-01"))
+            .oneshot(get(&format!("/report/{month}")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = body_text(res).await;
+        let label = chrono::Utc::now().format("%B %Y").to_string();
         assert!(
-            body.contains("SLA report") && body.contains("January 2021"),
+            body.contains("SLA report") && body.contains(&label),
             "{body}"
         );
         // Anonymous: the private monitor stays out of the report.
         assert!(!body.contains("Intra"), "{body}");
 
-        for bad in ["/report/never", "/report/2999-01"] {
+        // Malformed, future, or older than the retained history (a full
+        // history scan for an always-empty report).
+        for bad in [
+            "/report/never",
+            "/report/2999-01",
+            "/report/0001-01",
+            "/report/2021-01",
+        ] {
             let res = test_app().await.oneshot(get(bad)).await.unwrap();
             assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
         }
@@ -771,7 +912,10 @@ mod tests {
         // The group token reveals the group's private monitor on ITS report.
         let res = test_app()
             .await
-            .oneshot(get("/report/2021-01?group=App&token=appappappappapp1"))
+            .oneshot(get(&format!(
+                "/report/{}?group=App&token=appappappappapp1",
+                this_month()
+            )))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -783,10 +927,35 @@ mod tests {
         // An unknown group answers like a missing page.
         let res = test_app()
             .await
-            .oneshot(get("/report/2021-01?group=Nope"))
+            .oneshot(get(&format!("/report/{}?group=Nope", this_month())))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Like [`app_from`], with a live scheduler beacon and the pool returned.
+    async fn app_with_pool(toml: &str) -> (Router, sqlx::SqlitePool) {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(":memory:")
+            .create_if_missing(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("pool");
+        hora_core::db::migrator().run(&pool).await.expect("migrate");
+        let config = Arc::new(hora_core::config::parse(toml).expect("config"));
+        let client = hora_core::http::client(None).expect("client");
+        let notifier = hora_core::notifications::shared(&config, &client);
+        let (tx, rx) = watch::channel(config);
+        std::mem::forget(tx);
+        let app = router(AppState::new(
+            pool.clone(),
+            rx,
+            Arc::new(AtomicU64::new(fresh_tick())),
+            notifier,
+        ));
+        (app, pool)
     }
 
     /// Build an app from an arbitrary config TOML (the shared `test_app` has a
@@ -891,6 +1060,23 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(res.status(), StatusCode::NOT_FOUND, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_probe_refuses_exec_and_push_kinds() {
+        // Every exec monitor has the same empty target: answering would run
+        // one of this node's local checks for another node's monitor (or
+        // answer a bogus "down"). Refused outright, before any matching.
+        let config = vantage_config(9);
+        for kind in ["exec", "push"] {
+            let body = format!(r#"{{"from":"hora-a","kind":"{kind}","target":""}}"#);
+            let res = app_from(&config)
+                .await
+                .oneshot(probe_request(&body, Some("tok-a-to-b-16char")))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{kind}");
         }
     }
 
@@ -1212,6 +1398,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn group_page_negotiates_plain_text() {
+        let res = test_app()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/status/App")
+                    .header("user-agent", "curl/8.0")
+                    .extension(fake_peer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.headers().get("content-type").unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert!(body_text(res).await.contains("Web"));
+
+        // Names are padded per group, so the figure columns line up.
+        let res = test_app()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/status/App?token=appappappappapp1")
+                    .header("user-agent", "curl/8.0")
+                    .extension(fake_peer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_text(res).await;
+        let widths: Vec<usize> = body
+            .lines()
+            .filter(|line| line.contains("Web") || line.contains("Intra"))
+            .map(|line| line.chars().count())
+            .collect();
+        assert_eq!(widths.len(), 2, "{body}");
+        assert_eq!(widths[0], widths[1], "{body}");
+    }
+
+    /// Two tenants sharing a node, with a cross-tenant dependency: "Web"
+    /// (group App, public) depends on "Internal DB" (group Other, private).
+    const TENANTS: &str = r#"
+        [page]
+        title = "Hosting"
+        [server]
+        auth_token = "0123456789abcdef"
+        [server.group_tokens]
+        App = "appappappappapp1"
+        [[monitors]]
+        id = "web"
+        name = "Web"
+        target = "https://example.com"
+        interval_secs = 60
+        group = "App"
+        depends_on = ["db"]
+        [[monitors]]
+        id = "intra"
+        name = "Intra"
+        target = "https://intra.example.com"
+        interval_secs = 60
+        group = "App"
+        public = false
+        [[monitors]]
+        id = "db"
+        name = "Internal DB"
+        target = "https://db.internal"
+        interval_secs = 60
+        group = "Other"
+        public = false
+    "#;
+
+    #[tokio::test]
+    async fn group_token_gets_its_detail_but_no_operator_data() {
+        let (app, pool) = app_with_pool(TENANTS).await;
+        let now = chrono::Utc::now().timestamp();
+        // Web and the DB are down (3 failures meet the threshold); Intra has
+        // a latency series (so its sparkline can carry markers) and a
+        // detailed failure.
+        for id in ["web", "db"] {
+            for offset in [60, 120, 180] {
+                sqlx::query("INSERT INTO checks (time, monitor_id, status, error) VALUES (?, ?, 0, 'HTTP 503: boom')")
+                    .bind(now - offset)
+                    .bind(id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        }
+        for (offset, status) in [(7200, 1), (3600, 1), (60, 0)] {
+            sqlx::query("INSERT INTO checks (time, monitor_id, status, latency_ms, error) VALUES (?, 'intra', ?, 40, 'HTTP 500: tenant secret')")
+                .bind(now - offset)
+                .bind(status)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO events (title, created_at) VALUES ('deploy billing v9', ?)")
+            .bind(now - 1800)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // The operator sees everything: the cross-tenant cause and the
+        // deploy marker.
+        let operator = body_text(
+            app.clone()
+                .oneshot(get("/status/App?token=0123456789abcdef"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(operator.contains("Internal DB"), "{operator}");
+        assert!(operator.contains("deploy billing v9"), "{operator}");
+
+        // The group token: its private monitor with full detail...
+        let group = body_text(
+            app.clone()
+                .oneshot(get("/status/App?token=appappappappapp1"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(group.contains("Intra"), "{group}");
+        assert!(group.contains("tenant secret"), "{group}");
+        // ...but neither another tenant's private monitor nor deploy titles.
+        assert!(!group.contains("Internal DB"), "{group}");
+        assert!(!group.contains("deploy billing v9"), "{group}");
+
+        // Anonymous: public monitors only, sanitized.
+        let public = body_text(app.oneshot(get("/status/App")).await.unwrap()).await;
+        assert!(!public.contains("Intra") && !public.contains("tenant secret"));
+        assert!(!public.contains("Internal DB") && !public.contains("deploy billing v9"));
+    }
+
+    #[tokio::test]
+    async fn anonymous_history_fills_its_page_past_private_incidents() {
+        let (app, pool) = test_app_with_pool().await;
+        // One old public incident, buried under more private ones than the
+        // page shows.
+        hora_core::db::insert_incident_start(&pool, "web", Some("HTTP 503"), None, &[], None, None)
+            .await
+            .unwrap();
+        for _ in 0..120 {
+            hora_core::db::insert_incident_start(&pool, "intra", None, None, &[], None, None)
+                .await
+                .unwrap();
+        }
+        let page = body_text(app.oneshot(get("/history")).await.unwrap()).await;
+        assert!(
+            page.contains("Web"),
+            "the public incident must still be listed"
+        );
+    }
+
+    #[tokio::test]
     async fn group_token_reveals_its_group_and_nothing_else() {
         // The group token unlocks the group's private monitors...
         let res = test_app()
@@ -1401,8 +1745,70 @@ mod tests {
     async fn summary_has_security_and_ratelimit_headers() {
         let res = test_app().await.oneshot(get("/api/summary")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert!(res.headers().contains_key("content-security-policy"));
-        assert!(res.headers().contains_key("x-ratelimit-limit"));
+        let headers = res.headers();
+        assert!(headers.contains_key("content-security-policy"));
+        assert!(headers.contains_key("x-ratelimit-limit"));
+        assert!(headers.contains_key("permissions-policy"));
+        assert_eq!(
+            headers.get("cross-origin-opener-policy").unwrap(),
+            "same-origin"
+        );
+        let csp = headers["content-security-policy"].to_str().unwrap();
+        assert!(!csp.contains("data:"), "{csp}");
+    }
+
+    #[tokio::test]
+    async fn pages_have_their_own_more_generous_rate_limit() {
+        let app = test_app().await;
+        let res = app.clone().oneshot(get("/report/2999-01")).await.unwrap();
+        let page_limit: u32 = res.headers()["x-ratelimit-limit"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let res = app.clone().oneshot(get("/api/summary")).await.unwrap();
+        let api_limit: u32 = res.headers()["x-ratelimit-limit"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(page_limit, api_limit * PAGE_LIMIT_FACTOR);
+        // Static assets stay outside any limiter.
+        let res = app.oneshot(get("/favicon.svg")).await.unwrap();
+        assert!(!res.headers().contains_key("x-ratelimit-limit"));
+    }
+
+    #[tokio::test]
+    async fn metrics_skip_up_for_unknown_monitors() {
+        let (app, pool) = test_app_with_pool().await;
+        sqlx::query(
+            "INSERT INTO checks (time, monitor_id, status, latency_ms) VALUES (?, 'web', 1, 12)",
+        )
+        .bind(chrono::Utc::now().timestamp())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let body = body_text(
+            app.oneshot(get("/metrics?token=0123456789abcdef"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            body.contains(r#"hora_monitor_up{id="web",name="Web"} 1"#),
+            "{body}"
+        );
+        // Never checked: no `up` sample (a 0 would read as down)...
+        assert!(!body.contains(r#"hora_monitor_up{id="intra""#), "{body}");
+        // ...but its state is exported.
+        assert!(
+            body.contains(r#"hora_monitor_status{id="intra",name="Intra",status="unknown"} 1"#),
+            "{body}"
+        );
+        assert!(
+            !body.contains("# TYPE hora_monitor_latency_ms summary"),
+            "{body}"
+        );
     }
 
     #[tokio::test]
@@ -1417,6 +1823,26 @@ mod tests {
         // Minted ids are 32 hex chars (16-char random prefix + 16-char counter).
         assert_eq!(id.len(), 32);
         assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn malformed_inbound_request_id_is_replaced() {
+        for forged in ["has space", "x".repeat(65).as_str(), "quote\"d", ""] {
+            let request = Request::builder()
+                .uri("/healthz")
+                .header(REQUEST_ID_HEADER, forged)
+                .body(Body::empty())
+                .expect("request");
+            let res = test_app().await.oneshot(request).await.unwrap();
+            let id = res
+                .headers()
+                .get(REQUEST_ID_HEADER)
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert_ne!(id, forged);
+            assert_eq!(id.len(), 32, "a fresh id replaces {forged:?}");
+        }
     }
 
     #[tokio::test]

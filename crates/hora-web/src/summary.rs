@@ -1,6 +1,7 @@
 //! The status summary: turning stored checks into the page/API view model.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use askama::Template;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -16,6 +17,7 @@ use hora_core::{slo, topology};
 
 use crate::SPARK_BUCKETS;
 use crate::render::sparkline;
+use crate::visibility::Visibility;
 
 // --- View model ----------------------------------------------------------
 
@@ -29,7 +31,11 @@ pub(crate) struct Summary {
     pub(crate) updated_utc: String,
     pub(crate) incidents: Vec<IncidentView>,
     pub(crate) maintenances: Vec<MaintenanceView>,
-    pub(crate) monitors: Vec<MonitorView>,
+    /// Shared with the groups' card lists (and the per-group pages derived
+    /// from this summary), so a view - chart SVG included - is built once.
+    #[serde(serialize_with = "serialize_views")]
+    #[schema(value_type = Vec<MonitorView>)]
+    pub(crate) monitors: Vec<Arc<MonitorView>>,
     /// Monitor groups: `(group_name, monitors)`. Ungrouped monitors appear under
     /// an empty-string key, always last.
     pub(crate) groups: Vec<GroupView>,
@@ -49,7 +55,15 @@ pub(crate) struct GroupView {
     /// The rendered cards, for the server-side template only; skipped from the API
     /// (it would duplicate every monitor object).
     #[serde(skip)]
-    pub(crate) monitors: Vec<MonitorView>,
+    pub(crate) monitors: Vec<Arc<MonitorView>>,
+}
+
+/// Serialize shared views as plain objects (serde's `rc` feature is off).
+fn serialize_views<S: serde::Serializer>(
+    views: &[Arc<MonitorView>],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(views.iter().map(AsRef::as_ref))
 }
 
 #[derive(Clone, Serialize, ToSchema)]
@@ -92,7 +106,7 @@ pub(crate) struct ChannelView {
     failing_for_secs: Option<u64>,
 }
 
-#[derive(Clone, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 pub(crate) struct MonitorView {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -200,21 +214,18 @@ pub(crate) struct SummaryCtx {
     threshold: i64,
     cert_threshold: i64,
     history_days: u16,
-    /// Authenticated view: full failure reasons and private topology names.
-    /// The public variant collapses reasons to safe categories (see
-    /// `probe::public_reason`) - unless the monitor opts in with
-    /// `public_error_detail` - and never names a private monitor.
-    full: bool,
 }
 
-/// Build the page/API view model. `full` includes private (`public = false`)
-/// monitors; the public variant filters them out entirely - cards, groups and
-/// daily bars alike. Channel health is only included in the `full` view
-/// (operator-private); the public summary gets an empty `channels` vec.
+/// Build the page/API view model for one audience. Monitors the audience may
+/// not see are left out entirely - cards, groups and daily bars alike; failure
+/// reasons collapse to safe categories (see `probe::public_reason`) without
+/// detail; topology annotations never name a monitor the audience may not
+/// see. Event markers and channel health are operator streams; every other
+/// audience gets them empty.
 pub(crate) async fn build_summary(
     pool: &SqlitePool,
     config: &Config,
-    full: bool,
+    visibility: &Visibility<'_>,
     channel_health: &[ChannelHealthEntry],
     vantage: &HashMap<String, Vec<hora_core::vantage::PeerVantage>>,
 ) -> Summary {
@@ -238,13 +249,13 @@ pub(crate) async fn build_summary(
         threshold: i64::from(config.alerts.fail_threshold.max(1)),
         cert_threshold: i64::from(config.alerts.cert_expiry_days),
         history_days: config.page.history_days,
-        full,
     };
+    let operator_streams = visibility.sees_operator_streams();
 
     let visible_monitors: Vec<&Monitor> = config
         .monitors
         .iter()
-        .filter(|monitor| full || monitor.public)
+        .filter(|monitor| visibility.can_see_monitor(monitor))
         .collect();
 
     // The 24h/90d aggregates batch into one query each, and the batches are
@@ -264,9 +275,9 @@ pub(crate) async fn build_summary(
         db::cert_all(pool),
         recent_checks_map(pool, &visible_monitors, ctx.threshold.max(1)),
         // Event markers overlay the sparklines - operator info (deploy titles),
-        // so only the authenticated view fetches them; the public one stays bare.
+        // so only the operator's view fetches them; every other stays bare.
         async {
-            if full {
+            if operator_streams {
                 db::events_since(pool, ctx.since_24h).await
             } else {
                 Ok(Vec::new())
@@ -291,14 +302,14 @@ pub(crate) async fn build_summary(
         vantage,
     };
 
-    let monitors: Vec<MonitorView> = visible_monitors
+    let monitors: Vec<Arc<MonitorView>> = visible_monitors
         .iter()
         .map(|monitor| {
-            let mut view = build_monitor_view(monitor, &ctx, &data, &config.monitors);
+            let mut view = build_monitor_view(monitor, &ctx, &data, &config.monitors, visibility);
             view.maintenance = config
                 .active_maintenance(&monitor.id, now)
                 .map(|window| window.title.clone());
-            view
+            Arc::new(view)
         })
         .collect();
 
@@ -333,7 +344,7 @@ pub(crate) async fn build_summary(
         monitors,
         groups,
         peers,
-        channels: if full {
+        channels: if operator_streams {
             channel_views(channel_health)
         } else {
             Vec::new()
@@ -386,7 +397,7 @@ fn build_maintenances(
 }
 
 /// Build the channel-health view model from the dispatcher's snapshot. Only
-/// called for the authenticated (`full`) view; the public summary omits it.
+/// called for the operator's view; every other summary omits it.
 fn channel_views(health: &[ChannelHealthEntry]) -> Vec<ChannelView> {
     health
         .iter()
@@ -410,11 +421,11 @@ fn channel_views(health: &[ChannelHealthEntry]) -> Vec<ChannelView> {
 /// when the summary holds no monitor of that group - an unknown group, or a
 /// fully private one viewed anonymously, answers exactly like a missing page.
 pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Option<Summary> {
-    let monitors: Vec<MonitorView> = summary
+    let monitors: Vec<Arc<MonitorView>> = summary
         .monitors
         .iter()
         .filter(|monitor| monitor.group.as_deref() == Some(group))
-        .cloned()
+        .map(Arc::clone)
         .collect();
     if monitors.is_empty() {
         return None;
@@ -572,6 +583,7 @@ pub(crate) fn build_monitor_view(
     ctx: &SummaryCtx,
     data: &MonitorData,
     all_monitors: &[Monitor],
+    visibility: &Visibility<'_>,
 ) -> MonitorView {
     let recent = data
         .recent
@@ -610,7 +622,13 @@ pub(crate) fn build_monitor_view(
 
     let latest = recent.first();
     let (cause, impacted) = if status == "down" {
-        topology_context(monitor, ctx.threshold, data.recent, all_monitors, ctx.full)
+        topology_context(
+            monitor,
+            ctx.threshold,
+            data.recent,
+            all_monitors,
+            visibility,
+        )
     } else {
         (None, Vec::new())
     };
@@ -622,9 +640,9 @@ pub(crate) fn build_monitor_view(
         status,
         last_latency_ms: latest.and_then(|l| l.latency_ms),
         // The stored reason carries operator detail (body snippets, DNS
-        // answers); anonymous viewers get the safe category instead.
+        // answers); an audience without detail gets the safe category instead.
         last_error: latest.and_then(|l| l.error.as_deref()).map(|reason| {
-            if ctx.full || monitor.public_error_detail {
+            if visibility.detailed(&monitor.id) {
                 reason.to_owned()
             } else {
                 hora_core::probe::public_reason(reason).to_owned()
@@ -681,18 +699,18 @@ fn vantage_views(
 }
 
 /// Compute topology annotation for a down monitor: the nearest down upstream
-/// name (`cause`) or the list of impacted dependent names. The public variant
-/// (`full = false`) names only public monitors - a private upstream/dependent
-/// must not leak its name through a public card's annotation. The graph is
-/// still walked in full, so a public down ancestor further up is still named.
+/// name (`cause`) or the list of impacted dependent names. Only monitors the
+/// audience may see are named - a private upstream/dependent must not leak its
+/// name through a card's annotation. The graph is still walked in full, so a
+/// nameable down ancestor further up is still named.
 fn topology_context(
     monitor: &Monitor,
     threshold: i64,
     recent_map: &HashMap<String, Vec<Latest>>,
     all_monitors: &[Monitor],
-    full: bool,
+    visibility: &Visibility<'_>,
 ) -> (Option<String>, Vec<String>) {
-    let nameable = |id: &str| full || all_monitors.iter().any(|m| m.id == id && m.public);
+    let nameable = |id: &str| visibility.can_name(id);
 
     let upstreams = topology::transitive_upstreams(all_monitors, &monitor.id);
     for up_id in &upstreams {
@@ -720,7 +738,7 @@ fn topology_context(
 
 /// Group monitors by their `group` field. Groups appear in config order;
 /// ungrouped monitors (no `group`) appear last under an empty-string key.
-fn build_groups(monitors: &[MonitorView], config_monitors: &[Monitor]) -> Vec<GroupView> {
+fn build_groups(monitors: &[Arc<MonitorView>], config_monitors: &[Monitor]) -> Vec<GroupView> {
     use std::collections::BTreeMap;
 
     let mut group_order: Vec<String> = Vec::new();
@@ -736,10 +754,10 @@ fn build_groups(monitors: &[MonitorView], config_monitors: &[Monitor]) -> Vec<Gr
     // (otherwise a headerless card could appear above the first group's header).
     group_order.push(String::new());
 
-    let mut grouped: BTreeMap<String, Vec<MonitorView>> = BTreeMap::new();
+    let mut grouped: BTreeMap<String, Vec<Arc<MonitorView>>> = BTreeMap::new();
     for monitor in monitors {
         let key = monitor.group.clone().unwrap_or_default();
-        grouped.entry(key).or_default().push(monitor.clone());
+        grouped.entry(key).or_default().push(Arc::clone(monitor));
     }
 
     let mut groups = Vec::new();
@@ -951,6 +969,7 @@ pub(crate) fn day_cell(date: String, row: &DayRow) -> DayCell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::visibility::Audience;
     fn check(status: i64) -> Latest {
         Latest {
             time: 0,
@@ -1064,20 +1083,34 @@ mod tests {
             .map(|id| (id.to_owned(), vec![check(0), check(0), check(0)]))
             .collect();
 
-        // Authenticated: the private upstream is named as the cause.
-        let edge = &config.monitors[1];
-        let (cause, _) = topology_context(edge, 3, &recent, &config.monitors, true);
-        assert_eq!(cause.as_deref(), Some("Internal DB"));
-        // Public: a private monitor's name never leaves through a cause.
-        let (cause, _) = topology_context(edge, 3, &recent, &config.monitors, false);
-        assert_eq!(cause, None);
+        let operator = Audience::Operator;
+        let operator = Visibility::new(&config, &operator);
+        let public = Audience::Public;
+        let public = Visibility::new(&config, &public);
+        // A group token holder is no operator: the private DB and worker
+        // belong to no group of theirs.
+        let group = Audience::Group("App".to_owned());
+        let group = Visibility::new(&config, &group);
 
-        // Impacted lists drop private dependents in the public view.
+        // Operator: the private upstream is named as the cause.
+        let edge = &config.monitors[1];
+        let (cause, _) = topology_context(edge, 3, &recent, &config.monitors, &operator);
+        assert_eq!(cause.as_deref(), Some("Internal DB"));
+        // Public or another group: a private monitor's name never leaves
+        // through a cause.
+        for vis in [&public, &group] {
+            let (cause, _) = topology_context(edge, 3, &recent, &config.monitors, vis);
+            assert_eq!(cause, None);
+        }
+
+        // Impacted lists drop private dependents outside the operator view.
         let db = &config.monitors[0];
-        let (_, impacted) = topology_context(db, 3, &recent, &config.monitors, true);
+        let (_, impacted) = topology_context(db, 3, &recent, &config.monitors, &operator);
         assert_eq!(impacted.len(), 2, "{impacted:?}");
-        let (_, impacted) = topology_context(db, 3, &recent, &config.monitors, false);
-        assert_eq!(impacted, vec!["Edge".to_owned()]);
+        for vis in [&public, &group] {
+            let (_, impacted) = topology_context(db, 3, &recent, &config.monitors, vis);
+            assert_eq!(impacted, vec!["Edge".to_owned()]);
+        }
     }
 
     #[test]

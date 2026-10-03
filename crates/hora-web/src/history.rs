@@ -213,6 +213,7 @@ pub(crate) fn render_atom(
     incidents: &[Incident],
     monitor_names: &HashMap<String, String>,
     base_url: &str,
+    page_title: &str,
 ) -> String {
     // `base_url` is built from the client-supplied Host header, so escape it
     // before it lands in XML attributes/elements - an unescaped `"` or `<` would
@@ -221,12 +222,19 @@ pub(crate) fn render_atom(
     let mut out = String::with_capacity(4096);
     let _ = writeln!(out, "<?xml version=\"1.0\" encoding=\"utf-8\"?>");
     let _ = writeln!(out, "<feed xmlns=\"http://www.w3.org/2005/Atom\">");
-    let _ = writeln!(out, "  <title>Incident History</title>");
+    let _ = writeln!(
+        out,
+        "  <title>{} - incident history</title>",
+        xml_escape(page_title)
+    );
     let _ = writeln!(
         out,
         "  <link href=\"{base_url}/history.atom\" rel=\"self\"/>"
     );
-    let _ = writeln!(out, "  <link href=\"{base_url}/history\"/>");
+    let _ = writeln!(
+        out,
+        "  <link href=\"{base_url}/history\" rel=\"alternate\"/>"
+    );
     let _ = writeln!(out, "  <id>{base_url}/history.atom</id>");
     let _ = writeln!(out, "  <author><name>Hora</name></author>");
 
@@ -253,10 +261,13 @@ pub(crate) fn render_atom(
             "Ongoing"
         };
         let title = format!("{monitor_name} - {status}");
+        // The entry's permalink is its post-mortem page; it doubles as the id.
+        let link = format!("{base_url}/incident/{}", incident.id);
 
         let _ = writeln!(out, "  <entry>");
         let _ = writeln!(out, "    <title>{}</title>", xml_escape(&title));
-        let _ = writeln!(out, "    <id>{base_url}/incidents/{}</id>", incident.id);
+        let _ = writeln!(out, "    <id>{link}</id>");
+        let _ = writeln!(out, "    <link href=\"{link}\" rel=\"alternate\"/>");
 
         if let Some(dt) = DateTime::from_timestamp(incident.started_at, 0) {
             let _ = writeln!(out, "    <published>{}</published>", dt.to_rfc3339());
@@ -268,42 +279,55 @@ pub(crate) fn render_atom(
             let _ = writeln!(out, "    <updated>{}</updated>", dt.to_rfc3339());
         }
 
-        let mut content = String::new();
-        if let Some(error) = &incident.error {
-            let _ = write!(
-                content,
-                "<p><strong>Error:</strong> {}</p>",
-                xml_escape(error)
-            );
-        }
-        if let Some(cause) = &incident.cause {
-            let _ = write!(
-                content,
-                "<p><strong>Caused by:</strong> {}</p>",
-                xml_escape(cause)
-            );
-        }
-        if let Some(duration_s) = incident.duration_s {
-            let _ = write!(
-                content,
-                "<p><strong>Duration:</strong> {}</p>",
-                format_duration(duration_s)
-            );
-        }
-        if let Some(note) = &incident.note {
-            let _ = write!(
-                content,
-                "<p><strong>Note:</strong> {}</p>",
-                xml_escape(note)
-            );
-        }
-
-        let _ = writeln!(out, "    <content type=\"html\">{content}</content>");
+        let _ = writeln!(
+            out,
+            "    <content type=\"html\">{}</content>",
+            // `type="html"` carries *escaped* markup (RFC 4287 4.1.3.3): the
+            // fragment's own text is escaped once as HTML, then the whole
+            // fragment once more as XML. A reader decoding the element text
+            // gets the fragment back with the reason still inert - which
+            // matters, since a failure reason can quote a hostile target.
+            xml_escape(&entry_html(incident))
+        );
         let _ = writeln!(out, "  </entry>");
     }
 
     let _ = writeln!(out, "</feed>");
     out
+}
+
+/// The HTML body of one feed entry, its text escaped.
+fn entry_html(incident: &Incident) -> String {
+    let mut content = String::new();
+    if let Some(error) = &incident.error {
+        let _ = write!(
+            content,
+            "<p><strong>Error:</strong> {}</p>",
+            xml_escape(error)
+        );
+    }
+    if let Some(cause) = &incident.cause {
+        let _ = write!(
+            content,
+            "<p><strong>Caused by:</strong> {}</p>",
+            xml_escape(cause)
+        );
+    }
+    if let Some(duration_s) = incident.duration_s {
+        let _ = write!(
+            content,
+            "<p><strong>Duration:</strong> {}</p>",
+            format_duration(duration_s)
+        );
+    }
+    if let Some(note) = &incident.note {
+        let _ = write!(
+            content,
+            "<p><strong>Note:</strong> {}</p>",
+            xml_escape(note)
+        );
+    }
+    content
 }
 
 fn format_utc(timestamp: i64) -> String {
@@ -345,9 +369,55 @@ mod tests {
     fn atom_escapes_host_derived_base_url() {
         // base_url comes from the client's Host header; a crafted one must not
         // break out of the href attribute or inject feed elements.
-        let xml = render_atom(&[], &HashMap::new(), "http://x\"><inject");
+        let xml = render_atom(&[], &HashMap::new(), "http://x\"><inject", "Status");
         assert!(!xml.contains("\"><inject"), "{xml}");
         assert!(xml.contains("&quot;&gt;&lt;inject"), "{xml}");
+    }
+
+    #[test]
+    fn atom_content_is_escaped_html_with_permalinks() {
+        let incident = Incident {
+            id: 7,
+            monitor_id: "web".to_owned(),
+            started_at: 1000,
+            ended_at: None,
+            duration_s: None,
+            cause: None,
+            impacted: None,
+            error: Some("HTTP 500: <script>alert(1)</script>".to_owned()),
+            note: None,
+            snapshot: None,
+            event: None,
+            vantage: None,
+            created_at: 1000,
+        };
+        let names = HashMap::from([("web".to_owned(), "Web".to_owned())]);
+        let xml = render_atom(
+            &[incident],
+            &names,
+            "https://status.example",
+            "Acme <Status>",
+        );
+        // The feed title follows the page title (escaped).
+        assert!(
+            xml.contains("<title>Acme &lt;Status&gt; - incident history</title>"),
+            "{xml}"
+        );
+        // No raw child elements inside `type="html"` content: the markup is
+        // escaped once, the reason's own markup twice.
+        assert!(xml.contains("&lt;p&gt;&lt;strong&gt;Error:"), "{xml}");
+        assert!(xml.contains("&amp;lt;script&amp;gt;"), "{xml}");
+        assert!(!xml.contains("<p>") && !xml.contains("<script>"), "{xml}");
+        // Ids and links point at the real post-mortem route.
+        assert!(
+            xml.contains("<id>https://status.example/incident/7</id>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<link href=\"https://status.example/incident/7\" rel=\"alternate\"/>"),
+            "{xml}"
+        );
+        assert!(!xml.contains("/incidents/"), "{xml}");
     }
 
     #[test]

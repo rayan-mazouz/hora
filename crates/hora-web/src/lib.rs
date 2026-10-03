@@ -1,5 +1,7 @@
 //! Web layer: the server-rendered status page and the JSON API.
 
+mod auth;
+mod cache;
 mod error;
 mod flood;
 mod handlers;
@@ -11,28 +13,33 @@ mod report;
 mod routes;
 mod summary;
 mod text;
+mod visibility;
 
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use arc_swap::ArcSwapOption;
 use axum::http::{HeaderName, Request};
 use hora_core::config::Config;
 use hora_core::notifications::{self, Notifiers};
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::watch;
 use tower_governor::errors::GovernorError;
 use tower_governor::key_extractor::{KeyExtractor, PeerIpKeyExtractor};
 
+use crate::cache::{Cache, Cached, Memo, ProbeClients};
 use crate::summary::{Summary, build_summary};
+use crate::visibility::{Audience, Visibility};
 
 pub use routes::router;
 
 pub(crate) const SECONDS_PER_HOUR: i64 = 3_600;
 pub(crate) const MAX_LATENCY_HOURS: i64 = 24 * 30;
 pub(crate) const SUMMARY_CACHE_TTL: Duration = Duration::from_secs(5);
+/// How long a rendered heatmap or a built monthly report is reused: both scan
+/// weeks of history and change slowly, and both are reachable anonymously.
+pub(crate) const VIEW_CACHE_TTL: Duration = Duration::from_mins(1);
 /// Cap on a pushed heartbeat message, so the endpoint can't bloat the database.
 pub(crate) const MAX_PUSH_MSG_CHARS: usize = 500;
 /// Cap on a pushed alert's title (matches the announcement-title cap).
@@ -52,37 +59,13 @@ pub(crate) const SPARK_BUCKETS: i64 = 120;
 pub(crate) const FAVICON_SVG: &str = include_str!("../assets/favicon.svg");
 pub(crate) const FONT_WOFF2: &[u8] = include_bytes!("../assets/CalSans-SemiBold.woff2");
 
-// The page is fully self-contained (inline styles, same-origin font/icon, no JS).
+// The page is fully self-contained (inline styles, same-origin font/icon, no
+// JS). No `data:` images: nothing embeds one.
 pub(crate) const CSP: &str = "default-src 'self'; script-src 'none'; style-src 'self' 'unsafe-inline'; \
-     img-src 'self' data:; font-src 'self'; base-uri 'none'; frame-ancestors 'none'";
-
-/// A cached summary, valid while the config is unchanged and within the TTL.
-pub(crate) struct Cached {
-    at: Instant,
-    config: Arc<Config>,
-    summary: Arc<Summary>,
-}
-
-/// Lock-free reads (one slot per audience) plus a single-flight build gate.
-/// The `public` slot caches the summary filtered to public monitors; the
-/// `full` slot the unfiltered view served to authenticated callers (admin
-/// page views, Prometheus scrapes) - both bust on config reload.
-#[derive(Default)]
-pub(crate) struct Cache {
-    public: ArcSwapOption<Cached>,
-    full: ArcSwapOption<Cached>,
-    build: Mutex<()>,
-}
-
-impl Cache {
-    /// Drop both cached views so the next request rebuilds them - used when a
-    /// write (pinning or clearing an announcement) must show up immediately
-    /// instead of after the TTL.
-    pub(crate) fn invalidate(&self) {
-        self.public.store(None);
-        self.full.store(None);
-    }
-}
+     img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'";
+/// Powerful browser features the pages never use, denied outright.
+pub(crate) const PERMISSIONS_POLICY: &str = "accelerometer=(), camera=(), geolocation=(), \
+     gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()";
 
 /// Shared application state handed to every handler.
 #[derive(Clone)]
@@ -90,6 +73,14 @@ pub struct AppState {
     pool: SqlitePool,
     config: watch::Receiver<Arc<Config>>,
     cache: Arc<Cache>,
+    /// Rendered heatmaps by monitor id (the image does not depend on the
+    /// audience; visibility is checked before the lookup).
+    heatmaps: Arc<Memo<String, String>>,
+    /// Built monthly reports by month (audience-independent: rows are
+    /// filtered per request).
+    reports: Arc<Memo<String, hora_core::report::MonthReport>>,
+    /// Peer-probe clients by proxy, reused across `/api/peer/probe` calls.
+    probe_clients: Arc<ProbeClients>,
     /// The scheduler's liveness beacon, written by the monitor loops and read by
     /// `/healthz` to report whether the scheduler is still ticking.
     last_tick: Arc<AtomicU64>,
@@ -117,6 +108,9 @@ impl AppState {
             pool,
             config,
             cache: Arc::new(Cache::default()),
+            heatmaps: Arc::new(Memo::new(VIEW_CACHE_TTL)),
+            reports: Arc::new(Memo::new(VIEW_CACHE_TTL)),
+            probe_clients: Arc::new(ProbeClients::default()),
             last_tick,
             notifier,
             flood: Arc::new(flood::Flood::default()),
@@ -183,52 +177,51 @@ impl ConfiguredIp {
 
 // --- Summary cache (lock-free read + single-flight build) ----------------
 
-/// Return a fresh-enough cached summary, or build exactly one (single-flight)
-/// and cache it. `full` selects the unfiltered view (private monitors
-/// included) served to authenticated callers. The cache busts immediately
-/// when the config is reloaded.
+/// Return a fresh-enough cached summary for `audience`, or build exactly one
+/// (single-flight) and cache it. The cache busts immediately when the config
+/// is reloaded.
 pub(crate) async fn summary_for(
     pool: &SqlitePool,
     config: &Arc<Config>,
     cache: &Cache,
-    full: bool,
+    audience: &Audience,
     notifier: &Notifiers,
     vantage: &hora_core::vantage::VantageMap,
 ) -> Arc<Summary> {
-    let slot = if full { &cache.full } else { &cache.public };
-    if let Some(fresh) = fresh_summary(slot, config) {
+    let cached = || match audience {
+        Audience::Public => cache::fresh(&cache.public, config, SUMMARY_CACHE_TTL),
+        Audience::Operator => cache::fresh(&cache.operator, config, SUMMARY_CACHE_TTL),
+        Audience::Group(group) => cache.groups.get(group, config),
+    };
+    if let Some(fresh) = cached() {
         return fresh;
     }
     // Only one task builds at a time; the rest wait and reuse the result.
     let _build = cache.build.lock().await;
-    if let Some(fresh) = fresh_summary(slot, config) {
+    if let Some(fresh) = cached() {
         return fresh;
     }
-    // Channel health is read live from the dispatcher — only for the
-    // authenticated view, and only on a cache miss (every 5s at most).
-    let health = if full {
+    // Channel health is read live from the dispatcher - only for the
+    // operator's view, and only on a cache miss (every 5s at most).
+    let health = if *audience == Audience::Operator {
         notifications::health_snapshot(notifier)
     } else {
         Vec::new()
     };
     // The poller's last snapshot: a lock-free read, never the network.
     let vantage = vantage.load_full();
-    let summary = Arc::new(build_summary(pool, config, full, &health, &vantage).await);
-    slot.store(Some(Arc::new(Cached {
-        at: Instant::now(),
-        config: Arc::clone(config),
-        summary: Arc::clone(&summary),
-    })));
+    let visibility = Visibility::new(config, audience);
+    let summary = Arc::new(build_summary(pool, config, &visibility, &health, &vantage).await);
+    match audience {
+        Audience::Public => cache
+            .public
+            .store(Some(Arc::new(Cached::new(config, Arc::clone(&summary))))),
+        Audience::Operator => cache
+            .operator
+            .store(Some(Arc::new(Cached::new(config, Arc::clone(&summary))))),
+        Audience::Group(group) => cache.groups.insert(group, config, Arc::clone(&summary)),
+    }
     summary
-}
-
-pub(crate) fn fresh_summary(
-    slot: &ArcSwapOption<Cached>,
-    config: &Arc<Config>,
-) -> Option<Arc<Summary>> {
-    let cached = slot.load_full()?;
-    let fresh = Arc::ptr_eq(&cached.config, config) && cached.at.elapsed() < SUMMARY_CACHE_TTL;
-    fresh.then(|| Arc::clone(&cached.summary))
 }
 
 #[cfg(test)]

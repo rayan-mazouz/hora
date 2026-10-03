@@ -1,5 +1,6 @@
 //! HTTP endpoint handlers and their request/response types.
 
+use std::future::Future;
 use std::sync::{Arc, LazyLock};
 
 use askama::Template;
@@ -11,12 +12,14 @@ use badgelib::Style;
 use chrono::Utc;
 use serde::Deserialize;
 use utoipa::OpenApi;
+use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme};
 
 use hora_core::config::{Config, Kind, Monitor};
 use hora_core::db::{self, Point};
 use hora_core::notifications::{AlertSeverity, Event};
 use hora_core::peer::{HealthReport, PeerSeen};
 
+use crate::auth::{Operator, Viewer, authorize_peer, ct_eq, push_token};
 use crate::error::AppError;
 use crate::flood;
 use crate::history;
@@ -26,6 +29,7 @@ use crate::summary::{
     DayCell, IncidentView, MaintenanceView, MonitorView, StatusTemplate, Summary, format_permille,
 };
 use crate::text;
+use crate::visibility::{Audience, Visibility};
 use crate::{
     AppState, FAVICON_SVG, FONT_WOFF2, MAX_ALERT_DEDUP_CHARS, MAX_ALERT_TAG_CHARS, MAX_ALERT_TAGS,
     MAX_ALERT_TITLE_CHARS, MAX_LATENCY_HOURS, MAX_LATENCY_POINTS, MAX_PUSH_MSG_CHARS,
@@ -44,8 +48,9 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
 #[openapi(
     info(
         title = "Hora API",
-        description = "Read-only JSON API of a Hora uptime monitor."
+        description = "JSON API of a Hora uptime monitor: read-only status views, plus token-gated writes (heartbeats, alerts, silences, announcements, events) and the peer-mesh endpoints."
     ),
+    modifiers(&SecuritySchemes),
     paths(
         summary_json,
         latency_json,
@@ -86,14 +91,47 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
 )]
 struct ApiDoc;
 
+/// The two credentials the API understands: the viewer/operator token as
+/// `Authorization: Bearer`, and an item token (push monitor, alerting
+/// monitor, mesh peer) as `X-Push-Token`.
+struct SecuritySchemes;
+
+impl utoipa::Modify for SecuritySchemes {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "bearer",
+            SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+        );
+        components.add_security_scheme(
+            "push_token",
+            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new(
+                crate::auth::PUSH_TOKEN_HEADER,
+            ))),
+        );
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/healthz",
-    responses((status = 200, description = "Node health and its view of watched peers", body = HealthReport))
+    responses(
+        (status = 200, description = "Node healthy; its view of watched peers", body = HealthReport),
+        (status = 503, description = "Scheduler stalled or database unreachable (same body)", body = HealthReport)
+    )
 )]
-pub(crate) async fn healthz(State(state): State<AppState>) -> Json<HealthReport> {
+pub(crate) async fn healthz(State(state): State<AppState>) -> Response {
     let config = state.config.borrow().clone();
-    Json(hora_core::peer::report(&state.pool, &config, &state.last_tick).await)
+    let report = hora_core::peer::report(&state.pool, &config, &state.last_tick).await;
+    // A degraded node answers 503 so plain health checks (Docker's
+    // HEALTHCHECK, a load balancer) notice; the body is unchanged for the
+    // peers and keyword monitors that read it.
+    let status = if report.status == "ok" {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(report)).into_response()
 }
 
 pub(crate) async fn favicon() -> impl IntoResponse {
@@ -132,103 +170,76 @@ pub(crate) async fn openapi() -> Response {
         .into_response()
 }
 
-/// Fetch (or build) the cached summary from the request state. Infallible: a
-/// failing monitor degrades to an `unknown` card rather than failing the page.
-/// `full` selects the authenticated view that includes private monitors; both
-/// views are cached (one slot each).
-pub(crate) async fn state_summary(state: AppState, full: bool) -> Arc<Summary> {
-    let AppState {
-        pool,
+/// Fetch (or build) the cached summary for `audience`. Infallible: a failing
+/// monitor degrades to an `unknown` card rather than failing the page.
+pub(crate) async fn state_summary(
+    state: &AppState,
+    config: &Arc<Config>,
+    audience: &Audience,
+) -> Arc<Summary> {
+    summary_for(
+        &state.pool,
         config,
-        cache,
-        notifier,
-        vantage,
-        ..
-    } = state;
-    let config = config.borrow().clone();
-    summary_for(&pool, &config, &cache, full, &notifier, &vantage).await
+        &state.cache,
+        audience,
+        &state.notifier,
+        &state.vantage,
+    )
+    .await
 }
 
-/// Whether the request carries the configured viewer token, as
-/// `Authorization: Bearer <token>` or `?token=`. With no token configured
-/// nothing is private (config validation enforces that), so every caller gets
-/// the public view and the answer is simply `false`.
-pub(crate) fn is_authenticated(
-    headers: &HeaderMap,
-    query_token: Option<&str>,
-    config: &Config,
-) -> bool {
-    let Some(expected) = &config.server.auth_token else {
-        return false;
-    };
-    let provided = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .or(query_token);
-    provided.is_some_and(|token| ct_eq(token, expected.as_ref()))
-}
-
-pub(crate) async fn page(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
-) -> Result<Response, AppError> {
-    let config = state.config.borrow().clone();
-    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
-    let summary = state_summary(state, authenticated).await;
-
-    // Text clients (curl, wget, or an explicit text/plain Accept) get the
-    // aligned plain-text rendering; everyone else the HTML page.
-    let wants_text = headers
+/// Text clients (curl, wget, or an explicit text/plain Accept) get the aligned
+/// plain-text rendering; everyone else the HTML page.
+fn wants_text(headers: &HeaderMap) -> bool {
+    headers
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|ua| ua.starts_with("curl/") || ua.starts_with("Wget/"))
         || headers
             .get(header::ACCEPT)
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|accept| accept.contains("text/plain") && !accept.contains("text/html"));
+            .is_some_and(|accept| accept.contains("text/plain") && !accept.contains("text/html"))
+}
 
-    if wants_text {
-        let body = text::render(&summary);
+/// Render a status summary as the HTML page or, for text clients, plain text.
+fn status_response(headers: &HeaderMap, summary: &Summary) -> Result<Response, AppError> {
+    if wants_text(headers) {
+        let body = text::render(summary);
         Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response())
     } else {
-        let html = StatusTemplate {
-            summary: summary.as_ref(),
-        }
-        .render()?;
+        let html = StatusTemplate { summary }.render()?;
         Ok(Html(html).into_response())
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct AuthQuery {
-    #[serde(default)]
-    pub(crate) token: Option<String>,
+pub(crate) async fn page(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let summary = state_summary(&state, &viewer.config, &viewer.audience).await;
+    status_response(&headers, &summary)
 }
 
 /// The per-group status page (`/status/{group}`): the monitors of one display
 /// group, nothing else - lightweight multi-tenancy for an operator hosting
 /// several clients' services on one Hora. Anonymous viewers get the group's
-/// public monitors; the global viewer token, or this group's own
-/// `server.group_tokens` entry, reveals the group's full view (and only this
-/// group's). An unknown group - or a fully private one viewed without a
-/// token - answers 404, exactly like a missing page.
+/// public monitors; this group's own `server.group_tokens` entry reveals the
+/// group's full view (private monitors, full failure detail) but never the
+/// operator's streams (deploy markers) nor another group's private names; the
+/// global viewer token is the operator. An unknown group - or a fully private
+/// one viewed without a token - answers 404, exactly like a missing page.
 pub(crate) async fn group_page(
     State(state): State<AppState>,
     Path(group): Path<String>,
+    viewer: Viewer,
     headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
 ) -> Result<Response, AppError> {
-    let config = state.config.borrow().clone();
-    let token = auth_query.token.as_deref();
-    let full = is_authenticated(&headers, token, &config)
-        || group_token_matches(&headers, token, &config, &group);
-    let summary = state_summary(state, full).await;
-    let view = crate::summary::for_group(&summary, &config, &group)
+    let audience = viewer.audience_for_group(&group);
+    let summary = state_summary(&state, &viewer.config, &audience).await;
+    let view = crate::summary::for_group(&summary, &viewer.config, &group)
         .ok_or(AppError::NotFound("unknown group"))?;
-    let html = StatusTemplate { summary: &view }.render()?;
-    Ok(Html(html).into_response())
+    status_response(&headers, &view)
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,8 +254,6 @@ pub(crate) struct AnnounceQuery {
     /// Auto-expiry as a duration (`4h`, `90m`); absent = until cleared.
     #[serde(default)]
     until: Option<String>,
-    #[serde(default)]
-    token: Option<String>,
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
@@ -263,8 +272,9 @@ pub(crate) struct AnnounceResponse {
         ("body" = Option<String>, Query, description = "Banner body"),
         ("severity" = Option<String>, Query, description = "info (default), warning, critical or resolved"),
         ("until" = Option<String>, Query, description = "Auto-expiry as a duration (e.g. 4h)"),
-        ("token" = Option<String>, Query, description = "Viewer token (or Authorization: Bearer)")
+        ("token" = Option<String>, Query, description = "Viewer token (prefer Authorization: Bearer)")
     ),
+    security(("bearer" = [])),
     responses(
         (status = 200, description = "Announcement pinned to the status page", body = AnnounceResponse),
         (status = 400, description = "Empty title, unknown severity or unparseable duration"),
@@ -273,20 +283,10 @@ pub(crate) struct AnnounceResponse {
 )]
 pub(crate) async fn announce(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    // Publishing to every visitor is an operator action, like /api/silence.
+    _operator: Operator,
     Query(query): Query<AnnounceQuery>,
 ) -> Result<Json<AnnounceResponse>, AppError> {
-    let config = state.config.borrow().clone();
-    // Publishing to every visitor is an operator action: like /api/silence,
-    // the endpoint is closed without a configured viewer token.
-    if config.server.auth_token.is_none()
-        || !is_authenticated(&headers, query.token.as_deref(), &config)
-    {
-        return Err(AppError::Unauthorized(
-            "announcing requires server.auth_token and a matching token",
-        ));
-    }
-
     let title: String = query.title.trim().chars().take(200).collect();
     if title.is_empty() {
         return Err(AppError::BadRequest("title must not be empty"));
@@ -327,7 +327,8 @@ pub(crate) struct AnnounceClearResponse {
 #[utoipa::path(
     delete,
     path = "/api/announce",
-    params(("token" = Option<String>, Query, description = "Viewer token (or Authorization: Bearer)")),
+    params(("token" = Option<String>, Query, description = "Viewer token (prefer Authorization: Bearer)")),
+    security(("bearer" = [])),
     responses(
         (status = 200, description = "Every ad-hoc announcement removed", body = AnnounceClearResponse),
         (status = 401, description = "Missing or wrong token, or no auth_token configured")
@@ -335,17 +336,8 @@ pub(crate) struct AnnounceClearResponse {
 )]
 pub(crate) async fn announce_clear(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
+    _operator: Operator,
 ) -> Result<Json<AnnounceClearResponse>, AppError> {
-    let config = state.config.borrow().clone();
-    if config.server.auth_token.is_none()
-        || !is_authenticated(&headers, auth_query.token.as_deref(), &config)
-    {
-        return Err(AppError::Unauthorized(
-            "announcing requires server.auth_token and a matching token",
-        ));
-    }
     let cleared = db::clear_announcements(&state.pool, Utc::now().timestamp()).await?;
     state.cache.invalidate();
     tracing::info!(cleared, "announcements cleared via API");
@@ -356,8 +348,6 @@ pub(crate) async fn announce_clear(
 pub(crate) struct EventQuery {
     /// The event's title (required, bounded), e.g. `deploy api v2.3`.
     title: String,
-    #[serde(default)]
-    token: Option<String>,
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
@@ -370,8 +360,9 @@ pub(crate) struct EventResponse {
     path = "/api/event",
     params(
         ("title" = String, Query, description = "Event title, e.g. `deploy api v2.3`"),
-        ("token" = Option<String>, Query, description = "Viewer token (or Authorization: Bearer)")
+        ("token" = Option<String>, Query, description = "Viewer token (prefer Authorization: Bearer)")
     ),
+    security(("bearer" = [])),
     responses(
         (status = 200, description = "Event marker recorded", body = EventResponse),
         (status = 400, description = "Empty title"),
@@ -380,19 +371,11 @@ pub(crate) struct EventResponse {
 )]
 pub(crate) async fn post_event(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    // Recording a change marker is an operator action, same gesture as a
+    // silence.
+    _operator: Operator,
     Query(query): Query<EventQuery>,
 ) -> Result<Json<EventResponse>, AppError> {
-    let config = state.config.borrow().clone();
-    // Recording a change marker is an operator action, same gesture as a
-    // silence: closed without a configured viewer token.
-    if config.server.auth_token.is_none()
-        || !is_authenticated(&headers, query.token.as_deref(), &config)
-    {
-        return Err(AppError::Unauthorized(
-            "recording events requires server.auth_token and a matching token",
-        ));
-    }
     let title: String = query
         .title
         .trim()
@@ -403,8 +386,8 @@ pub(crate) async fn post_event(
         return Err(AppError::BadRequest("title must not be empty"));
     }
     let id = db::insert_event(&state.pool, &title).await?;
-    // The marker should appear on the (authenticated) sparklines now, not
-    // when the summary cache rolls.
+    // The marker should appear on the operator's sparklines now, not when the
+    // summary cache rolls.
     state.cache.invalidate();
     tracing::info!(%title, "event marker recorded via API");
     Ok(Json(EventResponse { id }))
@@ -429,9 +412,12 @@ pub(crate) struct ReportQuery {
     /// `/status/{group}` page, and what an operator hands a client.
     #[serde(default)]
     group: Option<String>,
-    #[serde(default)]
-    token: Option<String>,
 }
+
+/// How far back a monthly report may reach: the daily aggregates it reads
+/// live a year (hora-core's `AGGREGATE_RETENTION_DAYS`); an older month would
+/// only be an empty - and needlessly expensive - report.
+const REPORT_RETENTION_DAYS: i64 = 365;
 
 /// The printable monthly SLA report (`/report/2026-05`, optionally
 /// `?group=X`). Anonymous viewers get the public monitors; the viewer token
@@ -442,26 +428,39 @@ pub(crate) struct ReportQuery {
 pub(crate) async fn report_page(
     State(state): State<AppState>,
     Path(month): Path<String>,
-    headers: HeaderMap,
+    viewer: Viewer,
     Query(query): Query<ReportQuery>,
 ) -> Result<Html<String>, AppError> {
-    let config = state.config.borrow().clone();
-    let token = query.token.as_deref();
-    let full = is_authenticated(&headers, token, &config)
-        || query
-            .group
-            .as_deref()
-            .is_some_and(|group| group_token_matches(&headers, token, &config, group));
+    let config = &viewer.config;
     // Validate the month *before* building, so a malformed path is a clean
     // 400 and never reaches the database.
-    if hora_core::report::month_bounds(&month).is_none() {
+    let Some((_, end)) = hora_core::report::month_bounds(&month) else {
         return Err(AppError::BadRequest(
             "month must be YYYY-MM and not in the future",
         ));
+    };
+    if end <= Utc::now().timestamp() - REPORT_RETENTION_DAYS * hora_core::SECONDS_PER_DAY {
+        return Err(AppError::BadRequest(
+            "month is older than the retained history (12 months)",
+        ));
     }
-    let report = hora_core::report::build(&state.pool, &config, &month).await?;
+    let audience = match query.group.as_deref() {
+        Some(group) => viewer.audience_for_group(group),
+        None => viewer.audience.clone(),
+    };
+    let visibility = Visibility::new(config, &audience);
+
+    // The built report does not depend on the audience (rows are filtered
+    // below), so one copy per month serves every viewer for a minute.
+    let report = if let Some(report) = state.reports.get(&month, config) {
+        report
+    } else {
+        let report = Arc::new(hora_core::report::build(&state.pool, config, &month).await?);
+        state.reports.insert(&month, config, Arc::clone(&report));
+        report
+    };
     let groups = crate::report::group_rows(&report, |row| {
-        (full || row.public)
+        visibility.can_see(&row.id)
             && query
                 .group
                 .as_deref()
@@ -486,49 +485,24 @@ pub(crate) async fn report_page(
     Ok(Html(html))
 }
 
-/// Whether the request carries the group's own viewer token (Bearer or
-/// `?token=`). A group token authenticates *that group's page only* - it is
-/// never accepted by [`is_authenticated`], so it reveals nothing else.
-fn group_token_matches(
-    headers: &HeaderMap,
-    query_token: Option<&str>,
-    config: &Config,
-    group: &str,
-) -> bool {
-    let Some(expected) = config.server.group_tokens.get(group) else {
-        return false;
-    };
-    let provided = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .or(query_token);
-    provided.is_some_and(|token| ct_eq(token, expected.as_ref()))
-}
-
 #[utoipa::path(
     get,
     path = "/api/summary",
+    security((), ("bearer" = [])),
     responses((status = 200, description = "Status of every monitor", body = Summary))
 )]
 pub(crate) async fn summary_json(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
+    viewer: Viewer,
 ) -> Json<Arc<Summary>> {
-    let config = state.config.borrow().clone();
-    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
-    Json(state_summary(state, authenticated).await)
+    Json(state_summary(&state, &viewer.config, &viewer.audience).await)
 }
 
 pub(crate) async fn metrics_prometheus(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
+    viewer: Viewer,
 ) -> impl IntoResponse {
-    let config = state.config.borrow().clone();
-    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
-    let summary = state_summary(state, authenticated).await;
+    let summary = state_summary(&state, &viewer.config, &viewer.audience).await;
     let body = metrics::render(&summary);
     (
         [(
@@ -539,81 +513,65 @@ pub(crate) async fn metrics_prometheus(
     )
 }
 
-/// Recent incidents restricted to what the caller may see: incidents of
-/// private monitors - and of monitors no longer in the config - only reach
-/// authenticated viewers. For anonymous viewers the surviving incidents are
-/// also sanitized: failure reasons collapse to their safe category (the stored
-/// reason carries body snippets and DNS answers) unless the monitor opts in
-/// with `public_error_detail`, and topology annotations drop any name that is
-/// not a public monitor's.
-async fn visible_incidents(
-    pool: &sqlx::SqlitePool,
-    config: &Config,
-    authenticated: bool,
+/// The most rows a visibility-filtered list scans to fill its page: the
+/// newest rows may all belong to private monitors, so the scan widens until
+/// `limit` visible rows are found - bounded, since the endpoints are public.
+const MAX_VISIBILITY_SCAN: i64 = 5_000;
+
+/// Collect up to `limit` rows the audience may see, filtering *before*
+/// truncating: `fetch(n)` returns the newest `n` rows, `filter` keeps (and
+/// sanitizes) the visible ones. The window widens 4x per round until enough
+/// rows are visible, the table is exhausted, or [`MAX_VISIBILITY_SCAN`] is hit.
+async fn collect_visible<T, Fut>(
     limit: i64,
-) -> Result<Vec<db::Incident>, AppError> {
-    let mut incidents = db::recent_incidents(pool, limit).await?;
-    if !authenticated {
-        let visible: std::collections::HashSet<&str> = config
-            .monitors
-            .iter()
-            .filter(|monitor| monitor.public)
-            .map(|monitor| monitor.id.as_str())
-            .collect();
-        incidents.retain(|incident| visible.contains(incident.monitor_id.as_str()));
-        for incident in &mut incidents {
-            sanitize_incident(incident, config);
+    mut fetch: impl FnMut(i64) -> Fut,
+    filter: impl Fn(&mut Vec<T>),
+) -> Result<Vec<T>, AppError>
+where
+    Fut: Future<Output = sqlx::Result<Vec<T>>>,
+{
+    let wanted = usize::try_from(limit).unwrap_or(0);
+    let mut window = limit.max(1);
+    loop {
+        let mut rows = fetch(window).await?;
+        let exhausted = usize::try_from(window).is_ok_and(|window| rows.len() < window);
+        filter(&mut rows);
+        if rows.len() >= wanted || exhausted || window >= MAX_VISIBILITY_SCAN {
+            rows.truncate(wanted);
+            return Ok(rows);
         }
+        window = window.saturating_mul(4).min(MAX_VISIBILITY_SCAN);
     }
-    Ok(incidents)
 }
 
-/// Collapse one (public) incident's operator detail for an anonymous viewer:
-/// the failure reason falls back to its safe category, the captured response,
-/// the correlated event ("deploy api v2.3") and the multi-vantage verdict
-/// (which names the mesh's nodes) are dropped - unless the monitor opted in
-/// with `public_error_detail` - and topology annotations keep only names that
-/// belong to public monitors. Operator notes (`hora annotate`) deliberately
-/// survive: they are written *for* visitors, unlike the captured detail.
-fn sanitize_incident(incident: &mut db::Incident, config: &Config) {
-    let public: Vec<&hora_core::config::Monitor> = config
-        .monitors
-        .iter()
-        .filter(|monitor| monitor.public)
-        .collect();
-    // cause/impacted store display names; allow ids too in case older rows
-    // recorded those.
-    let nameable: std::collections::HashSet<&str> = public
-        .iter()
-        .flat_map(|monitor| [monitor.id.as_str(), monitor.name.as_str()])
-        .collect();
-    let detailed = public
-        .iter()
-        .any(|monitor| monitor.id == incident.monitor_id && monitor.public_error_detail);
-    if !detailed {
-        incident.error = incident
-            .error
-            .as_deref()
-            .map(|reason| hora_core::probe::public_reason(reason).to_owned());
-        // The captured response (headers, body start) is operator detail
-        // like the full reason: same opt-in to publish it.
-        incident.snapshot = None;
-        incident.event = None;
-        incident.vantage = None;
-    }
-    incident.cause = incident
-        .cause
-        .take()
-        .filter(|cause| nameable.contains(cause.as_str()));
-    // `impacted` is a JSON list of names; keep the public ones only.
-    incident.impacted = incident.impacted.as_deref().and_then(|json| {
-        let names: Vec<String> = serde_json::from_str::<Vec<String>>(json)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|name| nameable.contains(name.as_str()))
-            .collect();
-        (!names.is_empty()).then(|| serde_json::to_string(&names).unwrap_or_default())
-    });
+/// Recent incidents restricted to (and sanitized for) what the audience may
+/// see - see [`Visibility::sanitize_incident`].
+async fn visible_incidents(
+    pool: &sqlx::SqlitePool,
+    visibility: &Visibility<'_>,
+    limit: i64,
+) -> Result<Vec<db::Incident>, AppError> {
+    collect_visible(
+        limit,
+        |window| db::recent_incidents(pool, window),
+        |rows| visibility.filter_incidents(rows),
+    )
+    .await
+}
+
+/// Recent pushed alerts restricted to (and sanitized for) what the audience
+/// may see - see [`Visibility::sanitize_alert`].
+async fn visible_pushed_alerts(
+    pool: &sqlx::SqlitePool,
+    visibility: &Visibility<'_>,
+    limit: i64,
+) -> Result<Vec<db::PushedAlert>, AppError> {
+    collect_visible(
+        limit,
+        |window| db::recent_pushed_alerts(pool, window),
+        |rows| visibility.filter_alerts(rows),
+    )
+    .await
 }
 
 /// The auto-generated post-mortem page (`/incident/{id}`): everything the
@@ -625,28 +583,22 @@ fn sanitize_incident(incident: &mut db::Incident, config: &Config) {
 pub(crate) async fn incident_page(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-    headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
+    viewer: Viewer,
 ) -> Result<Html<String>, AppError> {
-    let config = state.config.borrow().clone();
-    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
+    let config = &viewer.config;
+    let visibility = Visibility::new(config, &viewer.audience);
     let mut incident = db::incident_by_id(&state.pool, id)
         .await?
         .ok_or(AppError::NotFound("unknown incident"))?;
-
-    let monitor = config
-        .monitors
-        .iter()
-        .find(|monitor| monitor.id == incident.monitor_id);
-    // Not in the config anymore, or private: only the operator sees it.
-    if !authenticated && !monitor.is_some_and(|monitor| monitor.public) {
+    if !visibility.can_see(&incident.monitor_id) {
         return Err(AppError::NotFound("unknown incident"));
     }
-    if !authenticated {
-        sanitize_incident(&mut incident, &config);
-    }
+    visibility.sanitize_incident(&mut incident);
 
-    let monitor_name = monitor
+    let monitor_name = config
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == incident.monitor_id)
         .map_or(incident.monitor_id.as_str(), |monitor| {
             monitor.name.as_str()
         })
@@ -655,51 +607,12 @@ pub(crate) async fn incident_page(
     let html = crate::history::IncidentTemplate {
         title: config.page.title.clone(),
         monitor: monitor_name,
-        row: crate::history::incident_rows(
-            std::slice::from_ref(&incident),
-            &monitor_names(&config),
-        )
-        .remove(0),
+        row: crate::history::incident_rows(std::slice::from_ref(&incident), &monitor_names(config))
+            .remove(0),
         markdown,
     }
     .render()?;
     Ok(Html(html))
-}
-
-/// Recent pushed alerts restricted to what the caller may see, mirroring
-/// [`visible_incidents`]: anonymous viewers get only public monitors' alerts,
-/// and the free-form message (which can carry producer detail like file paths)
-/// is collapsed unless the monitor opted in with `public_error_detail`. The
-/// title and severity always show (a short headline, like an incident's
-/// existence). Authenticated viewers see everything.
-async fn visible_pushed_alerts(
-    pool: &sqlx::SqlitePool,
-    config: &Config,
-    authenticated: bool,
-    limit: i64,
-) -> Result<Vec<db::PushedAlert>, AppError> {
-    let mut alerts = db::recent_pushed_alerts(pool, limit).await?;
-    if !authenticated {
-        let public: std::collections::HashSet<&str> = config
-            .monitors
-            .iter()
-            .filter(|monitor| monitor.public)
-            .map(|monitor| monitor.id.as_str())
-            .collect();
-        let detailed: std::collections::HashSet<&str> = config
-            .monitors
-            .iter()
-            .filter(|monitor| monitor.public && monitor.public_error_detail)
-            .map(|monitor| monitor.id.as_str())
-            .collect();
-        alerts.retain(|alert| public.contains(alert.monitor_id.as_str()));
-        for alert in &mut alerts {
-            if !detailed.contains(alert.monitor_id.as_str()) {
-                alert.message.clear();
-            }
-        }
-    }
-    Ok(alerts)
 }
 
 /// Map of monitor id to display name, for rendering incidents.
@@ -713,15 +626,14 @@ fn monitor_names(config: &Config) -> std::collections::HashMap<String, String> {
 
 pub(crate) async fn history_page(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
+    viewer: Viewer,
 ) -> Result<Html<String>, AppError> {
-    let config = state.config.borrow().clone();
-    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
-    let incidents = visible_incidents(&state.pool, &config, authenticated, 100).await?;
-    let pushed_alerts = visible_pushed_alerts(&state.pool, &config, authenticated, 100).await?;
-    // Event markers are operator info (deploy titles): authenticated only.
-    let events = if authenticated {
+    let config = &viewer.config;
+    let visibility = Visibility::new(config, &viewer.audience);
+    let incidents = visible_incidents(&state.pool, &visibility, 100).await?;
+    let pushed_alerts = visible_pushed_alerts(&state.pool, &visibility, 100).await?;
+    // Event markers are operator info (deploy titles).
+    let events = if visibility.sees_operator_streams() {
         db::recent_events(&state.pool, 100).await?
     } else {
         Vec::new()
@@ -731,26 +643,20 @@ pub(crate) async fn history_page(
     let heatmaps = config
         .monitors
         .iter()
-        .filter(|monitor| (monitor.public || authenticated) && monitor.kind != Kind::Push)
+        .filter(|monitor| visibility.can_see_monitor(monitor) && monitor.kind != Kind::Push)
         .map(|monitor| history::HeatmapRef {
             id: monitor.id.clone(),
             name: monitor.name.clone(),
         })
         .collect();
-    let token_query = auth_query
-        .token
-        .as_deref()
-        .filter(|_| authenticated)
-        .map(|token| format!("?token={}", history::url_encode(token)))
-        .unwrap_or_default();
-    let names = monitor_names(&config);
+    let names = monitor_names(config);
     let html = history::HistoryTemplate {
         title: config.page.title.clone(),
         incidents: history::incident_rows(&incidents, &names),
         pushed_alerts: history::alert_rows(&pushed_alerts, &names),
         events: history::event_rows(&events),
         heatmaps,
-        token_query,
+        token_query: viewer.token_query.clone(),
     }
     .render()?;
     Ok(Html(html))
@@ -762,22 +668,21 @@ const TIMELINE_LIMIT: usize = 200;
 
 /// The unified chronology (`/timeline`): downs/recoveries, operator events,
 /// pushed alerts, announcements and silences merged newest-first. The
-/// authenticated view gets everything; anonymous viewers get the same subset
-/// they may see elsewhere - sanitized public incidents and announcements -
-/// and never the operator streams (events, silences, alert detail).
+/// operator view gets everything; anyone else gets the same subset they may
+/// see elsewhere - sanitized visible incidents and announcements - and never
+/// the operator streams (events, silences, alert detail).
 pub(crate) async fn timeline_page(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
+    viewer: Viewer,
 ) -> Result<Html<String>, AppError> {
-    let config = state.config.borrow().clone();
-    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
+    let config = &viewer.config;
+    let visibility = Visibility::new(config, &viewer.audience);
     let since = Utc::now().timestamp() - TIMELINE_DAYS * hora_core::SECONDS_PER_DAY;
 
-    let sources = if authenticated {
+    let sources = if visibility.sees_operator_streams() {
         hora_core::timeline::fetch(&state.pool, since, 500).await?
     } else {
-        let mut incidents = visible_incidents(&state.pool, &config, false, 500).await?;
+        let mut incidents = visible_incidents(&state.pool, &visibility, 500).await?;
         incidents.retain(|incident| {
             incident.started_at >= since || incident.ended_at.is_some_and(|ended| ended >= since)
         });
@@ -788,18 +693,12 @@ pub(crate) async fn timeline_page(
         }
     };
     let entries =
-        hora_core::timeline::merge(&sources, &monitor_names(&config), since, TIMELINE_LIMIT);
+        hora_core::timeline::merge(&sources, &monitor_names(config), since, TIMELINE_LIMIT);
 
-    let token_query = auth_query
-        .token
-        .as_deref()
-        .filter(|_| authenticated)
-        .map(|token| format!("?token={}", history::url_encode(token)))
-        .unwrap_or_default();
     let html = history::TimelineTemplate {
         title: config.page.title.clone(),
         entries: history::timeline_rows(&entries),
-        token_query,
+        token_query: viewer.token_query.clone(),
     }
     .render()?;
     Ok(Html(html))
@@ -807,12 +706,12 @@ pub(crate) async fn timeline_page(
 
 pub(crate) async fn history_atom(
     State(state): State<AppState>,
+    viewer: Viewer,
     headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let config = state.config.borrow().clone();
-    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
-    let incidents = visible_incidents(&state.pool, &config, authenticated, 50).await?;
+    let config = &viewer.config;
+    let visibility = Visibility::new(config, &viewer.audience);
+    let incidents = visible_incidents(&state.pool, &visibility, 50).await?;
     // Absolute feed links: scheme from the proxy's x-forwarded-proto (plain
     // http when absent), host from the Host header.
     let proto = headers
@@ -827,19 +726,37 @@ pub(crate) async fn history_atom(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("localhost");
     let base_url = format!("{proto}://{host}");
-    let body = history::render_atom(&incidents, &monitor_names(&config), &base_url);
+    let body = history::render_atom(
+        &incidents,
+        &monitor_names(config),
+        &base_url,
+        &config.page.title,
+    );
     Ok((
         [(header::CONTENT_TYPE, "application/atom+xml; charset=utf-8")],
         body,
     ))
 }
 
+/// The configured monitor `id`, if this audience may see it. A private
+/// monitor answers exactly like a missing one (404) - its existence is not
+/// revealed either way.
+fn visible_monitor<'a>(
+    config: &'a Config,
+    visibility: &Visibility<'_>,
+    id: &str,
+) -> Result<&'a Monitor, AppError> {
+    config
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == id && visibility.can_see_monitor(monitor))
+        .ok_or(AppError::NotFound("unknown monitor"))
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct LatencyQuery {
     #[serde(default = "default_hours")]
     hours: i64,
-    #[serde(default)]
-    token: Option<String>,
 }
 
 pub(crate) fn default_hours() -> i64 {
@@ -853,6 +770,7 @@ pub(crate) fn default_hours() -> i64 {
         ("id" = String, Path, description = "Monitor id"),
         ("hours" = Option<i64>, Query, description = "Look-back window in hours (1..=720)")
     ),
+    security((), ("bearer" = [])),
     responses(
         (status = 200, description = "Latency samples, oldest first", body = [Point]),
         (status = 404, description = "Unknown monitor")
@@ -861,22 +779,12 @@ pub(crate) fn default_hours() -> i64 {
 pub(crate) async fn latency_json(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
+    viewer: Viewer,
     Query(query): Query<LatencyQuery>,
 ) -> Result<Json<Vec<Point>>, AppError> {
-    let AppState { pool, config, .. } = state;
-    let config = config.borrow().clone();
-    // A private monitor answers exactly like a missing one (404) unless the
-    // caller is authenticated - its existence is not revealed either way.
-    let visible = config.monitors.iter().any(|monitor| {
-        monitor.id == id
-            && (monitor.public || is_authenticated(&headers, query.token.as_deref(), &config))
-    });
-    if !visible {
-        return Err(AppError::NotFound("unknown monitor"));
-    }
-    let LatencyQuery { hours, .. } = query;
-    let window = hours.clamp(1, MAX_LATENCY_HOURS) * SECONDS_PER_HOUR;
+    let visibility = Visibility::new(&viewer.config, &viewer.audience);
+    visible_monitor(&viewer.config, &visibility, &id)?;
+    let window = query.hours.clamp(1, MAX_LATENCY_HOURS) * SECONDS_PER_HOUR;
     let since = Utc::now().timestamp() - window;
     // Average into at most MAX_LATENCY_POINTS buckets in SQL, so a 10s-interval
     // monitor over 720h (~260k raw rows) never materializes more than the cap.
@@ -885,7 +793,7 @@ pub(crate) async fn latency_json(
     let max_points = i64::try_from(MAX_LATENCY_POINTS).expect("MAX_LATENCY_POINTS fits in i64");
     // (Manual ceil: `i64::div_ceil` is still unstable.)
     let bucket_secs = ((window + max_points - 1) / max_points).max(1);
-    let points = db::latency_series(&pool, &id, since, bucket_secs).await?;
+    let points = db::latency_series(&state.pool, &id, since, bucket_secs).await?;
     // The SQL already respects the cap; downsample stays as a pure backstop.
     Ok(Json(downsample(points, MAX_LATENCY_POINTS)))
 }
@@ -894,8 +802,10 @@ pub(crate) async fn latency_json(
     post,
     path = "/api/peer/probe",
     request_body = hora_core::confirm::ProbeRequest,
+    security(("push_token" = [])),
     responses(
         (status = 200, description = "This vantage's verdict on the target", body = hora_core::confirm::ProbeResponse),
+        (status = 400, description = "Exec and push monitors are not network probes"),
         (status = 401, description = "Unknown requesting peer, or missing/wrong X-Push-Token"),
         (status = 404, description = "The target is not in this node's configuration")
     )
@@ -906,24 +816,17 @@ pub(crate) async fn peer_probe(
     Json(request): Json<hora_core::confirm::ProbeRequest>,
 ) -> Result<Json<hora_core::confirm::ProbeResponse>, AppError> {
     let config = state.config.borrow().clone();
+    // Probing is strictly more sensitive than a push heartbeat: the peer must
+    // be known here with a listen_token, and the header must match.
+    authorize_peer(&config, &headers, &request.from)?;
 
-    // Authenticate the requesting peer: it must be configured here, it must
-    // have a listen_token (probing is strictly more sensitive than a push
-    // heartbeat, so the id alone never authorizes), and the X-Push-Token
-    // header must match. Unknown peers answer exactly like a wrong token.
-    let authorized = config
-        .peers
-        .iter()
-        .find(|peer| peer.id == request.from)
-        .and_then(|peer| peer.listen_token.as_ref())
-        .is_some_and(|expected| {
-            headers
-                .get("x-push-token")
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|token| ct_eq(token, expected.as_ref()))
-        });
-    if !authorized {
-        return Err(AppError::Unauthorized("unknown peer or invalid token"));
+    // Exec and push monitors have no network target: every exec monitor has
+    // the same empty one, so matching it would run *some* local exec monitor
+    // and answer its verdict (or a bogus "down") for another node's check.
+    if matches!(request.kind, Kind::Exec | Kind::Push) {
+        return Err(AppError::BadRequest(
+            "exec and push monitors are not network probes",
+        ));
     }
 
     // The SSRF guard: only targets present in THIS node's configuration are
@@ -932,11 +835,7 @@ pub(crate) async fn peer_probe(
     let monitor = config
         .monitors
         .iter()
-        .find(|monitor| {
-            monitor.kind == request.kind
-                && monitor.target == request.target
-                && monitor.kind != Kind::Push
-        })
+        .find(|monitor| monitor.kind == request.kind && monitor.target == request.target)
         .ok_or(AppError::NotFound(
             "target not in this node's configuration",
         ))?;
@@ -947,7 +846,13 @@ pub(crate) async fn peer_probe(
     // unresponsive *from here*, which is a down verdict in its own right.
     let mut probe_monitor = monitor.clone();
     probe_monitor.probe_retries = Some(0);
-    let client = hora_core::http::probe_client(monitor.proxy.as_deref())
+    let client = state
+        .probe_clients
+        .get_or_build(
+            &config,
+            monitor.proxy.as_deref(),
+            hora_core::http::probe_client,
+        )
         .map_err(|err| AppError::Internal(err.into()))?;
     let outcome = match tokio::time::timeout(
         hora_core::confirm::PROBE_DEADLINE,
@@ -980,6 +885,7 @@ pub(crate) struct PeerMonitorsQuery {
     get,
     path = "/api/peer/monitors",
     params(("from" = String, Query, description = "The requesting peer's [health].id")),
+    security(("push_token" = [])),
     responses(
         (status = 200, description = "This node's probeable monitors, with its own view of each (status, 24h median)", body = hora_core::confirm::PeerMonitors),
         (status = 401, description = "Unknown requesting peer, or missing/wrong X-Push-Token")
@@ -991,22 +897,8 @@ pub(crate) async fn peer_monitors(
     Query(query): Query<PeerMonitorsQuery>,
 ) -> Result<Json<hora_core::confirm::PeerMonitors>, AppError> {
     let config = state.config.borrow().clone();
-    // Same strict authentication as /api/peer/probe: the requesting peer must
-    // be configured here with a listen_token, and the header must match.
-    let authorized = config
-        .peers
-        .iter()
-        .find(|peer| peer.id == query.from)
-        .and_then(|peer| peer.listen_token.as_ref())
-        .is_some_and(|expected| {
-            headers
-                .get("x-push-token")
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|token| ct_eq(token, expected.as_ref()))
-        });
-    if !authorized {
-        return Err(AppError::Unauthorized("unknown peer or invalid token"));
-    }
+    // Same strict authentication as /api/peer/probe.
+    authorize_peer(&config, &headers, &query.from)?;
 
     // What a mesh member may know: kind + target (it can probe those anyway
     // via /api/peer/probe) and this node's live view of each - never names,
@@ -1044,6 +936,7 @@ pub(crate) async fn peer_monitors(
     get,
     path = "/api/monitors/{id}/heatmap.svg",
     params(("id" = String, Path, description = "Monitor id")),
+    security((), ("bearer" = [])),
     responses(
         (status = 200, description = "28-day hours-by-days latency heatmap (SVG)"),
         (status = 404, description = "Unknown monitor")
@@ -1052,30 +945,24 @@ pub(crate) async fn peer_monitors(
 pub(crate) async fn heatmap_svg(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
+    viewer: Viewer,
 ) -> Result<impl IntoResponse, AppError> {
-    let AppState { pool, config, .. } = state;
-    let config = config.borrow().clone();
-    // Same visibility rule as the latency endpoint: a private monitor answers
-    // exactly like a missing one unless the caller is authenticated.
-    let monitor = config
-        .monitors
-        .iter()
-        .find(|monitor| {
-            monitor.id == id
-                && (monitor.public
-                    || is_authenticated(&headers, auth_query.token.as_deref(), &config))
-        })
-        .ok_or(AppError::NotFound("unknown monitor"))?;
+    let config = &viewer.config;
+    // Same visibility rule as the latency endpoint.
+    let visibility = Visibility::new(config, &viewer.audience);
+    let monitor = visible_monitor(config, &visibility, &id)?;
+    // The image does not depend on who asks (visibility is settled above), and
+    // it groups 28 days of checks: one render per monitor serves everyone for
+    // a minute.
+    if let Some(svg) = state.heatmaps.get(&id, config) {
+        return Ok(svg_response(svg.as_ref().clone()));
+    }
     let now = Utc::now().timestamp();
     let since = (now / 86_400 - (crate::heatmap::HEATMAP_DAYS - 1)) * 86_400;
-    let cells = db::latency_hourly(&pool, &id, since).await?;
-    Ok(svg_response(crate::heatmap::render(
-        &cells,
-        now,
-        &monitor.name,
-    )))
+    let cells = db::latency_hourly(&state.pool, &id, since).await?;
+    let svg = crate::heatmap::render(&cells, now, &monitor.name);
+    state.heatmaps.insert(&id, config, Arc::new(svg.clone()));
+    Ok(svg_response(svg))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1095,13 +982,15 @@ pub(crate) struct PushQuery {
     path = "/api/push/{id}",
     params(
         ("id" = String, Path, description = "Push monitor id"),
-        ("token" = Option<String>, Query, description = "Push token, if the monitor sets one"),
+        ("token" = Option<String>, Query, description = "Push token, if the monitor sets one (prefer X-Push-Token)"),
         ("status" = Option<String>, Query, description = "up (default), down or degraded"),
         ("msg" = Option<String>, Query, description = "Optional detail recorded with the heartbeat"),
-        ("ping" = Option<i64>, Query, description = "Optional round-trip latency in ms")
+        ("ping" = Option<i64>, Query, description = "Optional round-trip latency in ms (>= 0)")
     ),
+    security((), ("push_token" = [])),
     responses(
         (status = 200, description = "Heartbeat recorded"),
+        (status = 400, description = "Unknown status or negative ping"),
         (status = 401, description = "Missing or wrong token"),
         (status = 404, description = "Unknown push monitor")
     )
@@ -1134,20 +1023,25 @@ pub(crate) async fn push(
     // A configured token is required; without one, the id alone authorizes. Prefer
     // the `X-Push-Token` header (kept out of access logs) over the `?token=` query.
     if let Some(expected) = expected_token {
-        let provided = headers
-            .get("x-push-token")
-            .and_then(|value| value.to_str().ok())
-            .or(query.token.as_deref());
+        let provided = push_token(&headers).or(query.token.as_deref());
         if !provided.is_some_and(|token| ct_eq(token, expected.as_ref())) {
             return Err(AppError::Unauthorized("invalid push token"));
         }
     }
 
+    // A typo'd status must fail loudly: recording `status=dwon` as "up" would
+    // report the opposite of what the job meant.
     let status = match query.status.as_deref() {
+        None | Some("" | "up") => 1,
         Some("down") => 0,
         Some("degraded") => 2,
-        _ => 1,
+        Some(_) => {
+            return Err(AppError::BadRequest("status must be up, down or degraded"));
+        }
     };
+    if query.ping.is_some_and(|ping| ping < 0) {
+        return Err(AppError::BadRequest("ping must not be negative"));
+    }
     // Bound the stored message so a buggy or hostile pusher can't bloat the DB.
     let msg = query
         .msg
@@ -1205,48 +1099,44 @@ pub(crate) struct AlertResponse {
     path = "/api/monitors/{id}/alert",
     params(
         ("id" = String, Path, description = "Monitor id the alert is attached to"),
-        ("token" = Option<String>, Query, description = "server.auth_token (or Authorization: Bearer)")
+        ("token" = Option<String>, Query, description = "server.auth_token (prefer Authorization: Bearer)")
     ),
     request_body = AlertRequest,
+    security(("push_token" = []), ("bearer" = [])),
     responses(
         (status = 202, description = "Alert dispatched to the monitor's channels (or coalesced)", body = AlertResponse),
         (status = 400, description = "Empty title or unknown severity"),
-        (status = 401, description = "Missing/wrong X-Push-Token and no matching server.auth_token"),
-        (status = 404, description = "Unknown monitor")
+        (status = 401, description = "Missing/wrong X-Push-Token and no matching server.auth_token (also for an unknown monitor)"),
+        (status = 404, description = "Unknown monitor (operator token only)")
     )
 )]
 pub(crate) async fn post_alert(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    viewer: Viewer,
     headers: HeaderMap,
-    Query(auth_query): Query<AuthQuery>,
     Json(request): Json<AlertRequest>,
 ) -> Result<(StatusCode, Json<AlertResponse>), AppError> {
-    let config = state.config.borrow().clone();
-
-    // The monitor must exist; its id is already public (page + API), so a 404
-    // here reveals nothing a viewer could not already see.
-    let monitor = config
-        .monitors
-        .iter()
-        .find(|monitor| monitor.id == id)
-        .ok_or(AppError::NotFound("unknown monitor"))?;
+    let config = &viewer.config;
+    let monitor = config.monitors.iter().find(|monitor| monitor.id == id);
 
     // Authenticate with the monitor's own push_token (preferred, via the
     // X-Push-Token header kept out of access logs) or the global viewer token.
     // Dispatching to channels can flood, so - unlike a read-only view - the
     // endpoint stays closed unless a credential is configured and matches.
-    let item_token_ok = monitor.push_token.as_ref().is_some_and(|expected| {
-        headers
-            .get("x-push-token")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|token| ct_eq(token, expected.as_ref()))
-    });
-    if !item_token_ok && !is_authenticated(&headers, auth_query.token.as_deref(), &config) {
+    // Without the operator token an unknown id answers the same 401 as a
+    // known one, so the endpoint cannot be used to probe private monitor ids.
+    let item_token_ok = monitor
+        .and_then(|monitor| monitor.push_token.as_ref())
+        .is_some_and(|expected| {
+            push_token(&headers).is_some_and(|token| ct_eq(token, expected.as_ref()))
+        });
+    if !item_token_ok && !viewer.is_operator() {
         return Err(AppError::Unauthorized(
             "alerting requires the monitor's push_token (X-Push-Token) or server.auth_token",
         ));
     }
+    let monitor = monitor.ok_or(AppError::NotFound("unknown monitor"))?;
 
     // Validate the body.
     let severity = match request.severity.as_deref() {
@@ -1386,8 +1276,6 @@ pub(crate) struct SilenceQuery {
     duration: String,
     #[serde(default)]
     reason: Option<String>,
-    #[serde(default)]
-    token: Option<String>,
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
@@ -1405,8 +1293,9 @@ pub(crate) struct SilenceResponse {
         ("monitors" = String, Query, description = "Comma-separated monitor ids, or `all`"),
         ("duration" = String, Query, description = "How long to mute (e.g. 10m, 1h30m; max 7d)"),
         ("reason" = Option<String>, Query, description = "Optional note recorded with the silence"),
-        ("token" = Option<String>, Query, description = "Viewer token (or Authorization: Bearer)")
+        ("token" = Option<String>, Query, description = "Viewer token (prefer Authorization: Bearer)")
     ),
+    security(("bearer" = [])),
     responses(
         (status = 200, description = "Alerts muted until the returned time", body = SilenceResponse),
         (status = 400, description = "Unparseable duration or empty monitor list"),
@@ -1416,21 +1305,11 @@ pub(crate) struct SilenceResponse {
 )]
 pub(crate) async fn silence(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    // Muting alerts is an operator action: it strictly requires the
+    // configured viewer token.
+    Operator { config }: Operator,
     Query(query): Query<SilenceQuery>,
 ) -> Result<Json<SilenceResponse>, AppError> {
-    let config = state.config.borrow().clone();
-    // Muting alerts is an operator action: it strictly requires the configured
-    // viewer token. Without one the endpoint is closed (unlike the read-only
-    // views, where "no token" just means "everything is public").
-    if config.server.auth_token.is_none()
-        || !is_authenticated(&headers, query.token.as_deref(), &config)
-    {
-        return Err(AppError::Unauthorized(
-            "silencing requires server.auth_token and a matching token",
-        ));
-    }
-
     let duration_secs = hora_core::parse_duration(&query.duration)
         .filter(|secs| *secs <= hora_core::MAX_SILENCE_SECS)
         .ok_or(AppError::BadRequest(
@@ -1555,14 +1434,11 @@ pub(crate) async fn uptime_badge(
     )))
 }
 
-/// The badge-visible monitor with `id`: public monitors only - a private
-/// monitor's badge is indistinguishable from an unknown one.
+/// The badge-visible monitor with `id`: badges are always the public view,
+/// whoever embeds them - a private monitor's badge is indistinguishable from
+/// an unknown one.
 fn badge_monitor<'a>(config: &'a Config, id: &str) -> Result<&'a Monitor, AppError> {
-    config
-        .monitors
-        .iter()
-        .find(|monitor| monitor.id == id && monitor.public)
-        .ok_or(AppError::NotFound("unknown monitor"))
+    visible_monitor(config, &Visibility::new(config, &Audience::Public), id)
 }
 
 /// Sample a series down to at most `max` points, keeping its overall shape.
@@ -1572,13 +1448,6 @@ pub(crate) fn downsample(points: Vec<Point>, max: usize) -> Vec<Point> {
     }
     let step = points.len().div_ceil(max);
     points.into_iter().step_by(step).collect()
-}
-
-/// Constant-time string comparison so a wrong push token can't be brute-forced
-/// by timing. The length may leak (it is not the secret).
-pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[cfg(test)]
@@ -1635,5 +1504,45 @@ mod tests {
         assert_eq!(render_alert_message("", &tags), "k=v");
         // Nothing at all yields an empty message.
         assert_eq!(render_alert_message("", &HashMap::new()), "");
+    }
+
+    #[tokio::test]
+    async fn collect_visible_widens_until_enough_rows_are_visible() {
+        // 100 rows, newest first; only every 10th is "visible".
+        let rows: Vec<i64> = (0..100).collect();
+        let mut fetched = Vec::new();
+        let visible = collect_visible(
+            5,
+            |window| {
+                fetched.push(window);
+                let page: Vec<i64> = rows
+                    .iter()
+                    .copied()
+                    .take(usize::try_from(window).unwrap())
+                    .collect();
+                async move { Ok(page) }
+            },
+            |page: &mut Vec<i64>| page.retain(|row| row % 10 == 0),
+        )
+        .await
+        .ok()
+        .expect("rows");
+        // Filtering happened before the limit: five visible rows, not the
+        // one or two a "take 5 then filter" would leave.
+        assert_eq!(visible, vec![0, 10, 20, 30, 40]);
+        assert_eq!(fetched, vec![5, 20, 80]);
+    }
+
+    #[tokio::test]
+    async fn collect_visible_stops_when_the_table_is_exhausted() {
+        let visible = collect_visible(
+            50,
+            |_window| async { Ok(vec![1_i64, 2, 3]) },
+            |page: &mut Vec<i64>| page.retain(|row| *row != 2),
+        )
+        .await
+        .ok()
+        .expect("rows");
+        assert_eq!(visible, vec![1, 3]);
     }
 }
