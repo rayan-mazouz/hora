@@ -6,20 +6,17 @@ use hora_core::fmt::bytes;
 
 use super::{CliError, open_database, usage};
 
-/// Below this estimated gain a rewrite is not worth its cost (a full copy of
-/// the file): the report is printed and nothing else happens.
-const MIN_GAIN_PERCENT: u64 = 1;
-
-/// Room the copy needs on top of its estimated size (the estimate is rough,
+/// Room the copy needs on top of its expected size (the estimate is rough,
 /// and the retention pass writes a WAL first).
 const DISK_MARGIN_PERCENT: u64 = 10;
 
 /// `hora compact [--dry-run] [--purge-removed] [--keep]`.
 ///
-/// Reports the size of every table and index, applies the retention now, then
-/// rewrites the file with `VACUUM INTO` a sibling and swaps it in. Needs the
-/// database to itself: refuses while the daemon runs (it holds `<db>.lock`),
-/// except for `--dry-run`, which only reads.
+/// Applies the retention now, then rewrites the file with `VACUUM INTO` a
+/// sibling and swaps it in. Needs the database to itself: refuses while the
+/// daemon runs (it holds `<db>.lock`). `--dry-run` instead measures every
+/// table and index and estimates the gain - a read of the whole file, slow
+/// on a large database but harmless, so it works while the daemon runs.
 pub(crate) async fn compact(args: &[String]) -> Result<(), CliError> {
     let Flags {
         dry_run,
@@ -28,68 +25,36 @@ pub(crate) async fn compact(args: &[String]) -> Result<(), CliError> {
     } = Flags::parse(args)?;
     let (config, store) = open_database().await?;
     let path = config.server.database_path.clone();
-    // Taken before anything writes, and held to the end; a dry run only
-    // reads, so it works while the daemon runs.
-    let lock = if dry_run { None } else { take_lock(&path)? };
-
     println!("hora compact - {path}");
-    println!("Measuring every table and index (reads the whole file)...");
-    let report = db::size_report(&store).await?;
-    print_report(&report);
-    let gain_percent = report
-        .estimated_gain()
-        .saturating_mul(100)
-        .checked_div(report.size.db_bytes)
-        .unwrap_or(0);
-
-    let needed = report
-        .estimated_bytes_after
-        .saturating_mul(100 + DISK_MARGIN_PERCENT)
-        / 100;
-    let free = db::free_disk_bytes(std::path::Path::new(&path));
-    match free {
-        Some(free) => println!(
-            "  free disk         {} (the copy needs ~{})",
-            bytes(free),
-            bytes(needed)
-        ),
-        None => println!("  free disk         unknown on this platform"),
-    }
-
     if dry_run {
-        println!();
-        println!(
-            "Dry run: nothing changed. The retention pass of a real run may free more \
-             (rows past their window{}).",
-            if purge_removed {
-                ", and the removed monitors' history"
-            } else {
-                ""
-            }
-        );
-        return Ok(());
+        return report(&store, &path, purge_removed).await;
     }
-    if gain_percent < MIN_GAIN_PERCENT && !purge_removed {
-        println!();
-        println!("Nothing to reclaim (under {MIN_GAIN_PERCENT}%): the file is left as it is.");
-        return Ok(());
-    }
-    if let Some(free) = free
-        && free < needed
-    {
-        return Err(CliError::Failed(format!(
-            "Not enough free disk for the copy: {} free, ~{} needed next to the database.",
-            bytes(free),
-            bytes(needed)
-        )));
-    }
-    let Some(lock) = lock else {
+    // Taken before anything writes, and held to the end.
+    let Some(lock) = take_lock(&path)? else {
         return Err(CliError::Failed(
             "An in-memory database has nothing to compact.".to_owned(),
         ));
     };
 
-    println!();
+    let size = store.size().await?;
+    println!(
+        "  file              {} ({} in free pages)",
+        bytes(size.db_bytes),
+        bytes(size.free_bytes)
+    );
+    // The copy holds at most the pages in use.
+    let needed = with_margin(size.db_bytes.saturating_sub(size.free_bytes));
+    if let Some(free) = print_free_disk(&path, needed)
+        && free < needed
+    {
+        return Err(CliError::Failed(format!(
+            "Not enough free disk for the copy: {} free, up to ~{} needed next to the \
+             database.",
+            bytes(free),
+            bytes(needed)
+        )));
+    }
+
     println!(
         "Applying the retention{}...",
         if purge_removed {
@@ -120,6 +85,45 @@ pub(crate) async fn compact(args: &[String]) -> Result<(), CliError> {
         );
     }
     Ok(())
+}
+
+/// `--dry-run`: what every table and index takes, and what a rewrite would
+/// give back. Nothing is written.
+async fn report(store: &db::Store, path: &str, purge_removed: bool) -> Result<(), CliError> {
+    println!("Measuring every table and index (reads the whole file)...");
+    let report = db::size_report(store).await?;
+    print_report(&report);
+    print_free_disk(path, with_margin(report.estimated_bytes_after));
+    println!();
+    println!(
+        "Dry run: nothing changed. The retention pass of a real run may free more \
+         (rows past their window{}).",
+        if purge_removed {
+            ", and the removed monitors' history"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+fn with_margin(bytes: u64) -> u64 {
+    bytes.saturating_mul(100 + DISK_MARGIN_PERCENT) / 100
+}
+
+/// Print the free disk next to the database against what the copy needs;
+/// returns it when the platform can tell.
+fn print_free_disk(path: &str, needed: u64) -> Option<u64> {
+    let free = db::free_disk_bytes(std::path::Path::new(path));
+    match free {
+        Some(free) => println!(
+            "  free disk         {} (the copy needs ~{})",
+            bytes(free),
+            bytes(needed)
+        ),
+        None => println!("  free disk         unknown on this platform"),
+    }
+    free
 }
 
 /// The command-line switches.

@@ -166,9 +166,9 @@ pub(crate) fn print_help() {
     println!("                      alignment multi-vantage confirmation relies on)");
     println!("  backup <dest.db>    Snapshot the database with VACUUM INTO");
     println!("  compact [--dry-run] [--purge-removed] [--keep]");
-    println!("                      Report table sizes, apply the retention now and");
-    println!("                      shrink the file (stop the daemon first; --dry-run");
-    println!("                      only reports, --keep leaves the original as .bak)");
+    println!("                      Apply the retention now and shrink the file (stop");
+    println!("                      the daemon first; --keep leaves the original as .bak).");
+    println!("                      --dry-run measures each table and the gain instead");
     println!("  --version, -V       Show the version");
     println!("  --help, -h          Show this help message");
 }
