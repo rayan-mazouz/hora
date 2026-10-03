@@ -91,10 +91,14 @@ pub(crate) enum Verdict {
 
 /// Whether multi-vantage confirmation applies to this monitor under this
 /// config: the per-monitor override, else the `[health]` default - and never
-/// for push monitors (nothing to probe).
+/// for push or exec monitors. Neither is a network probe a peer could repeat:
+/// a push monitor has nothing to probe, and an exec monitor's empty target
+/// would match whatever exec monitor the peer runs, whose answer says nothing
+/// about this one (a peer used to report it "down", turning every exec alert
+/// into a false "confirmed down from 2/2").
 #[must_use]
 pub fn enabled(config: &Config, monitor: &Monitor) -> bool {
-    if monitor.kind == Kind::Push {
+    if matches!(monitor.kind, Kind::Push | Kind::Exec) {
         return false;
     }
     monitor.confirm_with_peers.unwrap_or_else(|| {
@@ -193,38 +197,16 @@ async fn probe_peer(
     token: Option<&str>,
     request: &ProbeRequest,
 ) -> Verdict {
-    let mut builder = client.post(url).json(request).timeout(PROBE_DEADLINE);
+    let mut builder = client.post(url).json(request);
     if let Some(token) = token {
         builder = builder.header("x-push-token", token);
     }
-    // Belt and braces: reqwest's timeout covers the request, the outer one
-    // guards the bounded body read below as well.
-    let outcome = tokio::time::timeout(PROBE_DEADLINE + Duration::from_secs(2), async {
-        let mut response = builder.send().await.ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        let mut body = Vec::new();
-        loop {
-            match response.chunk().await {
-                Ok(Some(chunk)) => {
-                    if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
-                        return None;
-                    }
-                    body.extend_from_slice(&chunk);
-                }
-                Ok(None) => break,
-                Err(_) => return None,
-            }
-        }
-        serde_json::from_slice::<ProbeResponse>(&body).ok()
-    })
-    .await;
-
-    match outcome {
-        Ok(Some(response)) if response.up => Verdict::Up,
-        Ok(Some(_)) => Verdict::Down,
-        Ok(None) | Err(_) => Verdict::Unknown,
+    let answer: Option<ProbeResponse> =
+        crate::http::fetch_json_capped(builder, MAX_RESPONSE_BYTES, PROBE_DEADLINE).await;
+    match answer {
+        Some(response) if response.up => Verdict::Up,
+        Some(_) => Verdict::Down,
+        None => Verdict::Unknown,
     }
 }
 
@@ -397,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn enabled_resolves_override_then_global_and_skips_push() {
+    fn enabled_resolves_override_then_global_and_skips_push_and_exec() {
         let config = crate::config::parse(
             r#"
             [page]
@@ -431,6 +413,11 @@ mod tests {
         assert!(enabled(&config, &config.monitors[0])); // global default
         assert!(!enabled(&config, &config.monitors[1])); // explicit opt-out
         assert!(!enabled(&config, &config.monitors[2])); // push: never
+        // exec: never, whatever the global default says.
+        let mut exec = config.monitors[0].clone();
+        exec.kind = Kind::Exec;
+        exec.target = String::new();
+        assert!(!enabled(&config, &exec));
     }
 
     #[test]

@@ -155,35 +155,11 @@ pub async fn fetch_peer_monitors(
     from: &str,
     token: Option<&str>,
 ) -> Option<PeerMonitors> {
-    let mut builder = client
-        .get(url)
-        .query(&[("from", from)])
-        .timeout(POLL_TIMEOUT);
+    let mut builder = client.get(url).query(&[("from", from)]);
     if let Some(token) = token {
         builder = builder.header("x-push-token", token);
     }
-    let outcome = tokio::time::timeout(POLL_TIMEOUT + Duration::from_secs(2), async {
-        let mut response = builder.send().await.ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        let mut body = Vec::new();
-        loop {
-            match response.chunk().await {
-                Ok(Some(chunk)) => {
-                    if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
-                        return None;
-                    }
-                    body.extend_from_slice(&chunk);
-                }
-                Ok(None) => break,
-                Err(_) => return None,
-            }
-        }
-        serde_json::from_slice::<PeerMonitors>(&body).ok()
-    })
-    .await;
-    outcome.ok().flatten()
+    crate::http::fetch_json_capped(builder, MAX_RESPONSE_BYTES, POLL_TIMEOUT).await
 }
 
 #[cfg(test)]
