@@ -259,6 +259,29 @@ async fn summary_has_security_and_ratelimit_headers() {
     );
     let csp = headers["content-security-policy"].to_str().unwrap();
     assert!(!csp.contains("data:"), "{csp}");
+    assert!(csp.contains("form-action 'self'"), "{csp}");
+    // An anonymous answer may be cached like any public page.
+    assert!(!headers.contains_key("cache-control"));
+}
+
+#[tokio::test]
+async fn credentialed_answers_are_never_stored() {
+    let app = test_app().await;
+    let bearer = Request::builder()
+        .uri("/api/summary")
+        .header("authorization", "Bearer 0123456789abcdef")
+        .extension(fake_peer())
+        .body(Body::empty())
+        .expect("request");
+    for request in [
+        bearer,
+        get("/metrics?token=0123456789abcdef"),
+        get("/?token=appappappappapp1"),
+    ] {
+        let uri = request.uri().clone();
+        let res = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(res.headers()["cache-control"], "no-store", "{uri}");
+    }
 }
 
 #[tokio::test]

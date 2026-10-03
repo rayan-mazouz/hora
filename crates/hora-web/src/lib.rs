@@ -61,7 +61,8 @@ pub(crate) const SPARK_BUCKETS: i64 = 120;
 // not even an attribute), same-origin fonts and icons, no JS. No `data:`
 // images: nothing embeds one.
 pub(crate) const CSP: &str = "default-src 'self'; script-src 'none'; style-src 'self'; \
-     img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'";
+     img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; \
+     frame-ancestors 'none'";
 /// Powerful browser features the pages never use, denied outright.
 pub(crate) const PERMISSIONS_POLICY: &str = "accelerometer=(), camera=(), geolocation=(), \
      gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()";
@@ -188,12 +189,29 @@ impl KeyExtractor for ConfiguredIp {
                 .and_then(|raw| raw.split(',').next())
                 .and_then(|first| first.trim().parse::<IpAddr>().ok())
         {
-            return Ok(ip);
+            return Ok(bucket(ip));
         }
         if self.header.is_none() {
             self.note_unnamed_proxy(req);
         }
-        PeerIpKeyExtractor.extract(req)
+        PeerIpKeyExtractor.extract(req).map(bucket)
+    }
+}
+
+/// The rate-limit bucket of a client address: an IPv4 address as is, an
+/// IPv6 address by its /64. One IPv6 subscriber routinely holds a whole /64
+/// (2^64 addresses), so keying on the full address would hand a client a
+/// fresh bucket per request - no limit at all, and one map entry per request
+/// until the next `retain_recent`. An IPv4-mapped address counts as IPv4.
+fn bucket(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(std::net::Ipv6Addr::from(
+                u128::from(v6) & !u128::from(u64::MAX),
+            )),
+        },
     }
 }
 
@@ -268,6 +286,22 @@ mod tests {
             .body(())
             .expect("request");
         assert_eq!(extractor.extract(&without_header).unwrap(), peer.ip());
+    }
+
+    #[test]
+    fn ipv6_clients_share_their_slash_64() {
+        let extractor = ConfiguredIp::from_config(Some("x-real-ip"));
+        let key = |ip: &str| {
+            let request = Request::builder()
+                .header("x-real-ip", ip)
+                .body(())
+                .expect("request");
+            extractor.extract(&request).unwrap()
+        };
+        assert_eq!(key("2001:db8:1:2::1"), key("2001:db8:1:2:ffff::9"));
+        assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+        assert_eq!(key("::ffff:203.0.113.7"), key("203.0.113.7"));
+        assert_ne!(key("203.0.113.7"), key("203.0.113.8"));
     }
 
     #[test]

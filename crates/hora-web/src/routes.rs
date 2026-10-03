@@ -122,6 +122,7 @@ pub fn router(state: AppState) -> Router {
             HeaderValue::from_static("same-origin"),
         ))
         .layer(cors)
+        .layer(middleware::from_fn(no_store_with_credentials))
         // The trace span carries the request id so every log line emitted while
         // handling a request can be correlated back to it.
         .layer(TraceLayer::new_for_http().make_span_with(make_request_span))
@@ -130,6 +131,30 @@ pub fn router(state: AppState) -> Router {
         // the response.
         .layer(middleware::from_fn(request_id))
         .with_state(state)
+}
+
+/// A response to a request that carried a credential (`Authorization`,
+/// `X-Push-Token` or `?token=`) is that viewer's own: an operator or group
+/// view, or a write's answer. Mark it `no-store` so neither a shared cache in
+/// front of Hora nor the browser's disk cache keeps it (nothing else sets a
+/// `Cache-Control` on the pages, so heuristic caching would apply).
+pub(crate) async fn no_store_with_credentials(request: Request<Body>, next: Next) -> Response {
+    let credentialed = request.headers().contains_key(header::AUTHORIZATION)
+        || request
+            .headers()
+            .contains_key(crate::auth::PUSH_TOKEN_HEADER)
+        || request.uri().query().is_some_and(|query| {
+            query
+                .split('&')
+                .any(|pair| pair == "token" || pair.starts_with("token="))
+        });
+    let mut response = next.run(request).await;
+    if credentialed {
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+    response
 }
 
 /// Put `routes` behind a per-IP token bucket (`burst` requests, one more every
