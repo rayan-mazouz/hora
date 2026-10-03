@@ -23,7 +23,7 @@ pub use monitor::{
 };
 pub use parsed::{Compiled, DnsRecord, ParseField, Parsed};
 pub use peer::Peer;
-pub use secret::Secret;
+pub use secret::{Secret, redact_url_secrets};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

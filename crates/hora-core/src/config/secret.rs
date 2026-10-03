@@ -42,7 +42,8 @@ impl Secret {
 /// credentials and query-string values (`?api_key=...`) - keeping the host,
 /// path and query *keys* so logs stay useful. Inputs that don't parse as a URL
 /// (e.g. a TCP `host:port` target) or carry neither are returned unchanged.
-pub(super) fn redact_url_secrets(raw: &str) -> std::borrow::Cow<'_, str> {
+#[must_use]
+pub fn redact_url_secrets(raw: &str) -> std::borrow::Cow<'_, str> {
     let Ok(mut url) = reqwest::Url::parse(raw) else {
         return std::borrow::Cow::Borrowed(raw);
     };

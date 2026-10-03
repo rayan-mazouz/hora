@@ -763,3 +763,29 @@ async fn the_page_can_go_on_a_home_screen() {
     let res = app.oneshot(get("/apple-touch-icon.png")).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn monitor_page_never_shows_target_credentials() {
+    let (app, _store) = app_with_pool(
+        r#"
+        [page]
+        [server]
+        auth_token = "0123456789abcdef"
+        [server.group_tokens]
+        App = "appappappappapp1"
+        [[monitors]]
+        id = "api"
+        name = "API"
+        target = "https://ops:hunter2@api.example.com/health?api_key=k3y"
+        interval_secs = 60
+        group = "App"
+    "#,
+    )
+    .await;
+    for token in ["appappappappapp1", "0123456789abcdef"] {
+        let uri = format!("/monitor/api?token={token}");
+        let page = body_text(app.clone().oneshot(get(&uri)).await.unwrap()).await;
+        assert!(page.contains("api.example.com/health"), "{page}");
+        assert!(!page.contains("hunter2") && !page.contains("k3y"), "{page}");
+    }
+}

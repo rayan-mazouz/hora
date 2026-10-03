@@ -175,7 +175,10 @@ pub(crate) fn build(
             )
         }),
         checked,
-        target: (show_target && !monitor.target().is_empty()).then(|| monitor.target().to_owned()),
+        // A target URL may carry credentials (`https://user:pass@...`,
+        // `?api_key=${KEY}`): a group viewer is a client, not the operator.
+        target: (show_target && !monitor.target().is_empty())
+            .then(|| hora_core::config::redact_url_secrets(monitor.target()).into_owned()),
         why: why_line(&m, now),
         tiles: tiles(&m, monitor, incidents),
         has_events: chart.contains("spark-event"),
@@ -541,7 +544,10 @@ fn details(
         humanize_secs(monitor.interval_secs)
     );
     if show_target && !monitor.target().is_empty() {
-        probe = format!("{probe}, {}", monitor.target());
+        probe = format!(
+            "{probe}, {}",
+            hora_core::config::redact_url_secrets(monitor.target())
+        );
     }
     rows.push(("Probe".to_owned(), probe));
     if let Some(at) = &m.last_checked {
