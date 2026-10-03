@@ -202,7 +202,12 @@ fn first_line(output: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(output);
     let line = text.lines().next()?.trim();
     let line = line.split('|').next().unwrap_or(line).trim();
-    (!line.is_empty()).then(|| line.chars().take(MAX_MESSAGE_CHARS).collect())
+    (!line.is_empty()).then(|| {
+        crate::fmt::printable(line)
+            .chars()
+            .take(MAX_MESSAGE_CHARS)
+            .collect()
+    })
 }
 
 /// Map an exit code to an outcome, monitoring-plugins style. `None` (killed

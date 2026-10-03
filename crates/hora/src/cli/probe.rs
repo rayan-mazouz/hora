@@ -154,14 +154,14 @@ async fn print_probe_report(
         println!("  code      {code}");
     }
     if let Some(error) = &outcome.error {
-        println!("  error     {error}");
+        println!("  error     {}", hora_core::fmt::printable(error));
     }
     if let Some(first_line) = outcome
         .snapshot
         .as_deref()
         .and_then(|snapshot| snapshot.lines().next())
     {
-        println!("  answered  {first_line}");
+        println!("  answered  {}", hora_core::fmt::printable(first_line));
     }
 
     // Only read the certificate when the probe actually reached the server (up,

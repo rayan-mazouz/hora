@@ -57,10 +57,14 @@ pub const MAX_ALERT_TITLE_CHARS: usize = 200;
 /// A push heartbeat's `msg`, and a pushed alert's message.
 pub const MAX_PUSH_MSG_CHARS: usize = 500;
 
-/// `text` trimmed and cut to at most `max_chars` characters.
+/// `text` trimmed, cut to at most `max_chars` characters, its control
+/// characters (bar newlines and tabs) replaced (see [`fmt::printable`]).
 #[must_use]
 pub fn bounded(text: &str, max_chars: usize) -> String {
-    text.trim().chars().take(max_chars).collect()
+    fmt::printable(text.trim())
+        .chars()
+        .take(max_chars)
+        .collect()
 }
 
 /// Parse a human duration like `90s`, `10m`, `2h`, `1d` or a concatenation

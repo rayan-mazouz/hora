@@ -97,10 +97,12 @@ pub(crate) async fn push(
         return Err(AppError::BadRequest("ping must not be negative"));
     }
     // Bound the stored message so a buggy or hostile pusher can't bloat the DB.
-    let msg = query
-        .msg
-        .as_deref()
-        .map(|msg| msg.chars().take(MAX_PUSH_MSG_CHARS).collect::<String>());
+    let msg = query.msg.as_deref().map(|msg| {
+        hora_core::fmt::printable(msg)
+            .chars()
+            .take(MAX_PUSH_MSG_CHARS)
+            .collect::<String>()
+    });
     db::insert_push(&state.store, &id, status, query.ping, msg.as_deref()).await?;
     Ok("ok")
 }
@@ -202,14 +204,10 @@ pub(crate) async fn post_alert(
             "severity must be info, warning, error or critical",
         ))?,
     };
-    let title: String = request
-        .title
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .chars()
-        .take(MAX_ALERT_TITLE_CHARS)
-        .collect();
+    let title = hora_core::bounded(
+        request.title.as_deref().unwrap_or(""),
+        MAX_ALERT_TITLE_CHARS,
+    );
     if title.is_empty() {
         return Err(AppError::BadRequest("title must not be empty"));
     }
@@ -306,15 +304,15 @@ fn spawn_alert_dispatch(
 /// `key=value` line (sorted, so the same alert always reads identically). Every
 /// part is trimmed and bounded.
 fn render_alert_message(message: &str, tags: &std::collections::HashMap<String, String>) -> String {
-    let mut out: String = message.trim().chars().take(MAX_PUSH_MSG_CHARS).collect();
+    let mut out = hora_core::bounded(message, MAX_PUSH_MSG_CHARS);
     let mut pairs: Vec<(&String, &String)> = tags.iter().collect();
     pairs.sort_by(|a, b| a.0.cmp(b.0));
     for (key, value) in pairs.into_iter().take(MAX_ALERT_TAGS) {
-        let key: String = key.trim().chars().take(MAX_ALERT_TAG_CHARS).collect();
+        let key = hora_core::bounded(key, MAX_ALERT_TAG_CHARS);
         if key.is_empty() {
             continue;
         }
-        let value: String = value.trim().chars().take(MAX_ALERT_TAG_CHARS).collect();
+        let value = hora_core::bounded(value, MAX_ALERT_TAG_CHARS);
         if !out.is_empty() {
             out.push('\n');
         }

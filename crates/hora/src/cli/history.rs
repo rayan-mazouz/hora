@@ -124,7 +124,10 @@ pub(crate) async fn postmortem(id_arg: &str) -> Result<(), CliError> {
         return Err(no_such_incident(id));
     };
     let name = config.monitor_name(&incident.monitor_id);
-    print!("{}", hora_core::postmortem::render(&incident, name));
+    print!(
+        "{}",
+        fmt::printable(&hora_core::postmortem::render(&incident, name))
+    );
     Ok(())
 }
 
@@ -149,7 +152,7 @@ pub(crate) async fn list_incidents(limit: i64) -> Result<(), CliError> {
         };
         println!("#{}  {name}  {span}", incident.id);
         if let Some(error) = &incident.error {
-            println!("      error: {error}");
+            println!("      error: {}", fmt::printable(error));
         }
         // The full snapshot lives on /history; the status line is enough here.
         if let Some(first_line) = incident
@@ -157,10 +160,10 @@ pub(crate) async fn list_incidents(limit: i64) -> Result<(), CliError> {
             .as_deref()
             .and_then(|snapshot| snapshot.lines().next())
         {
-            println!("      answered: {first_line}");
+            println!("      answered: {}", fmt::printable(first_line));
         }
         if let Some(note) = &incident.note {
-            println!("      note:  {note}");
+            println!("      note:  {}", fmt::printable(note));
         }
     }
     Ok(())

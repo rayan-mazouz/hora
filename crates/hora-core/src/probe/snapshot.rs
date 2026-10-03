@@ -72,7 +72,7 @@ fn is_sensitive_header(name: &reqwest::header::HeaderName) -> bool {
 /// Assemble the stored failure snapshot: status line and headers, a blank
 /// line, then the start of the body (lossy UTF-8, bounded in chars).
 pub(super) fn render_snapshot(head: &str, body: &[u8]) -> String {
-    let text: String = String::from_utf8_lossy(body)
+    let text: String = crate::fmt::printable(&String::from_utf8_lossy(body))
         .chars()
         .take(MAX_SNAPSHOT_BODY_CHARS)
         .collect();
@@ -97,6 +97,7 @@ pub(super) fn snippet(body: &[u8]) -> String {
             acc
         })
         .chars()
+        .filter(|c| !c.is_control())
         .take(MAX_BODY_SNIPPET)
         .collect()
 }

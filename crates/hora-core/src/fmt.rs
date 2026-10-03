@@ -134,6 +134,28 @@ pub fn xml_escape(text: &str) -> String {
     out
 }
 
+/// `text` with every control character other than a newline or a tab
+/// replaced by U+FFFD, so remote-controlled text (a probed server's body, a
+/// push `msg`, a plugin's output) cannot carry terminal escape sequences
+/// (`ESC ]0;...`, `ESC [2J`, OSC 52 clipboard writes) into a terminal that
+/// prints it - `hora incidents`, `hora postmortem`, `hora probe`.
+#[must_use]
+pub fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.chars().any(is_unprintable) {
+        std::borrow::Cow::Owned(
+            text.chars()
+                .map(|c| if is_unprintable(c) { '\u{FFFD}' } else { c })
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+fn is_unprintable(c: char) -> bool {
+    c.is_control() && c != '\n' && c != '\t'
+}
+
 /// Percent-encode `value` for a URL component (RFC 3986): every byte outside
 /// the unreserved set becomes `%XX`, uppercase hex.
 #[must_use]
@@ -155,6 +177,17 @@ pub fn percent_encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn printable_neutralises_terminal_escapes() {
+        assert_eq!(printable("HTTP 500: ok"), "HTTP 500: ok");
+        assert_eq!(
+            printable("\u{1b}]0;title\u{7}\u{1b}[2Jx\nline\ttab"),
+            "\u{FFFD}]0;title\u{FFFD}\u{FFFD}[2Jx\nline\ttab"
+        );
+        // C1 controls (a single-byte CSI) too.
+        assert_eq!(printable("a\u{9b}31mb"), "a\u{FFFD}31mb");
+    }
 
     #[test]
     fn sizes_read_in_binary_units() {
