@@ -61,7 +61,7 @@ pub(crate) struct IncidentView {
     pub(super) at: Option<String>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Clone, Serialize, ToSchema)]
 pub(crate) struct MaintenanceView {
     pub(crate) reason: String,
     pub(crate) monitors: String,
@@ -69,7 +69,7 @@ pub(crate) struct MaintenanceView {
 
 /// A watched peer's view for the status page: just its current status and when it
 /// was last seen. Peers are deliberately rendered apart from monitors.
-#[derive(Serialize, ToSchema)]
+#[derive(Clone, Serialize, ToSchema)]
 pub(crate) struct PeerView {
     pub(super) id: String,
     pub(crate) name: String,
@@ -93,7 +93,10 @@ pub(crate) struct ChannelView {
     pub(super) failing_for_secs: Option<u64>,
 }
 
-#[derive(Serialize, ToSchema)]
+/// A card. Cloned only to adjust a few fields for another audience (see
+/// `summary::derive`): the heavy parts - the chart SVGs and the daily bar -
+/// are shared, not copied.
+#[derive(Clone, Serialize, ToSchema)]
 pub(crate) struct MonitorView {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -146,9 +149,16 @@ pub(crate) struct MonitorView {
     #[serde(skip)]
     pub(super) cert_state: &'static str,
     #[serde(rename = "history")]
-    pub(super) bar: Vec<DayCell>,
+    #[schema(value_type = Vec<DayCell>)]
+    pub(super) bar: DayBar,
+    /// The sparkline as this audience sees it (event markers for the
+    /// operator only).
     #[serde(skip)]
-    pub(super) chart_svg: String,
+    pub(super) chart_svg: Arc<str>,
+    /// The sparkline without event markers, what every other audience gets
+    /// (the same allocation as `chart_svg` when no marker falls on it).
+    #[serde(skip)]
+    pub(super) chart_plain: Arc<str>,
     /// Display group this monitor belongs to.
     pub(super) group: Option<String>,
     /// Upstream monitor name causing this failure (topology annotation).
@@ -176,6 +186,40 @@ pub(crate) struct VantageView {
     /// The pre-formatted card label ("Hora B: 220ms" / "Hora B: down").
     #[serde(skip)]
     pub(crate) label: String,
+}
+
+/// The daily uptime bar, shared between a card and its copies for other
+/// audiences. Iterates and serializes like the plain list of cells.
+#[derive(Clone)]
+pub(crate) struct DayBar(Arc<[DayCell]>);
+
+impl From<Vec<DayCell>> for DayBar {
+    fn from(cells: Vec<DayCell>) -> Self {
+        Self(cells.into())
+    }
+}
+
+impl std::ops::Deref for DayBar {
+    type Target = [DayCell];
+
+    fn deref(&self) -> &[DayCell] {
+        &self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a DayBar {
+    type Item = &'a DayCell;
+    type IntoIter = std::slice::Iter<'a, DayCell>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl Serialize for DayBar {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter())
+    }
 }
 
 #[derive(Clone, Serialize, ToSchema)]

@@ -80,8 +80,8 @@ pub(crate) async fn announce(
     )
     .map_err(|err| AppError::BadRequest(err.message()))?;
     let id = announcement.pin(&state.pool).await?;
-    // Visitors should see the banner now, not when the summary cache rolls.
-    state.cache.invalidate();
+    // Visitors should see the banner on their next view, not a refresh later.
+    state.refresh_now().await;
     tracing::info!(
         title = %announcement.title,
         severity = %announcement.severity,
@@ -111,7 +111,7 @@ pub(crate) async fn announce_clear(
     _operator: Operator,
 ) -> Result<Json<AnnounceClearResponse>, AppError> {
     let cleared = db::clear_announcements(&state.pool, Utc::now().timestamp()).await?;
-    state.cache.invalidate();
+    state.refresh_now().await;
     tracing::info!(cleared, "announcements cleared via API");
     Ok(Json(AnnounceClearResponse { cleared }))
 }
@@ -153,9 +153,9 @@ pub(crate) async fn post_event(
         return Err(AppError::BadRequest("title must not be empty"));
     }
     let id = db::insert_event(&state.pool, &title).await?;
-    // The marker should appear on the operator's sparklines now, not when the
-    // summary cache rolls.
-    state.cache.invalidate();
+    // The marker should appear on the operator's sparklines on the next view,
+    // not a refresh later.
+    state.refresh_now().await;
     tracing::info!(%title, "event marker recorded via API");
     Ok(Json(EventResponse { id }))
 }

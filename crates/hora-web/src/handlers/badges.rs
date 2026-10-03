@@ -1,7 +1,5 @@
 //! SVG images: status and uptime badges, and the latency heatmap.
 
-use std::sync::Arc;
-
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use badgelib::Style;
@@ -40,15 +38,16 @@ pub(crate) async fn heatmap_svg(
     // The image does not depend on who asks (visibility is settled above), and
     // it groups 28 days of checks: one render per monitor serves everyone for
     // a minute.
-    if let Some(svg) = state.heatmaps.get(&id, config) {
-        return Ok(svg_response(svg.as_ref().clone()));
-    }
-    let now = Utc::now().timestamp();
-    let since = (now / 86_400 - (crate::heatmap::HEATMAP_DAYS - 1)) * 86_400;
-    let cells = db::latency_hourly(&state.pool, &id, since).await?;
-    let svg = crate::heatmap::render(&cells, now, &monitor.name);
-    state.heatmaps.insert(&id, config, Arc::new(svg.clone()));
-    Ok(svg_response(svg))
+    let svg = state
+        .heatmaps
+        .get_or_build(&id, config, async {
+            let now = Utc::now().timestamp();
+            let since = (now / 86_400 - (crate::heatmap::HEATMAP_DAYS - 1)) * 86_400;
+            let cells = db::latency_hourly(&state.pool, &id, since).await?;
+            Ok::<_, sqlx::Error>(crate::heatmap::render(&cells, now, &monitor.name))
+        })
+        .await?;
+    Ok(svg_response(svg.as_ref().clone()))
 }
 
 #[derive(Deserialize)]

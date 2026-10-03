@@ -1,20 +1,20 @@
 //! The read-only JSON API and the Prometheus metrics.
 
-use std::sync::Arc;
-
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::header;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde::Deserialize;
 
 use hora_core::db::{self, Point};
 
-use super::{state_summary, visible_monitor};
+use super::visible_monitor;
 use crate::auth::Viewer;
 use crate::error::AppError;
 use crate::metrics;
+use crate::snapshot::Body;
 use crate::summary::Summary;
 use crate::visibility::Visibility;
 use crate::{AppState, MAX_LATENCY_HOURS, MAX_LATENCY_POINTS, SECONDS_PER_HOUR};
@@ -28,23 +28,52 @@ use crate::{AppState, MAX_LATENCY_HOURS, MAX_LATENCY_POINTS, SECONDS_PER_HOUR};
 pub(crate) async fn summary_json(
     State(state): State<AppState>,
     viewer: Viewer,
-) -> Json<Arc<Summary>> {
-    Json(state_summary(&state, &viewer.config, &viewer.audience).await)
+) -> Result<Response, AppError> {
+    // Serialized once per snapshot and audience, then served from memory.
+    let body = cached_body(
+        &state,
+        &viewer,
+        Body::Json(viewer.audience.clone()),
+        |summary| serde_json::to_vec(summary).map_err(AppError::from),
+    )
+    .await?;
+    Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
 }
 
 pub(crate) async fn metrics_prometheus(
     State(state): State<AppState>,
     viewer: Viewer,
-) -> impl IntoResponse {
-    let summary = state_summary(&state, &viewer.config, &viewer.audience).await;
-    let body = metrics::render(&summary);
-    (
+) -> Result<Response, AppError> {
+    let body = cached_body(
+        &state,
+        &viewer,
+        Body::Metrics(viewer.audience.clone()),
+        |summary| Ok(metrics::render(summary).into_bytes()),
+    )
+    .await?;
+    Ok((
         [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
         body,
     )
+        .into_response())
+}
+
+/// A body rendered from the viewer's summary, once per snapshot.
+async fn cached_body(
+    state: &AppState,
+    viewer: &Viewer,
+    key: Body,
+    render: impl FnOnce(&Summary) -> Result<Vec<u8>, AppError>,
+) -> Result<Bytes, AppError> {
+    let snapshot = state.snapshot().await;
+    let body = snapshot.body(&viewer.config, key, || {
+        let summary = snapshot.summary(&viewer.config, &viewer.audience);
+        render(&summary).map(|bytes| Some(Bytes::from(bytes)))
+    })?;
+    Ok(body.unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]

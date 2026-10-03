@@ -2,9 +2,9 @@
 //! Atom feed, incidents, the timeline and the monthly report.
 
 use std::future::Future;
-use std::sync::Arc;
 
 use askama::Template;
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, header};
 use axum::response::{Html, IntoResponse, Response};
@@ -14,14 +14,14 @@ use serde::Deserialize;
 use hora_core::config::{Config, Kind};
 use hora_core::db::{self};
 
-use super::state_summary;
 use crate::AppState;
 use crate::auth::Viewer;
 use crate::error::AppError;
 use crate::history;
+use crate::snapshot::Body;
 use crate::summary::{StatusTemplate, Summary};
 use crate::text;
-use crate::visibility::Visibility;
+use crate::visibility::{Audience, Visibility};
 
 /// Text clients (curl, wget, or an explicit text/plain Accept) get the aligned
 /// plain-text rendering; everyone else the HTML page.
@@ -36,14 +36,51 @@ fn wants_text(headers: &HeaderMap) -> bool {
             .is_some_and(|accept| accept.contains("text/plain") && !accept.contains("text/html"))
 }
 
-/// Render a status summary as the HTML page or, for text clients, plain text.
-fn status_response(headers: &HeaderMap, summary: &Summary) -> Result<Response, AppError> {
-    if wants_text(headers) {
-        let body = text::render(summary);
+/// The status page - whole, or one group's - as `audience` sees it: the HTML
+/// page or, for text clients, plain text. Rendered once per snapshot and
+/// audience, then served from memory. A group this audience sees nothing of
+/// answers 404.
+async fn status_response(
+    state: &AppState,
+    viewer: &Viewer,
+    audience: &Audience,
+    group: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<Response, AppError> {
+    let config = &viewer.config;
+    let text = wants_text(headers);
+    let snapshot = state.snapshot().await;
+    let key = if text {
+        Body::Text(audience.clone(), group.map(str::to_owned))
+    } else {
+        Body::Page(audience.clone(), group.map(str::to_owned))
+    };
+    let body = snapshot
+        .body(config, key, || {
+            let whole = snapshot.summary(config, audience);
+            let scoped;
+            let summary: &Summary = match group {
+                None => &whole,
+                Some(group) => match crate::summary::for_group(&whole, config, group) {
+                    Some(view) => {
+                        scoped = view;
+                        &scoped
+                    }
+                    None => return Ok(None),
+                },
+            };
+            let body = if text {
+                text::render(summary)
+            } else {
+                StatusTemplate { summary }.render()?
+            };
+            Ok::<_, AppError>(Some(Bytes::from(body)))
+        })?
+        .ok_or(AppError::NotFound("unknown group"))?;
+    if text {
         Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response())
     } else {
-        let html = StatusTemplate { summary }.render()?;
-        Ok(Html(html).into_response())
+        Ok(Html(body).into_response())
     }
 }
 
@@ -52,8 +89,7 @@ pub(crate) async fn page(
     viewer: Viewer,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let summary = state_summary(&state, &viewer.config, &viewer.audience).await;
-    status_response(&headers, &summary)
+    status_response(&state, &viewer, &viewer.audience, None, &headers).await
 }
 
 /// The per-group status page (`/status/{group}`): the monitors of one display
@@ -71,10 +107,7 @@ pub(crate) async fn group_page(
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let audience = viewer.audience_for_group(&group);
-    let summary = state_summary(&state, &viewer.config, &audience).await;
-    let view = crate::summary::for_group(&summary, &viewer.config, &group)
-        .ok_or(AppError::NotFound("unknown group"))?;
-    status_response(&headers, &view)
+    status_response(&state, &viewer, &audience, Some(&group), &headers).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,13 +154,14 @@ pub(crate) async fn report_page(
 
     // The built report does not depend on the audience (rows are filtered
     // below), so one copy per month serves every viewer for a minute.
-    let report = if let Some(report) = state.reports.get(&month, config) {
-        report
-    } else {
-        let report = Arc::new(hora_core::report::build(&state.pool, config, &month).await?);
-        state.reports.insert(&month, config, Arc::clone(&report));
-        report
-    };
+    let report = state
+        .reports
+        .get_or_build(
+            &month,
+            config,
+            hora_core::report::build(&state.pool, config, &month),
+        )
+        .await?;
     let groups = crate::report::group_rows(&report, |row| {
         visibility.can_see(&row.id)
             && query

@@ -1471,6 +1471,7 @@ dependencies = [
  "axum",
  "badgelib",
  "chrono",
+ "futures-util",
  "hora-core",
  "reqwest",
  "serde",

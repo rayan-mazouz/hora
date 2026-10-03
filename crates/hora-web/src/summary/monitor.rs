@@ -22,6 +22,8 @@ use crate::visibility::Visibility;
 /// monitor id. Grouped so [`build_monitor_view`] stays a small, pure function.
 pub(crate) struct MonitorData<'a> {
     pub(super) recent: &'a HashMap<String, Vec<Latest>>,
+    /// Every monitor's current status, for the topology walk.
+    pub(super) statuses: &'a HashMap<String, &'static str>,
     pub(super) availability: &'a HashMap<String, (i64, i64)>,
     pub(super) daily: &'a HashMap<String, Vec<DayRow>>,
     pub(super) percentiles: &'a HashMap<String, Percentiles>,
@@ -68,7 +70,19 @@ pub(crate) fn build_monitor_view(
         .get(&monitor.id)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let chart_svg = sparkline(spark_points, status, data.events);
+    let chart_plain: Arc<str> = sparkline(spark_points, status, &[]).into();
+    // Only an event inside the series' span changes the chart; otherwise the
+    // operator's chart is the very same allocation.
+    let chart_svg: Arc<str> = if data.events.is_empty() {
+        Arc::clone(&chart_plain)
+    } else {
+        let marked = sparkline(spark_points, status, data.events);
+        if *marked == *chart_plain {
+            Arc::clone(&chart_plain)
+        } else {
+            marked.into()
+        }
+    };
     let pct = data.percentiles.get(&monitor.id).copied();
     let slo_state = slo_state(monitor.slo_latency_ms, pct.map(|p| p.p95));
 
@@ -79,13 +93,7 @@ pub(crate) fn build_monitor_view(
 
     let latest = recent.first();
     let (cause, impacted) = if status == "down" {
-        topology_context(
-            monitor,
-            ctx.threshold,
-            data.recent,
-            all_monitors,
-            visibility,
-        )
+        topology_context(monitor, data.statuses, all_monitors, visibility)
     } else {
         (None, Vec::new())
     };
@@ -123,8 +131,9 @@ pub(crate) fn build_monitor_view(
         cert_days,
         cert_label: cert_days.map(cert_label),
         cert_state: cert_state_for(cert_days, ctx.cert_threshold),
-        bar,
+        bar: bar.into(),
         chart_svg,
+        chart_plain,
         group: monitor.group.clone(),
         cause,
         impacted,
@@ -162,8 +171,7 @@ fn vantage_views(
 /// nameable down ancestor further up is still named.
 pub(super) fn topology_context(
     monitor: &Monitor,
-    threshold: i64,
-    recent_map: &HashMap<String, Vec<Latest>>,
+    statuses: &HashMap<String, &'static str>,
     all_monitors: &[Monitor],
     visibility: &Visibility<'_>,
 ) -> (Option<String>, Vec<String>) {
@@ -171,11 +179,7 @@ pub(super) fn topology_context(
 
     let upstreams = topology::transitive_upstreams(all_monitors, &monitor.id);
     for up_id in &upstreams {
-        let recent = recent_map
-            .get(*up_id)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        if db::derive_status(recent, threshold) == "down"
+        if statuses.get(*up_id).copied() == Some("down")
             && nameable(up_id)
             && let Some(name) = topology::monitor_name(all_monitors, up_id)
         {

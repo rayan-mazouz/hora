@@ -3,11 +3,9 @@
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
-use chrono::Utc;
 use serde::Deserialize;
 
-use hora_core::config::{Kind, Monitor};
-use hora_core::db::{self};
+use hora_core::config::Kind;
 
 use crate::AppState;
 use crate::auth::authorize_peer;
@@ -118,30 +116,29 @@ pub(crate) async fn peer_monitors(
     // What a mesh member may know: kind + target (it can probe those anyway
     // via /api/peer/probe) and this node's live view of each - never names,
     // notes or credentials. Push/exec monitors have no probeable target.
-    // Peers poll every minute, so this reads only the two inputs it answers
-    // with (the summary's status and p50), never the full page rebuild.
-    let shared: Vec<&Monitor> = config
+    // Answered from the status snapshot the page is served from (its
+    // statuses and 24h medians), never from the database.
+    let summary = state
+        .snapshot()
+        .await
+        .summary(&config, &crate::visibility::Audience::Operator);
+    let views: std::collections::HashMap<&str, &crate::summary::MonitorView> = summary
+        .monitors
+        .iter()
+        .map(|view| (view.id.as_str(), view.as_ref()))
+        .collect();
+    let monitors = config
         .monitors
         .iter()
         .filter(|monitor| !matches!(monitor.kind, Kind::Push | Kind::Exec))
-        .collect();
-    let threshold = i64::from(config.alerts.fail_threshold.max(1));
-    let since_24h = Utc::now().timestamp() - hora_core::SECONDS_PER_DAY;
-    let (recent, percentiles) = tokio::join!(
-        crate::summary::recent_checks_map(&state.pool, &shared, threshold),
-        db::latency_percentiles_all(&state.pool, since_24h),
-    );
-    let percentiles = crate::summary::or_empty(percentiles, "latency percentiles");
-    let monitors = shared
-        .iter()
-        .map(|monitor| hora_core::mesh::wire::PeerMonitor {
-            kind: monitor.kind,
-            target: monitor.target.clone(),
-            status: recent.get(&monitor.id).map_or_else(
-                || "unknown".to_owned(),
-                |checks| db::derive_status(checks, threshold).to_owned(),
-            ),
-            p50_ms: percentiles.get(&monitor.id).map(|(p50, _, _)| *p50),
+        .map(|monitor| {
+            let view = views.get(monitor.id.as_str());
+            hora_core::mesh::wire::PeerMonitor {
+                kind: monitor.kind,
+                target: monitor.target.clone(),
+                status: view.map_or("unknown", |view| view.status).to_owned(),
+                p50_ms: view.and_then(|view| view.p50_ms),
+            }
         })
         .collect();
     Ok(Json(hora_core::mesh::wire::PeerMonitors { monitors }))

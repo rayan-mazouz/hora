@@ -8,7 +8,7 @@ pub(crate) mod pages;
 pub(crate) mod peer;
 pub(crate) mod push;
 
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use axum::Json;
 use axum::extract::State;
@@ -23,8 +23,8 @@ use hora_core::mesh::wire::{HealthReport, PeerSeen};
 
 use crate::error::AppError;
 use crate::summary::{DayCell, IncidentView, MaintenanceView, MonitorView, Summary};
-use crate::visibility::{Audience, Visibility};
-use crate::{AppState, FAVICON_SVG, FONT_WOFF2, summary_for};
+use crate::visibility::Visibility;
+use crate::{AppState, FAVICON_SVG, FONT_WOFF2};
 
 // `paths(...)` below names the handlers unqualified: a module-qualified path
 // would become the operation's `OpenAPI` tag. utoipa resolves each
@@ -167,24 +167,6 @@ pub(crate) async fn openapi() -> Response {
         OPENAPI_JSON.as_str(),
     )
         .into_response()
-}
-
-/// Fetch (or build) the cached summary for `audience`. Infallible: a failing
-/// monitor degrades to an `unknown` card rather than failing the page.
-pub(crate) async fn state_summary(
-    state: &AppState,
-    config: &Arc<Config>,
-    audience: &Audience,
-) -> Arc<Summary> {
-    summary_for(
-        &state.pool,
-        config,
-        &state.cache,
-        audience,
-        &state.notifier,
-        &state.vantage,
-    )
-    .await
 }
 
 /// The configured monitor `id`, if this audience may see it. A private

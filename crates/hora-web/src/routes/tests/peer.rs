@@ -157,8 +157,8 @@ async fn peer_monitors_authenticates_and_discloses_probeable_targets() {
 
 #[tokio::test]
 async fn peer_monitors_match_the_full_summary() {
-    // The peer answer skips the page rebuild; it must still report exactly
-    // the status and p50 the authenticated summary shows.
+    // The peer answer reads the same snapshot as the page: it must report
+    // exactly the status and p50 the authenticated summary shows.
     let (app, pool) = test_app_with_pool().await;
     let now = chrono::Utc::now().timestamp();
     for (offset, latency) in [(60, 40), (120, 10), (180, 30), (240, 20), (300, 50)] {

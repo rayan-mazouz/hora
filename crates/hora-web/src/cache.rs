@@ -1,16 +1,16 @@
-//! Short-lived memoisation of expensive views: the status summary (one slot
-//! per audience), and the heatmap and report bodies. Every entry is tied to
-//! the config snapshot it was built from, so a reload busts it at once.
+//! Short-lived memoisation of the heatmap and report bodies (the status
+//! summary has its own background refresher, see `snapshot`). Every entry is
+//! tied to the config snapshot it was built from, so a reload busts it at
+//! once.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::ArcSwap;
 use hora_core::config::Config;
-
-use crate::summary::Summary;
 
 /// A value built from one config snapshot at one instant.
 pub(crate) struct Cached<V> {
@@ -33,16 +33,6 @@ impl<V> Cached<V> {
     }
 }
 
-/// Read a slot if it was built from `config` within `ttl`.
-pub(crate) fn fresh<V>(
-    slot: &ArcSwapOption<Cached<V>>,
-    config: &Arc<Config>,
-    ttl: Duration,
-) -> Option<Arc<V>> {
-    let cached = slot.load_full()?;
-    cached.fresh(config, ttl).then(|| Arc::clone(&cached.value))
-}
-
 /// A keyed memo with lock-free reads: the map is swapped whole on insert
 /// (copy-on-write, dropping stale entries on the way), so it only ever holds
 /// live keys - bounded by what callers validate as a key (configured monitor
@@ -50,6 +40,10 @@ pub(crate) fn fresh<V>(
 pub(crate) struct Memo<K, V> {
     ttl: Duration,
     entries: ArcSwap<HashMap<K, Arc<Cached<V>>>>,
+    /// Held while a missing entry is built, so a burst of requests hitting
+    /// an expired entry builds it once (the rest wait and reuse it) instead
+    /// of each running the same multi-week scan.
+    build: tokio::sync::Mutex<()>,
 }
 
 impl<K: Eq + Hash + Clone, V> Memo<K, V> {
@@ -57,7 +51,28 @@ impl<K: Eq + Hash + Clone, V> Memo<K, V> {
         Self {
             ttl,
             entries: ArcSwap::from_pointee(HashMap::new()),
+            build: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// The fresh entry for `key`, or the one `build` makes - single-flight:
+    /// concurrent misses wait for one build. A failed build caches nothing.
+    pub(crate) async fn get_or_build<E>(
+        &self,
+        key: &K,
+        config: &Arc<Config>,
+        build: impl Future<Output = Result<V, E>>,
+    ) -> Result<Arc<V>, E> {
+        if let Some(value) = self.get(key, config) {
+            return Ok(value);
+        }
+        let _building = self.build.lock().await;
+        if let Some(value) = self.get(key, config) {
+            return Ok(value);
+        }
+        let value = Arc::new(build.await?);
+        self.insert(key, config, Arc::clone(&value));
+        Ok(value)
     }
 
     pub(crate) fn get(&self, key: &K, config: &Arc<Config>) -> Option<Arc<V>> {
@@ -79,44 +94,6 @@ impl<K: Eq + Hash + Clone, V> Memo<K, V> {
             next.insert(key.clone(), Arc::clone(&entry));
             next
         });
-    }
-
-    pub(crate) fn clear(&self) {
-        self.entries.store(Arc::new(HashMap::new()));
-    }
-}
-
-/// The status-summary cache: lock-free reads (one slot per audience) plus a
-/// single-flight build gate. The `public` slot caches the summary filtered to
-/// public monitors, `operator` the unfiltered view served to the operator
-/// (admin page views, Prometheus scrapes), and `groups` each group-token
-/// holder's view - all bust on config reload.
-pub(crate) struct Cache {
-    pub(crate) public: ArcSwapOption<Cached<Summary>>,
-    pub(crate) operator: ArcSwapOption<Cached<Summary>>,
-    pub(crate) groups: Memo<String, Summary>,
-    pub(crate) build: tokio::sync::Mutex<()>,
-}
-
-impl Default for Cache {
-    fn default() -> Self {
-        Self {
-            public: ArcSwapOption::empty(),
-            operator: ArcSwapOption::empty(),
-            groups: Memo::new(crate::SUMMARY_CACHE_TTL),
-            build: tokio::sync::Mutex::new(()),
-        }
-    }
-}
-
-impl Cache {
-    /// Drop every cached view so the next request rebuilds it - used when a
-    /// write (pinning or clearing an announcement) must show up immediately
-    /// instead of after the TTL.
-    pub(crate) fn invalidate(&self) {
-        self.public.store(None);
-        self.operator.store(None);
-        self.groups.clear();
     }
 }
 
@@ -191,6 +168,31 @@ mod tests {
         // ...and inserting under it drops the stale one.
         memo.insert(&"b", &reloaded, Arc::new(2));
         assert_eq!(memo.entries.load().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn memo_builds_a_missing_entry_once_for_concurrent_misses() {
+        let memo: Memo<&str, u32> = Memo::new(Duration::from_mins(1));
+        let config = config();
+        let builds = std::sync::atomic::AtomicU32::new(0);
+        let build = || async {
+            builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Ok::<_, ()>(7)
+        };
+        let (a, b, c) = tokio::join!(
+            memo.get_or_build(&"k", &config, build()),
+            memo.get_or_build(&"k", &config, build()),
+            memo.get_or_build(&"k", &config, build()),
+        );
+        assert_eq!((*a.unwrap(), *b.unwrap(), *c.unwrap()), (7, 7, 7));
+        assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // A failure is not cached.
+        let failed = memo
+            .get_or_build(&"x", &config, async { Err::<u32, _>("no") })
+            .await;
+        assert_eq!(failed.unwrap_err(), "no");
+        assert!(memo.get(&"x", &config).is_none());
     }
 
     #[test]

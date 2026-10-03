@@ -98,6 +98,9 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
         handle.notifier.clone(),
     )
     .with_vantage(vantage_map);
+    // Build the status summary while the server comes up, so the first page
+    // view finds it ready instead of waiting for it.
+    state.start_refresher();
     // Connect-info gives the rate limiter the peer socket IP: the client key
     // unless `server.client_ip_header` names a trusted proxy header (forwarded
     // headers are never read by default - a direct client could forge them).

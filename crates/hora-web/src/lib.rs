@@ -11,6 +11,7 @@ mod metrics;
 mod render;
 mod report;
 mod routes;
+mod snapshot;
 mod summary;
 mod text;
 mod visibility;
@@ -22,21 +23,19 @@ use std::time::Duration;
 
 use axum::http::{HeaderName, Request};
 use hora_core::config::Config;
-use hora_core::notifications::{self, Notifiers};
+use hora_core::notifications::Notifiers;
 use sqlx::SqlitePool;
 use tokio::sync::watch;
 use tower_governor::errors::GovernorError;
 use tower_governor::key_extractor::{KeyExtractor, PeerIpKeyExtractor};
 
-use crate::cache::{Cache, Cached, Memo, ProbeClients};
-use crate::summary::{Summary, build_summary};
-use crate::visibility::{Audience, Visibility};
+use crate::cache::{Memo, ProbeClients};
+use crate::snapshot::{Refresher, Snapshot};
 
 pub use routes::router;
 
 pub(crate) const SECONDS_PER_HOUR: i64 = 3_600;
 pub(crate) const MAX_LATENCY_HOURS: i64 = 24 * 30;
-pub(crate) const SUMMARY_CACHE_TTL: Duration = Duration::from_secs(5);
 /// How long a rendered heatmap or a built monthly report is reused: both scan
 /// weeks of history and change slowly, and both are reachable anonymously.
 pub(crate) const VIEW_CACHE_TTL: Duration = Duration::from_mins(1);
@@ -70,7 +69,8 @@ pub(crate) const PERMISSIONS_POLICY: &str = "accelerometer=(), camera=(), geoloc
 pub struct AppState {
     pool: SqlitePool,
     config: watch::Receiver<Arc<Config>>,
-    cache: Arc<Cache>,
+    /// The status summary, rebuilt in the background (see [`snapshot`]).
+    refresher: Arc<Refresher>,
     /// Rendered heatmaps by monitor id (the image does not depend on the
     /// audience; visibility is checked before the lookup).
     heatmaps: Arc<Memo<String, String>>,
@@ -105,7 +105,7 @@ impl AppState {
         Self {
             pool,
             config,
-            cache: Arc::new(Cache::default()),
+            refresher: Arc::new(Refresher::default()),
             heatmaps: Arc::new(Memo::new(VIEW_CACHE_TTL)),
             reports: Arc::new(Memo::new(VIEW_CACHE_TTL)),
             probe_clients: Arc::new(ProbeClients::default()),
@@ -122,6 +122,24 @@ impl AppState {
     pub fn with_vantage(mut self, vantage: hora_core::mesh::vantage::VantageMap) -> Self {
         self.vantage = vantage;
         self
+    }
+
+    /// Start building the status summary in the background now, so the
+    /// first page view finds it ready (otherwise the first request starts
+    /// it, and waits for it).
+    pub fn start_refresher(&self) {
+        self.refresher.start(self);
+    }
+
+    /// The latest status snapshot (see [`snapshot`]).
+    pub(crate) async fn snapshot(&self) -> Arc<Snapshot> {
+        self.refresher.snapshot(self).await
+    }
+
+    /// Rebuild the snapshot and wait for it: an operator write that must
+    /// show on the next page view.
+    pub(crate) async fn refresh_now(&self) {
+        self.refresher.refresh_now(self).await;
     }
 }
 
@@ -171,55 +189,6 @@ impl ConfiguredIp {
         });
         Self { header }
     }
-}
-
-// --- Summary cache (lock-free read + single-flight build) ----------------
-
-/// Return a fresh-enough cached summary for `audience`, or build exactly one
-/// (single-flight) and cache it. The cache busts immediately when the config
-/// is reloaded.
-pub(crate) async fn summary_for(
-    pool: &SqlitePool,
-    config: &Arc<Config>,
-    cache: &Cache,
-    audience: &Audience,
-    notifier: &Notifiers,
-    vantage: &hora_core::mesh::vantage::VantageMap,
-) -> Arc<Summary> {
-    let cached = || match audience {
-        Audience::Public => cache::fresh(&cache.public, config, SUMMARY_CACHE_TTL),
-        Audience::Operator => cache::fresh(&cache.operator, config, SUMMARY_CACHE_TTL),
-        Audience::Group(group) => cache.groups.get(group, config),
-    };
-    if let Some(fresh) = cached() {
-        return fresh;
-    }
-    // Only one task builds at a time; the rest wait and reuse the result.
-    let _build = cache.build.lock().await;
-    if let Some(fresh) = cached() {
-        return fresh;
-    }
-    // Channel health is read live from the dispatcher - only for the
-    // operator's view, and only on a cache miss (every 5s at most).
-    let health = if *audience == Audience::Operator {
-        notifications::health_snapshot(notifier)
-    } else {
-        Vec::new()
-    };
-    // The poller's last snapshot: a lock-free read, never the network.
-    let vantage = vantage.load_full();
-    let visibility = Visibility::new(config, audience);
-    let summary = Arc::new(build_summary(pool, config, &visibility, &health, &vantage).await);
-    match audience {
-        Audience::Public => cache
-            .public
-            .store(Some(Arc::new(Cached::new(config, Arc::clone(&summary))))),
-        Audience::Operator => cache
-            .operator
-            .store(Some(Arc::new(Cached::new(config, Arc::clone(&summary))))),
-        Audience::Group(group) => cache.groups.insert(group, config, Arc::clone(&summary)),
-    }
-    summary
 }
 
 #[cfg(test)]

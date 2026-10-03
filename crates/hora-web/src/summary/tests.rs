@@ -105,10 +105,10 @@ fn topology_context_hides_private_names_from_public_view() {
         "#,
     )
     .expect("config");
-    // Everything is down (3 failed checks meets the threshold).
-    let recent: HashMap<String, Vec<Latest>> = ["db", "edge", "worker"]
+    // Everything is down.
+    let statuses: HashMap<String, &'static str> = ["db", "edge", "worker"]
         .into_iter()
-        .map(|id| (id.to_owned(), vec![check(0), check(0), check(0)]))
+        .map(|id| (id.to_owned(), "down"))
         .collect();
 
     let operator = Audience::Operator;
@@ -122,21 +122,21 @@ fn topology_context_hides_private_names_from_public_view() {
 
     // Operator: the private upstream is named as the cause.
     let edge = &config.monitors[1];
-    let (cause, _) = topology_context(edge, 3, &recent, &config.monitors, &operator);
+    let (cause, _) = topology_context(edge, &statuses, &config.monitors, &operator);
     assert_eq!(cause.as_deref(), Some("Internal DB"));
     // Public or another group: a private monitor's name never leaves
     // through a cause.
     for vis in [&public, &group] {
-        let (cause, _) = topology_context(edge, 3, &recent, &config.monitors, vis);
+        let (cause, _) = topology_context(edge, &statuses, &config.monitors, vis);
         assert_eq!(cause, None);
     }
 
     // Impacted lists drop private dependents outside the operator view.
     let db = &config.monitors[0];
-    let (_, impacted) = topology_context(db, 3, &recent, &config.monitors, &operator);
+    let (_, impacted) = topology_context(db, &statuses, &config.monitors, &operator);
     assert_eq!(impacted.len(), 2, "{impacted:?}");
     for vis in [&public, &group] {
-        let (_, impacted) = topology_context(db, 3, &recent, &config.monitors, vis);
+        let (_, impacted) = topology_context(db, &statuses, &config.monitors, vis);
         assert_eq!(impacted, vec!["Edge".to_owned()]);
     }
 }
@@ -149,4 +149,83 @@ fn budget_durations_and_pct_format() {
     assert_eq!(format_slo_pct(9990), "99.9");
     assert_eq!(format_slo_pct(9995), "99.95");
     assert_eq!(format_slo_pct(9900), "99");
+}
+
+#[tokio::test]
+async fn derived_views_share_unchanged_cards_and_redact_the_rest() {
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(":memory:")
+        .create_if_missing(true);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    db::migrator().run(&pool).await.unwrap();
+    let config = hora_core::config::parse(
+        r#"
+            [page]
+            [server]
+            auth_token = "seekrit-long-token"
+            [[monitors]]
+            id = "ok"
+            name = "Fine"
+            target = "https://ok.example.com"
+            interval_secs = 60
+            [[monitors]]
+            id = "bad"
+            name = "Failing"
+            target = "https://bad.example.com"
+            interval_secs = 60
+            [[monitors]]
+            id = "hidden"
+            name = "Hidden"
+            target = "https://hidden.example.com"
+            interval_secs = 60
+            public = false
+        "#,
+    )
+    .unwrap();
+    let now = Utc::now().timestamp();
+    for (id, status, error) in [
+        ("ok", 1, None),
+        ("bad", 2, Some("HTTP 500: stack trace")),
+        ("hidden", 1, None),
+    ] {
+        sqlx::query(
+            "INSERT INTO checks (time, monitor_id, status, latency_ms, error) VALUES (?, ?, ?, 40, ?)",
+        )
+        .bind(now - 60)
+        .bind(id)
+        .bind(status)
+        .bind(error)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let built = build_summary(
+        &pool,
+        &config,
+        &mut BuildState::default(),
+        &[],
+        &HashMap::new(),
+    )
+    .await;
+    assert_eq!(built.summary.monitors.len(), 3);
+
+    let audience = Audience::Public;
+    let public = derive(&built, &config, &Visibility::new(&config, &audience));
+    let ids: Vec<&str> = public.monitors.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["ok", "bad"]);
+    // The healthy card is the operator's own allocation...
+    assert!(Arc::ptr_eq(&public.monitors[0], &built.summary.monitors[0]));
+    // ...the failing one a copy with the safe reason, sharing the heavy parts.
+    let (theirs, ours) = (&public.monitors[1], &built.summary.monitors[1]);
+    assert_eq!(theirs.last_error.as_deref(), Some("HTTP 500"));
+    assert_eq!(ours.last_error.as_deref(), Some("HTTP 500: stack trace"));
+    assert!(Arc::ptr_eq(&theirs.chart_svg, &ours.chart_svg));
+    assert!(std::ptr::eq(theirs.bar.as_ptr(), ours.bar.as_ptr()));
+    assert_eq!(public.groups.len(), 1);
+    assert_eq!(public.groups[0].ids, ["ok", "bad"]);
+    assert_eq!(public.overall, "degraded");
 }

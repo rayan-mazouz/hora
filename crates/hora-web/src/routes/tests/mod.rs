@@ -5,6 +5,7 @@ mod annotations;
 mod pages;
 mod peer;
 mod push;
+mod snapshot;
 
 use super::*;
 
@@ -151,6 +152,19 @@ async fn healthz_is_503_when_degraded_with_the_same_body() {
 
 /// Like [`app_from`], with a live scheduler beacon and the pool returned.
 async fn app_with_pool(toml: &str) -> (Router, sqlx::SqlitePool) {
+    let (app, pool, tx) = app_with_reload(toml).await;
+    std::mem::forget(tx);
+    (app, pool)
+}
+
+/// Like [`app_with_pool`], plus the config sender, to reload the config.
+async fn app_with_reload(
+    toml: &str,
+) -> (
+    Router,
+    sqlx::SqlitePool,
+    watch::Sender<Arc<hora_core::config::Config>>,
+) {
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(":memory:")
         .create_if_missing(true);
@@ -164,14 +178,13 @@ async fn app_with_pool(toml: &str) -> (Router, sqlx::SqlitePool) {
     let client = hora_core::http::client(None).expect("client");
     let notifier = hora_core::notifications::shared(&config, &client);
     let (tx, rx) = watch::channel(config);
-    std::mem::forget(tx);
     let app = router(AppState::new(
         pool.clone(),
         rx,
         Arc::new(AtomicU64::new(fresh_tick())),
         notifier,
     ));
-    (app, pool)
+    (app, pool, tx)
 }
 
 /// Build an app from an arbitrary config TOML (the shared `test_app` has a

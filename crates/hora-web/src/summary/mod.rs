@@ -1,8 +1,10 @@
 //! The status summary: turning stored checks into the page/API view model.
 //!
-//! [`build_summary`] gathers everything in batched queries; the view-model
-//! types are in `view`, a monitor card's assembly in `monitor`, and the
-//! status/label helpers shared with the other views in `status`.
+//! [`build_summary`] gathers everything in batched queries, for the operator;
+//! [`derive`] cuts every other audience's view from that in memory. The
+//! view-model types are in `view`, a monitor card's assembly in `monitor`,
+//! and the status/label helpers shared with the other views in `status`.
+//! The refresher that calls them, off the request path, is `crate::snapshot`.
 
 mod monitor;
 mod status;
@@ -30,32 +32,44 @@ use hora_core::db::{self, Latest};
 use hora_core::notifications::ChannelHealthEntry;
 
 use crate::SPARK_BUCKETS;
-use crate::visibility::Visibility;
+use crate::visibility::{Audience, Visibility};
 
 /// Shared, read-only inputs for building each monitor's view.
 pub(crate) struct SummaryCtx {
     now: DateTime<Utc>,
     timestamp: i64,
-    since_24h: i64,
-    since_history: i64,
     threshold: i64,
     cert_threshold: i64,
     history_days: u16,
 }
 
-/// Build the page/API view model for one audience. Monitors the audience may
-/// not see are left out entirely - cards, groups and daily bars alike; failure
-/// reasons collapse to safe categories (see `probe::public_reason`) without
-/// detail; topology annotations never name a monitor the audience may not
-/// see. Event markers and channel health are operator streams; every other
-/// audience gets them empty.
+/// What the background refresher keeps from one build to the next: the
+/// incrementally maintained sparkline and daily-bar aggregates (see
+/// `hora_core::db::window`).
+#[derive(Default)]
+pub(crate) struct BuildState {
+    window: db::WindowCache,
+    sparklines: db::SparklineCache,
+    daily: db::DailyCache,
+}
+
+/// One build: the operator's summary, plus every configured monitor's status
+/// (the topology walk of another audience's view needs them all).
+pub(crate) struct Built {
+    pub(crate) summary: Arc<Summary>,
+    pub(crate) statuses: HashMap<String, &'static str>,
+}
+
+/// Build the operator's page/API view model - every monitor, full detail,
+/// event markers and channel health. Every other audience's view is derived
+/// from it in memory ([`derive`]), never from another pass over the database.
 pub(crate) async fn build_summary(
     pool: &SqlitePool,
     config: &Config,
-    visibility: &Visibility<'_>,
+    state: &mut BuildState,
     channel_health: &[ChannelHealthEntry],
     vantage: &HashMap<String, Vec<hora_core::mesh::vantage::PeerVantage>>,
-) -> Summary {
+) -> Built {
     let now = Utc::now();
     let timestamp = now.timestamp();
     // The daily fetch also feeds the error-budget arithmetic, so it must cover
@@ -68,58 +82,54 @@ pub(crate) async fn build_summary(
         .max()
         .unwrap_or(0);
     let fetch_days = config.page.history_days.max(slo_days);
+    let since_24h = timestamp - SECONDS_PER_DAY;
+    let since_history = timestamp - i64::from(fetch_days) * SECONDS_PER_DAY;
     let ctx = SummaryCtx {
         now,
         timestamp,
-        since_24h: timestamp - SECONDS_PER_DAY,
-        since_history: timestamp - i64::from(fetch_days) * SECONDS_PER_DAY,
         threshold: i64::from(config.alerts.fail_threshold.max(1)),
         cert_threshold: i64::from(config.alerts.cert_expiry_days),
         history_days: config.page.history_days,
     };
-    let operator_streams = visibility.sees_operator_streams();
+    let operator = Audience::Operator;
+    let visibility = Visibility::new(config, &operator);
+    let monitors: Vec<&Monitor> = config.monitors.iter().collect();
 
-    let visible_monitors: Vec<&Monitor> = config
-        .monitors
-        .iter()
-        .filter(|monitor| visibility.can_see_monitor(monitor))
-        .collect();
-
-    // The 24h/90d aggregates batch into one query each, and the batches are
-    // independent, so they run concurrently: under WAL every read gets its own
-    // pool connection and the rebuild costs the slowest query, not the sum of
-    // all of them. A failed query degrades to empty data ("no data" cards)
-    // rather than blacking out the page.
+    // The batches are independent, so they run concurrently: under WAL every
+    // read gets its own pool connection and the build costs the slowest
+    // query, not the sum. A failed query degrades to empty data ("no data"
+    // cards) rather than blacking out the page. The 24h figures, sparklines
+    // and bars come from the hourly roll-ups and caches kept across builds
+    // (`state`): a build reads what changed since the last one, never a day
+    // of raw checks (the first build after start fills the caches).
     let bucket_secs = (SECONDS_PER_DAY / SPARK_BUCKETS).max(1);
-    // Latency is summarised in SQL: exact percentiles, plus a bucket-averaged
-    // series for the sparkline. The raw 24h samples never enter memory or the
-    // page, so both stay bounded by the monitor count, not the check frequency.
-    let (availability, daily, percentiles, sparklines, certs, recent, events) = tokio::join!(
-        db::availability_all(pool, ctx.since_24h),
-        db::daily_all(pool, ctx.since_history, ctx.timestamp),
-        db::latency_percentiles_all(pool, ctx.since_24h),
-        db::latency_sparkline_all(pool, ctx.since_24h, bucket_secs),
+    let BuildState {
+        window,
+        sparklines,
+        daily,
+    } = state;
+    let (window, daily, sparklines, certs, recent, events) = tokio::join!(
+        window.refresh(pool, since_24h, timestamp),
+        daily.refresh(pool, since_history, timestamp),
+        sparklines.refresh(pool, since_24h, bucket_secs, timestamp),
         db::cert_all(pool),
-        recent_checks_map(pool, &visible_monitors, ctx.threshold.max(1)),
-        // Event markers overlay the sparklines - operator info (deploy titles),
-        // so only the operator's view fetches them; every other stays bare.
-        async {
-            if operator_streams {
-                db::events_since(pool, ctx.since_24h).await
-            } else {
-                Ok(Vec::new())
-            }
-        },
+        recent_checks_map(pool, &monitors, ctx.threshold.max(1)),
+        db::events_since(pool, since_24h),
     );
-    let availability = or_empty(availability, "availability");
+    let window = or_empty(window, "24h window");
     let daily = or_empty(daily, "daily");
-    let percentiles = percentile_map(or_empty(percentiles, "latency percentiles"));
     let sparklines = or_empty(sparklines, "latency sparklines");
     let certs = or_empty(certs, "certificates");
     let events = or_empty(events, "events");
+    let (availability, percentiles) = split_window(&window);
+    let statuses: HashMap<String, &'static str> = recent
+        .iter()
+        .map(|(id, checks)| (id.clone(), db::derive_status(checks, ctx.threshold)))
+        .collect();
 
     let data = MonitorData {
         recent: &recent,
+        statuses: &statuses,
         availability: &availability,
         daily: &daily,
         percentiles: &percentiles,
@@ -129,10 +139,10 @@ pub(crate) async fn build_summary(
         vantage,
     };
 
-    let monitors: Vec<Arc<MonitorView>> = visible_monitors
+    let monitors: Vec<Arc<MonitorView>> = monitors
         .iter()
         .map(|monitor| {
-            let mut view = build_monitor_view(monitor, &ctx, &data, &config.monitors, visibility);
+            let mut view = build_monitor_view(monitor, &ctx, &data, &config.monitors, &visibility);
             view.maintenance = config
                 .active_maintenance(&monitor.id, now)
                 .map(|window| window.title.clone());
@@ -160,7 +170,7 @@ pub(crate) async fn build_summary(
     // changes a card's height and disturbs the grid).
     let maintenances = build_maintenances(config, now, None);
 
-    Summary {
+    let summary = Summary {
         title: config.page.title.clone(),
         overall,
         overall_label: overall_label(overall),
@@ -171,12 +181,106 @@ pub(crate) async fn build_summary(
         monitors,
         groups,
         peers,
-        channels: if operator_streams {
-            channel_views(channel_health)
-        } else {
-            Vec::new()
-        },
+        channels: channel_views(channel_health),
+    };
+    Built {
+        summary: Arc::new(summary),
+        statuses,
     }
+}
+
+/// The 24h figures as the cards read them: `(available, total)` and the
+/// percentiles, per monitor.
+fn split_window(
+    window: &HashMap<String, db::WindowStats>,
+) -> (HashMap<String, (i64, i64)>, HashMap<String, Percentiles>) {
+    let availability = window
+        .iter()
+        .map(|(id, stats)| (id.clone(), (stats.available, stats.total)))
+        .collect();
+    let percentiles = window
+        .iter()
+        .filter_map(|(id, stats)| {
+            let (p50, p95, p99) = stats.latency.p50_p95_p99()?;
+            Some((id.clone(), Percentiles { p50, p95, p99 }))
+        })
+        .collect();
+    (availability, percentiles)
+}
+
+/// Derive another audience's view from the operator's: the monitors it may
+/// not see are left out entirely - cards, groups and daily bars alike;
+/// failure reasons collapse to safe categories (see `probe::public_reason`)
+/// without detail; topology annotations never name a monitor it may not see;
+/// event markers and channel health are operator streams, so they go. A card
+/// that needs none of that is shared with the operator's view as is.
+/// `config` is the live one: a monitor made private by a reload disappears
+/// from the next request, before the next build.
+pub(crate) fn derive(built: &Built, config: &Config, visibility: &Visibility<'_>) -> Summary {
+    let operator = &built.summary;
+    let monitors: Vec<Arc<MonitorView>> = operator
+        .monitors
+        .iter()
+        .filter(|view| visibility.can_see(&view.id))
+        .filter_map(|view| {
+            let monitor = config.monitors.iter().find(|m| m.id == view.id)?;
+            Some(derive_view(view, monitor, built, config, visibility))
+        })
+        .collect();
+    let overall = monitors
+        .iter()
+        .fold("up", |worst, m| worse(worst, m.status));
+    let groups = build_groups(&monitors, &config.monitors);
+    Summary {
+        title: operator.title.clone(),
+        overall,
+        overall_label: overall_label(overall),
+        generated_at: operator.generated_at.clone(),
+        updated_utc: operator.updated_utc.clone(),
+        incidents: operator.incidents.clone(),
+        maintenances: operator.maintenances.clone(),
+        monitors,
+        groups,
+        peers: operator.peers.clone(),
+        channels: Vec::new(),
+    }
+}
+
+/// One card for a non-operator audience (see [`derive`]).
+fn derive_view(
+    view: &Arc<MonitorView>,
+    monitor: &Monitor,
+    built: &Built,
+    config: &Config,
+    visibility: &Visibility<'_>,
+) -> Arc<MonitorView> {
+    // The stored reason carries operator detail (body snippets, DNS
+    // answers); an audience without detail gets the safe category instead.
+    let last_error = view.last_error.as_deref().map(|reason| {
+        if visibility.detailed(&view.id) {
+            reason.to_owned()
+        } else {
+            hora_core::probe::public_reason(reason).to_owned()
+        }
+    });
+    let (cause, impacted) = if view.status == "down" {
+        monitor::topology_context(monitor, &built.statuses, &config.monitors, visibility)
+    } else {
+        (None, Vec::new())
+    };
+    if last_error == view.last_error
+        && cause == view.cause
+        && impacted == view.impacted
+        && Arc::ptr_eq(&view.chart_svg, &view.chart_plain)
+    {
+        return Arc::clone(view);
+    }
+    let mut derived = MonitorView::clone(view);
+    derived.last_error = last_error;
+    derived.cause = cause;
+    derived.impacted = impacted;
+    derived.chart_svg = Arc::clone(&view.chart_plain);
+    Arc::new(derived)
 }
 
 /// Build the banner view for the maintenance windows active at `now`, resolving
@@ -224,7 +328,7 @@ fn build_maintenances(
 }
 
 /// Build the channel-health view model from the dispatcher's snapshot. Only
-/// called for the operator's view; every other summary omits it.
+/// the operator's view carries it; every derived summary omits it.
 fn channel_views(health: &[ChannelHealthEntry]) -> Vec<ChannelView> {
     health
         .iter()
@@ -355,39 +459,41 @@ pub(crate) fn or_empty<T: Default>(result: sqlx::Result<T>, what: &str) -> T {
     })
 }
 
-/// Convert the raw `(p50, p95, p99)` tuples from SQL into [`Percentiles`].
-pub(crate) fn percentile_map(
-    raw: HashMap<String, (i64, i64, i64)>,
-) -> HashMap<String, Percentiles> {
-    raw.into_iter()
-        .map(|(id, (p50, p95, p99))| (id, Percentiles { p50, p95, p99 }))
-        .collect()
-}
-
 /// Fetch each monitor's recent checks. Deliberately per-monitor: the query is an
 /// indexed `ORDER BY time DESC LIMIT N` (tiny), and unlike a single windowed query
 /// it is correct for any interval - a monitor checked less than once a day (e.g. a
 /// weekly push heartbeat) would be dropped by a 24h batch window and shown as
-/// "unknown". On embedded `SQLite` these N statements cost microseconds each, far
-/// less than scanning the whole history table to rank rows.
+/// "unknown". A few run at a time: one by one, their round trips added up to a
+/// fifth of a second for 700 monitors.
 pub(crate) async fn recent_checks_map(
     pool: &SqlitePool,
     monitors: &[&Monitor],
     limit: i64,
 ) -> HashMap<String, Vec<Latest>> {
-    let mut recent: HashMap<String, Vec<Latest>> = HashMap::new();
-    for monitor in monitors {
-        let checks = or_empty(
-            db::recent_checks(pool, &monitor.id, limit).await,
-            "recent checks",
-        );
-        recent.insert(monitor.id.clone(), checks);
-    }
-    recent
+    use futures_util::StreamExt as _;
+
+    // Owned ids and pool handles: borrowed ones trip the compiler's
+    // higher-ranked lifetime inference once this future is spawned.
+    let ids: Vec<String> = monitors.iter().map(|monitor| monitor.id.clone()).collect();
+    futures_util::stream::iter(ids)
+        .map(|id| {
+            let pool = pool.clone();
+            async move {
+                let checks = or_empty(db::recent_checks(&pool, &id, limit).await, "recent checks");
+                (id, checks)
+            }
+        })
+        .buffer_unordered(RECENT_CHECKS_CONCURRENCY)
+        .collect()
+        .await
 }
 
-/// 24h latency percentiles for a monitor, computed in SQL by
-/// [`db::latency_percentiles_all`] (nearest-rank).
+/// How many [`recent_checks_map`] reads run at once: a share of the pool,
+/// leaving connections to the build's other queries.
+const RECENT_CHECKS_CONCURRENCY: usize = 4;
+
+/// 24h latency percentiles for a monitor (nearest-rank over the merged
+/// hourly histograms, see `hora_core::histogram`).
 #[derive(Clone, Copy)]
 pub(crate) struct Percentiles {
     p50: i64,

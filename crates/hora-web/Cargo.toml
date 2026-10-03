@@ -13,12 +13,13 @@ askama.workspace = true
 axum.workspace = true
 badgelib = "0.5.2"
 chrono.workspace = true
+futures-util.workspace = true
 hora-core.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tower-http.workspace = true
 tower_governor = { version = "0.8.0", default-features = false, features = ["axum"] }
 tracing.workspace = true
