@@ -105,7 +105,7 @@ impl AlertState {
 /// each task it spawns for that id. A task restarted by a config edit or after
 /// a crash picks up where the previous one stopped: a still-down monitor is not
 /// announced twice, and its recovery is not lost. Empty until the first task
-/// seeds it (from the open incident, see [`AlertState::resumed_down`]).
+/// seeds it (from the open incident).
 ///
 /// The task writes it back synchronously right after each transition's side
 /// effect, so an abort (always at an `.await`) can at worst repeat an alert

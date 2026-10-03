@@ -84,8 +84,8 @@ pub struct ThresholdAdvice {
 /// outage (`flap_max + 1`, which minimises the added detection delay).
 ///
 /// Returns no recommendation when there is too little signal: fewer than two
-/// distinct run lengths, no gap of at least [`GAP_RATIO`], or a flap cluster
-/// longer than [`MAX_RECOMMENDED_THRESHOLD`].
+/// distinct run lengths, no gap of at least 2x between them, or a flap
+/// cluster longer than 6 checks.
 #[must_use]
 pub fn recommend_threshold(runs: &[u32]) -> ThresholdAdvice {
     let longest_run = runs.iter().copied().max().unwrap_or(0);

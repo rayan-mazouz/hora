@@ -1,7 +1,7 @@
 //! A validated monitor: the settings every kind shares, and the kind-specific
 //! ones in a [`MonitorKind`], parsed once at load.
 //!
-//! The file format is the flat [`RawMonitor`](super::raw::RawMonitor) table;
+//! The file format is the flat `[[monitors]]` table (`config::raw`);
 //! [`Monitor`] deserializes through it and through validation, so a setting
 //! that does not belong to the monitor's kind has nowhere to live here, and
 //! the probes never re-check combinations the loader already refused.
@@ -101,8 +101,8 @@ impl std::fmt::Debug for ReleaseWatch {
 /// A monitor, validated: the settings every kind shares, plus its kind with
 /// that kind's own settings ([`MonitorKind`]).
 ///
-/// Deserializes from a `[[monitors]]` table through [`RawMonitor`] and the
-/// per-monitor validation, so an invalid monitor fails the load with the same
+/// Deserializes from a `[[monitors]]` table through the flat file table and
+/// the per-monitor validation, so an invalid monitor fails the load with the same
 /// `monitor <id>: ...` message as before.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "RawMonitor")]

@@ -155,7 +155,7 @@ pub(super) async fn insert_heartbeat_miss_at(
 }
 
 /// Record a heartbeat pushed via the API.
-/// The last push within a second wins (see [`insert_check_row`]).
+/// The last push within a second wins over whatever held that second.
 ///
 /// # Errors
 ///

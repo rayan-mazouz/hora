@@ -70,7 +70,7 @@ pub fn for_monitor<S: std::hash::BuildHasher>(
         .unwrap_or_default()
 }
 
-/// Spawn the poller: every [`POLL_INTERVAL`], ask each peer for its monitors
+/// Spawn the poller: every minute, ask each peer for its monitors
 /// and swap in a fresh map. Self-gating like the heartbeat - it reads the
 /// live config each round, so peers added or removed on reload apply without
 /// a restart, and a config with no askable peers costs one no-op per round.

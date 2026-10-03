@@ -10,7 +10,7 @@
 //!    never blocks, delays past a hard deadline, or suppresses the alert.
 //!    The worst possible outcome of this module is an alert *without* a
 //!    vantage annotation - exactly what Hora sent before the feature.
-//! 2. **Never a proxy.** The responder ([`hora-web`]'s `/api/peer/probe`)
+//! 2. **Never a proxy.** The responder (`hora-web`'s `/api/peer/probe`)
 //!    only probes targets present in *its own* configuration, so a leaked
 //!    token cannot turn a peer into an SSRF relay. Both nodes must know the
 //!    monitor - which pairs naturally with sharing the config in git.
