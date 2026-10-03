@@ -34,6 +34,7 @@ hora postmortem <id|last>              # an incident's markdown post-mortem
 hora timeline [--days N]               # downs, events, alerts, banners, silences
 hora peers diff                        # compare this node's monitors with each peer's
 hora backup <dest.db>                  # consistent snapshot (VACUUM INTO)
+hora compact [--dry-run]               # give free pages back to the disk (daemon stopped)
 hora import kuma backup.json           # convert an Uptime Kuma backup (stdout)
 hora --version
 ```
@@ -304,6 +305,32 @@ one-liner in a cron job pointed at a NAS mount:
 ```sh
 hora backup /mnt/nas/hora-$(date +%F).db
 ```
+
+## `hora compact`
+
+SQLite never shrinks its file by itself: rows deleted by retention leave
+free pages that later inserts reuse, but the file keeps its high-water
+mark. `hora compact` gives that space back.
+
+```sh
+hora compact --dry-run        # measure: every table and index, free pages, the gain, free disk
+hora compact                  # apply the retention now, rewrite the file, swap it in
+hora compact --purge-removed  # also delete monitors removed from the config, without the 7-day grace
+hora compact --keep           # keep the original next to it as <db>.bak
+```
+
+A real run needs the database to itself: **stop the daemon first**. The
+daemon holds `<db>.lock` while it runs, so `hora compact` refuses rather
+than rewriting a file in use, and other commands (`announce`, `event`,
+`silence`...) refuse while a compaction runs. `--dry-run` only reads, so it
+works while the daemon runs, but it reads the whole file: allow minutes on a
+database of tens of gigabytes.
+
+The rewrite needs free disk for a copy of the pages in use (it checks
+first), then swaps the copy in atomically. On a large, long-lived database,
+expect it to reclaim about a fifth of the file. `hora top` shows the
+database size, and suggests a compaction once more than a fifth of it is
+free pages.
 
 ## `hora import kuma`
 

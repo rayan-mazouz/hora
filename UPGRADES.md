@@ -6,11 +6,13 @@ procedure (pull the new image, recreate the container, history lives on the
 
 ## 0.10.0 → 0.11.0
 
-Two schema migrations apply automatically, in seconds even on hundreds of
+Three schema migrations apply automatically, in seconds even on hundreds of
 millions of checks: `0019` (a `source` column on `checks` telling probes,
-pushes and recorded misses apart; older rows are read exactly as before) and
+pushes and recorded misses apart; older rows are read exactly as before),
 `0020` (a latency histogram per hourly roll-up, plus two indexes; hours
-rolled up before it are read from raw checks until they age out). No new
+rolled up before it are read from raw checks until they age out) and `0021`
+(a failure reason code on checks and incidents; older rows keep the
+previous wording-based reading). No new
 config key. The first page request after the upgrade waits for the first
 summary build (a few seconds on a large database). Check these before you
 roll out:
@@ -44,6 +46,9 @@ roll out:
   relies on it; an external monitor that matched the body still works.
 - Removed monitors now keep their history for 7 days before it is deleted
   (a warning names them and the date).
+- **One daemon per database.** The daemon now holds `<db>.lock` next to the
+  database (the directory must be writable, as it already is for the WAL);
+  a second daemon on the same file refuses to start.
 - **The status page no longer reloads itself.** A wall screen or kiosk adds
   `?refresh=30` to its URL.
 - **Latency percentiles** are now read from histograms: identical below

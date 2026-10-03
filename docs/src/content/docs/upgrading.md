@@ -41,7 +41,7 @@ older binary refuses keys it does not know.
 
 ## 0.10 to 0.11
 
-The next release brings the new status page and a hardening pass. Two
+The next release brings the new status page and a hardening pass. Three
 schema migrations apply by themselves, in seconds even on very large
 databases, and there is no new config key; the first page request after the
 upgrade waits a few seconds for the first summary build. A few behaviours
@@ -72,6 +72,8 @@ change:
   marks it unhealthy.
 - **Removed monitors keep their history for 7 days** before it is deleted.
   See [Removed monitors](../configuration/#removed-monitors).
+- **One daemon per database**: the daemon holds `<db>.lock` beside it, and
+  a second one on the same file refuses to start.
 - **The status page no longer reloads itself.** A wall screen adds
   `?refresh=30` to its URL. See [The status page](../guides/status-page/).
 - **Latency percentiles come from histograms**: identical below 64 ms,

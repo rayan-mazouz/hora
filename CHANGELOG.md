@@ -40,6 +40,14 @@ check before upgrading.
 - **Kiosk refresh is opt-in**: `?refresh=<secs>` (10 to 3600) reloads the
   page; without it the page no longer reloads itself every 30 seconds,
   which closed open groups and disturbed screen readers.
+- **`hora compact`** gives the file's free pages back to the disk: applies
+  the retention now (`--purge-removed` skips the 7-day grace), rewrites the
+  file with `VACUUM INTO` and swaps it in atomically. `--dry-run` measures
+  every table and index and the gain. It needs the daemon stopped: the
+  daemon now holds `<db>.lock`, and CLI commands hold `<db>.writers.lock`
+  so none of them writes into a file being replaced. `hora top` shows the
+  database size and suggests a compaction past a fifth of free pages; the
+  operator `/api/summary` reports `storage { db_bytes, reclaimable_bytes }`.
 - **Add to home screen**: a web app manifest and icons, so a phone can keep
   the status page as an app (no service worker: always the live page).
 - The monthly report gets a day strip per service and shorter headings, and
@@ -133,6 +141,22 @@ check before upgrading.
 - **`POST /api/push/{id}`** answers 400 on an unknown `status` (`dwon` was
   recorded as up) or a negative `ping`. Two pushes in the same second: the
   last one wins, and a push replaces a recorded miss of the same second.
+- **A second daemon on the same database refuses to start** ("locking the
+  database: ... held by another Hora process") instead of racing the first.
+- **Failure reasons are stored as a code** next to their text (migration
+  `0021`, instant), so the public page no longer guesses them from the
+  wording. An exec plugin's failure now always reads "plugin check failed"
+  publicly, and a push monitor that never pinged reads "no heartbeat
+  received yet".
+- Settings that belong to another kind of monitor (`expected_status`,
+  `headers` or `max_body_kb` on a non-http monitor, `keyword_invert`
+  without `keyword`, `json_expected` without `json_query`) were silently
+  ignored; they still load, now with a warning. `hora probe --kind` checks
+  its target against the kind up front.
+- Hora logs one warning when requests arrive through a proxy (forwarding
+  headers) while `server.client_ip_header` is unset, since every visitor
+  then shares the proxy's rate-limit bucket.
+- OpenAPI: status fields are string enums; the JSON is unchanged.
 - **Config bounds**: `interval_secs`, `timeout_secs`, `expect_every_secs`
   and `health.interval_secs` are capped at 30 days, `expected_status` must be
   100-599, an IPv6 tcp target must be bracketed (`[::1]:80`) and
