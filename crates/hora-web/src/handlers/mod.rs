@@ -131,7 +131,16 @@ pub(crate) async fn healthz(State(state): State<AppState>) -> Response {
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    (status, Json(report)).into_response()
+    // Before the scheduler's first tick (`last_tick_age` -1) the 503 is the
+    // expected answer of a node still starting, not a failure: the access log
+    // keeps it at debug (see `routes::Starting`). The status is unchanged, so
+    // a HEALTHCHECK still waits for the first tick.
+    let starting = !report.scheduler_ok && report.last_tick_age < 0 && report.db_ok;
+    let mut response = (status, Json(report)).into_response();
+    if starting {
+        response.extensions_mut().insert(crate::routes::Starting);
+    }
+    response
 }
 
 pub(crate) async fn openapi() -> Response {

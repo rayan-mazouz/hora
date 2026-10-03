@@ -148,8 +148,22 @@ async fn healthz_is_503_when_degraded_with_the_same_body() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Still starting: the 503 is no failure for the access log.
+    assert!(res.extensions().get::<crate::routes::Starting>().is_some());
     let body = body_text(res).await;
     assert!(body.contains(r#""status":"degraded""#), "{body}");
+}
+
+#[tokio::test]
+async fn a_stalled_scheduler_is_a_logged_failure() {
+    // It ticked once, an hour ago: a real stall, not a start-up.
+    let res = app_ticked(&vantage_config(9), fresh_tick() - 3600)
+        .await
+        .oneshot(get("/healthz"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(res.extensions().get::<crate::routes::Starting>().is_none());
 }
 
 /// Like [`app_from`], with a live scheduler beacon and the pool returned.
@@ -184,6 +198,11 @@ async fn app_with_reload(
 /// Build an app from an arbitrary config TOML (the shared `test_app` has a
 /// fixed one; the peer-probe tests need targets bound to live local ports).
 async fn app_from(toml: &str) -> Router {
+    app_ticked(toml, 0).await
+}
+
+/// Like [`app_from`], with the scheduler's last tick at `tick` (0: never).
+async fn app_ticked(toml: &str, tick: u64) -> Router {
     let store = hora_core::db::Store::in_memory().await;
     let config = Arc::new(hora_core::config::parse(toml).expect("config"));
     let client = hora_core::http::client(None).expect("client");
@@ -194,7 +213,7 @@ async fn app_from(toml: &str) -> Router {
     router(AppState::new(
         store,
         rx,
-        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicU64::new(tick)),
         notifier,
     ))
 }

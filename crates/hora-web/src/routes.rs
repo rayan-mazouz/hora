@@ -10,6 +10,10 @@ use axum::routing::{get, post};
 use axum::{Router, body::Body};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
+use tower_http::classify::{
+    ClassifiedResponse, ClassifyResponse, NeverClassifyEos, ServerErrorsAsFailures,
+    ServerErrorsFailureClass, SharedClassifier,
+};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
@@ -125,7 +129,10 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn(no_store_with_credentials))
         // The trace span carries the request id so every log line emitted while
         // handling a request can be correlated back to it.
-        .layer(TraceLayer::new_for_http().make_span_with(make_request_span))
+        .layer(
+            TraceLayer::new(SharedClassifier::new(StartingIsNoFailure))
+                .make_span_with(make_request_span),
+        )
         // Outermost: stamp each request with an id (honouring a well-formed
         // inbound `x-request-id`) before any other layer runs, and echo it on
         // the response.
@@ -250,6 +257,37 @@ pub(crate) fn new_request_id() -> String {
 /// Build the tracing span for a request, tagged with its `x-request-id` so log
 /// lines can be correlated. The id is always present: the request first passes
 /// through the [`request_id`] middleware, which is the outermost layer.
+/// Marks a response as the expected answer of a node still starting (see
+/// [`crate::handlers::healthz`]): a 503 that is not a failure to log.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Starting;
+
+/// The trace layer's classifier: a server error is a failure, logged at ERROR
+/// (tower-http's default), except a response marked [`Starting`]. Docker's
+/// HEALTHCHECK polls `/healthz` from the first second, and every 503 before
+/// the scheduler's first tick was an ERROR line on a perfectly normal boot.
+#[derive(Clone, Copy, Debug)]
+struct StartingIsNoFailure;
+
+impl ClassifyResponse for StartingIsNoFailure {
+    type FailureClass = ServerErrorsFailureClass;
+    type ClassifyEos = NeverClassifyEos<ServerErrorsFailureClass>;
+
+    fn classify_response<B>(
+        self,
+        res: &Response<B>,
+    ) -> ClassifiedResponse<Self::FailureClass, Self::ClassifyEos> {
+        if res.extensions().get::<Starting>().is_some() {
+            return ClassifiedResponse::Ready(Ok(()));
+        }
+        ServerErrorsAsFailures::new().classify_response(res)
+    }
+
+    fn classify_error<E: std::fmt::Display + 'static>(self, error: &E) -> Self::FailureClass {
+        ServerErrorsAsFailures::new().classify_error(error)
+    }
+}
+
 pub(crate) fn make_request_span(request: &Request<Body>) -> tracing::Span {
     let request_id = request
         .headers()
