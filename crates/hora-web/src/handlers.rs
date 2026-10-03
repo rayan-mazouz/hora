@@ -398,11 +398,6 @@ pub(crate) struct ReportQuery {
     group: Option<String>,
 }
 
-/// How far back a monthly report may reach: the daily aggregates it reads
-/// live a year (hora-core's `AGGREGATE_RETENTION_DAYS`); an older month would
-/// only be an empty - and needlessly expensive - report.
-const REPORT_RETENTION_DAYS: i64 = 365;
-
 /// The printable monthly SLA report (`/report/2026-05`, optionally
 /// `?group=X`). Anonymous viewers get the public monitors; the viewer token
 /// includes the private ones, and on a `?group=` report the group's own
@@ -423,7 +418,10 @@ pub(crate) async fn report_page(
             "month must be YYYY-MM and not in the future",
         ));
     };
-    if end <= Utc::now().timestamp() - REPORT_RETENTION_DAYS * hora_core::SECONDS_PER_DAY {
+    // How far back a monthly report may reach: the daily aggregates it reads
+    // live that long; an older month would only be an empty - and needlessly
+    // expensive - report.
+    if end <= Utc::now().timestamp() - db::AGGREGATE_RETENTION_DAYS * hora_core::SECONDS_PER_DAY {
         return Err(AppError::BadRequest(
             "month is older than the retained history (12 months)",
         ));

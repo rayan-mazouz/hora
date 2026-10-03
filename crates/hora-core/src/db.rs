@@ -28,7 +28,7 @@ const HOURLY_ROLLUP_LAG_SECS: i64 = 300;
 /// Hourly buckets roll up into daily ones (and are pruned) once older than this.
 const DOWNSAMPLE_DAILY_AFTER_DAYS: i64 = 90;
 /// Daily buckets and closed incidents are kept this long.
-const AGGREGATE_RETENTION_DAYS: i64 = 365;
+pub const AGGREGATE_RETENTION_DAYS: i64 = 365;
 
 /// How long a monitor id missing from the config keeps its history before the
 /// pruner deletes it. A rename, a monitor commented out for an afternoon or a
