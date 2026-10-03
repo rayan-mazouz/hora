@@ -15,7 +15,6 @@ use super::status::{build_bar, cert_label, cert_state_for, iso, slo_state};
 use super::view::{GroupView, MonitorView, VantageView};
 use super::{Percentiles, SummaryCtx};
 
-use crate::render::sparkline;
 use crate::visibility::Visibility;
 
 /// The pre-fetched batch maps a monitor's view is assembled from, keyed by
@@ -29,10 +28,50 @@ pub(crate) struct MonitorData<'a> {
     pub(super) percentiles: &'a HashMap<String, Percentiles>,
     pub(super) sparklines: &'a HashMap<String, Vec<Point>>,
     pub(super) certs: &'a HashMap<String, i64>,
-    /// Event markers overlaying every sparkline (empty in the public view).
-    pub(super) events: &'a [db::EventMarker],
+    /// Each monitor's open incident and last finished one.
+    pub(super) marks: &'a HashMap<String, db::IncidentMarks>,
+    /// The configured maintenance windows, to mark the days they touched.
+    pub(super) maintenance: &'a [hora_core::config::Maintenance],
     /// The peers' view of shared targets, from the daemon's vantage poller.
     pub(super) vantage: &'a HashMap<String, Vec<hora_core::mesh::vantage::PeerVantage>>,
+}
+
+/// Mark the bar's days a configured maintenance window covering `id` touched
+/// (the windows stay in the config after they end, so past ones show too).
+fn mark_maintenance(
+    bar: &mut [super::view::DayCell],
+    windows: &[hora_core::config::Maintenance],
+    id: &str,
+) {
+    for window in windows
+        .iter()
+        .filter(|window| window.monitors.is_empty() || window.monitors.iter().any(|m| m == id))
+    {
+        // ISO dates compare as strings.
+        let first = window.start.format("%Y-%m-%d").to_string();
+        let last = window.end.format("%Y-%m-%d").to_string();
+        for cell in bar
+            .iter_mut()
+            .filter(|cell| cell.date >= first && cell.date <= last)
+        {
+            cell.maint = true;
+        }
+    }
+}
+
+/// Availability over the bar's days: up or slow checks over all of them.
+fn long_uptime(daily: &[DayRow], bar: &[super::view::DayCell]) -> Option<i64> {
+    let first = bar.first()?.date.as_str();
+    let (available, total) = daily.iter().filter(|row| row.day.as_str() >= first).fold(
+        (0_i64, 0_i64),
+        |(available, total), row| {
+            (
+                available + row.up + row.degraded,
+                total + row.up + row.down + row.degraded,
+            )
+        },
+    );
+    (total > 0).then(|| available.saturating_mul(1000) / total)
 }
 
 /// Build a monitor's view from the pre-fetched batch maps. Pure: a monitor with
@@ -63,26 +102,16 @@ pub(crate) fn build_monitor_view(
         .get(&monitor.id)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let bar = build_bar(daily, ctx.now, ctx.history_days);
+    let mut bar = build_bar(daily, ctx.now, ctx.history_days);
+    mark_maintenance(&mut bar, data.maintenance, &monitor.id);
+    let uptime_long_permille = long_uptime(daily, &bar);
 
-    let spark_points = data
-        .sparklines
-        .get(&monitor.id)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let chart_plain: Arc<str> = sparkline(spark_points, status, &[]).into();
-    // Only an event inside the series' span changes the chart; otherwise the
-    // operator's chart is the very same allocation.
-    let chart_svg: Arc<str> = if data.events.is_empty() {
-        Arc::clone(&chart_plain)
-    } else {
-        let marked = sparkline(spark_points, status, data.events);
-        if *marked == *chart_plain {
-            Arc::clone(&chart_plain)
-        } else {
-            marked.into()
-        }
-    };
+    // Kept as points, not drawn: only the monitor's own page shows the
+    // chart, so it is drawn there, for the one monitor asked for.
+    let spark: Arc<[Point]> = data.sparklines.get(&monitor.id).map_or_else(
+        || Arc::from(Vec::new()),
+        |points| Arc::from(points.as_slice()),
+    );
     let pct = data.percentiles.get(&monitor.id).copied();
     let slo_state = slo_state(monitor.slo_latency_ms, pct.map(|p| p.p95));
 
@@ -128,12 +157,20 @@ pub(crate) fn build_monitor_view(
         budget_title: budget.as_ref().map(|b| b.title.clone()).unwrap_or_default(),
         budget_state: budget.as_ref().map_or("none", |b| b.state),
         maintenance: None,
+        down_since: (status == "down")
+            .then(|| {
+                data.marks
+                    .get(&monitor.id)
+                    .and_then(|marks| marks.open_since)
+            })
+            .flatten(),
+        marks: data.marks.get(&monitor.id).copied().unwrap_or_default(),
+        uptime_long_permille,
         cert_days,
         cert_label: cert_days.map(cert_label),
         cert_state: cert_state_for(cert_days, ctx.cert_threshold),
         bar: bar.into(),
-        chart_svg,
-        chart_plain,
+        spark,
         group: monitor.group.clone(),
         cause,
         impacted,

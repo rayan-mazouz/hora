@@ -10,13 +10,16 @@ use chrono::DateTime;
 use hora_core::db::{EventMarker, Incident, PushedAlert};
 use hora_core::fmt::{self, xml_escape};
 
+use crate::layout::Chrome;
+
 /// The `/history` page; rows are pre-formatted [`IncidentRow`]s, Askama does
 /// the escaping.
 #[derive(Template)]
 #[template(path = "history.html")]
 pub(crate) struct HistoryTemplate {
-    /// The status page title, linked back to from the footer.
-    pub(crate) title: String,
+    /// The page chrome (its links carry the viewer's `?token=`, so a
+    /// viewer authenticated by query keeps their view from page to page).
+    pub(crate) chrome: Chrome,
     pub(crate) incidents: Vec<IncidentRow>,
     /// Externally-pushed alerts (`POST /api/monitors/{id}/alert`), shown in
     /// their own section below the incidents.
@@ -24,20 +27,6 @@ pub(crate) struct HistoryTemplate {
     /// Operator-recorded event markers (`hora event`), shown in their own
     /// section - authenticated viewers only (deploy titles are operator info).
     pub(crate) events: Vec<EventRow>,
-    /// Monitors whose latency heatmap is offered below the incidents
-    /// (collapsed; each `<img>` loads its SVG lazily from the API).
-    pub(crate) heatmaps: Vec<HeatmapRef>,
-    /// `?token=...` to append to the heatmap image URLs, so a viewer
-    /// authenticated by query token sees private monitors' heatmaps too. An
-    /// `<img>` cannot carry an Authorization header, so Bearer-authenticated
-    /// viewers fall back to the public heatmaps only.
-    pub(crate) token_query: String,
-}
-
-/// One monitor offered in the heatmap section.
-pub(crate) struct HeatmapRef {
-    pub(crate) id: String,
-    pub(crate) name: String,
 }
 
 /// One incident, formatted for display.
@@ -45,9 +34,6 @@ pub(crate) struct IncidentRow {
     id: i64,
     monitor: String,
     resolved: bool,
-    started: String,
-    ended: Option<String>,
-    duration: Option<String>,
     error: Option<String>,
     cause: Option<String>,
     impacted: Option<String>,
@@ -58,6 +44,74 @@ pub(crate) struct IncidentRow {
     event: Option<String>,
     /// Multi-vantage verdict recorded once the peers answered.
     vantage: Option<String>,
+    /// The monitor's id, URL-encoded, for its page (`/monitor/{id}`).
+    monitor_href: String,
+    /// The sentence: "Web was down for 41 minutes" / "Web is down".
+    headline: String,
+    /// "Thursday 18 September 2026, 19:12 to 19:53 UTC".
+    span: String,
+    /// "18 Sep 2026".
+    day: String,
+    /// "18 Sep, 19:12 UTC" and the recovery, for the facts.
+    started_short: String,
+    ended_short: Option<String>,
+    /// "41 minutes".
+    length: Option<String>,
+    /// The verdict in the visitor's words, and its state.
+    verdict: Option<(&'static str, String)>,
+}
+
+/// A span at the size a person says it: `45 seconds`, `41 minutes`,
+/// `3 h 07 min`, `2 days 4 h`.
+pub(crate) fn human_duration(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    let minutes = seconds / 60;
+    if seconds < 60 {
+        format!("{seconds} second{}", if seconds == 1 { "" } else { "s" })
+    } else if minutes < 60 {
+        format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+    } else {
+        crate::layout::minutes(minutes)
+    }
+}
+
+/// The multi-vantage verdict (as `hora_core::mesh::confirm` writes it) in a
+/// visitor's words, with the state it amounts to. `None` for a shape this
+/// does not know (the raw verdict stays in the operator's details).
+pub(crate) fn humanize_verdict(verdict: &str) -> Option<(&'static str, String)> {
+    let fraction = |text: &str| -> Option<(usize, usize)> {
+        let (_, rest) = text.split_once(" from ")?;
+        let (counts, _) = rest.split_once(" vantage")?;
+        let (part, total) = counts.split_once('/')?;
+        Some((part.trim().parse().ok()?, total.trim().parse().ok()?))
+    };
+    if verdict.starts_with("confirmed down") {
+        let (down, total) = fraction(verdict)?;
+        Some((
+            "down",
+            if down == total {
+                format!("Seen down from all {total} places: a real outage, not a network problem.")
+            } else {
+                format!("Seen down from {down} of {total} places.")
+            },
+        ))
+    } else if verdict.starts_with("seen UP by") {
+        let (down, total) = fraction(verdict)?;
+        Some((
+            "degraded",
+            format!(
+                "Seen down from {down} of {total} places only; the others could reach it. \
+                 Likely a network problem near this checkpoint."
+            ),
+        ))
+    } else if verdict.starts_with("no peer vantage") {
+        Some((
+            "none",
+            "Not confirmed: no other place could be asked.".to_owned(),
+        ))
+    } else {
+        None
+    }
 }
 
 /// One operator-recorded event marker, formatted for display.
@@ -82,31 +136,30 @@ pub(crate) fn event_rows(events: &[EventMarker]) -> Vec<EventRow> {
 #[derive(Template)]
 #[template(path = "incident.html")]
 pub(crate) struct IncidentTemplate {
-    /// The status page title, linked back to from the footer.
-    pub(crate) title: String,
-    /// The monitor's display name.
-    pub(crate) monitor: String,
+    pub(crate) chrome: Chrome,
     pub(crate) row: IncidentRow,
     /// The markdown post-mortem, shown in a copyable block.
     pub(crate) markdown: String,
+    /// The owl: awake while it is down, asleep once it is over.
+    pub(crate) owl: String,
+    /// The raw verdict, for the operator (the visitor reads it humanized).
+    pub(crate) operator: bool,
 }
 
 /// The `/timeline` page: the unified chronology, newest first.
 #[derive(Template)]
 #[template(path = "timeline.html")]
 pub(crate) struct TimelineTemplate {
-    /// The status page title, linked back to from the footer.
-    pub(crate) title: String,
+    pub(crate) chrome: Chrome,
     pub(crate) entries: Vec<TimelineRow>,
-    /// `?token=...` for the post-mortem links, like the heatmap links.
-    pub(crate) token_query: String,
 }
 
 /// One merged timeline entry, formatted for display.
 pub(crate) struct TimelineRow {
     at: String,
-    /// The entry kind (`down`, `recovered`, `event`, ...), also a CSS class.
-    kind: &'static str,
+    /// The entry kind's shape (`down`, `up`, `info`, ...) and word.
+    state: &'static str,
+    word: &'static str,
     title: String,
     detail: Option<String>,
     /// The incident behind a down/recovered entry, for the post-mortem link.
@@ -117,12 +170,26 @@ pub(crate) struct TimelineRow {
 pub(crate) fn timeline_rows(entries: &[hora_core::timeline::Entry]) -> Vec<TimelineRow> {
     entries
         .iter()
-        .map(|entry| TimelineRow {
-            at: fmt::utc(entry.at),
-            kind: entry.kind.as_str(),
-            title: entry.title.clone(),
-            detail: entry.detail.clone(),
-            incident: entry.incident_id,
+        .map(|entry| {
+            let (state, word) = match entry.kind.as_str() {
+                "down" => ("down", "Down"),
+                "recovered" => ("up", "Up again"),
+                "alert" => ("degraded", "Alert"),
+                "silence" => ("maint", "Silenced"),
+                "announce" => ("info", "Announcement"),
+                _ => ("info", "Change"),
+            };
+            TimelineRow {
+                at: DateTime::from_timestamp(entry.at, 0).map_or_else(
+                    || fmt::utc(entry.at),
+                    |at| at.format("%a %-d %b, %H:%M").to_string(),
+                ),
+                state,
+                word,
+                title: entry.title.clone(),
+                detail: entry.detail.clone(),
+                incident: entry.incident_id,
+            }
         })
         .collect()
 }
@@ -130,8 +197,10 @@ pub(crate) fn timeline_rows(entries: &[hora_core::timeline::Entry]) -> Vec<Timel
 /// One externally-pushed alert, formatted for display.
 pub(crate) struct AlertRow {
     monitor: String,
-    /// `info` | `warning` | `error` | `critical`, used as a CSS class.
+    /// `info` | `warning` | `error` | `critical`.
     severity: String,
+    /// The severity's shape: `info`, `degraded` or `down`.
+    state: &'static str,
     title: String,
     message: Option<String>,
     at: String,
@@ -151,6 +220,11 @@ pub(crate) fn alert_rows(
                 .unwrap_or(&alert.monitor_id)
                 .clone(),
             severity: alert.severity.clone(),
+            state: match alert.severity.as_str() {
+                "error" | "critical" => "down",
+                "warning" => "degraded",
+                _ => "info",
+            },
             title: alert.title.clone(),
             message: (!alert.message.is_empty()).then(|| alert.message.clone()),
             at: fmt::utc(alert.created_at),
@@ -164,31 +238,74 @@ pub(crate) fn incident_rows(
     incidents: &[Incident],
     monitor_names: &HashMap<String, String>,
 ) -> Vec<IncidentRow> {
+    let at = |timestamp: i64, pattern: &str| {
+        DateTime::from_timestamp(timestamp, 0).map_or_else(
+            || timestamp.to_string(),
+            |at| at.format(pattern).to_string(),
+        )
+    };
     incidents
         .iter()
-        .map(|incident| IncidentRow {
-            id: incident.id,
-            monitor: monitor_names
+        .map(|incident| {
+            let monitor = monitor_names
                 .get(&incident.monitor_id)
                 .unwrap_or(&incident.monitor_id)
-                .clone(),
-            resolved: incident.ended_at.is_some(),
-            started: fmt::utc(incident.started_at),
-            ended: incident.ended_at.map(fmt::utc),
-            duration: incident.duration_s.map(fmt::duration),
-            error: incident.error.clone(),
-            cause: incident.cause.clone(),
-            impacted: incident
-                .impacted
-                .as_deref()
-                .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
-                .filter(|impacted| !impacted.is_empty())
-                .map(|impacted| impacted.join(", ")),
-            note: incident.note.clone(),
-            snapshot: incident.snapshot.clone(),
-            event: incident.event.clone(),
-            vantage: incident.vantage.clone(),
+                .clone();
+            let length = incident.duration_s.map(human_duration);
+            let headline = match (&incident.ended_at, &length) {
+                (Some(_), Some(length)) => format!("{monitor} was down for {length}"),
+                (Some(_), None) => format!("{monitor} was down"),
+                (None, _) => format!("{monitor} is down"),
+            };
+            let start_day = at(incident.started_at, "%Y-%m-%d");
+            let span = match incident.ended_at {
+                Some(ended) if at(ended, "%Y-%m-%d") == start_day => format!(
+                    "{} to {}",
+                    at(incident.started_at, "%A %-d %B %Y, %H:%M"),
+                    at(ended, "%H:%M UTC")
+                ),
+                Some(ended) => format!(
+                    "{} to {}",
+                    at(incident.started_at, "%A %-d %B %Y, %H:%M UTC"),
+                    at(ended, "%A %-d %B, %H:%M UTC")
+                ),
+                None => format!(
+                    "Since {}",
+                    at(incident.started_at, "%A %-d %B %Y, %H:%M UTC")
+                ),
+            };
+            (monitor, length, headline, span)
         })
+        .zip(incidents)
+        .map(
+            |((monitor, length, headline, span), incident)| IncidentRow {
+                id: incident.id,
+                monitor,
+                monitor_href: hora_core::fmt::percent_encode(&incident.monitor_id),
+                headline,
+                span,
+                day: at(incident.started_at, "%-d %b %Y"),
+                started_short: at(incident.started_at, "%-d %b, %H:%M UTC"),
+                ended_short: incident
+                    .ended_at
+                    .map(|ended| at(ended, "%-d %b, %H:%M UTC")),
+                length,
+                verdict: incident.vantage.as_deref().and_then(humanize_verdict),
+                resolved: incident.ended_at.is_some(),
+                error: incident.error.clone(),
+                cause: incident.cause.clone(),
+                impacted: incident
+                    .impacted
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+                    .filter(|impacted| !impacted.is_empty())
+                    .map(|impacted| impacted.join(", ")),
+                note: incident.note.clone(),
+                snapshot: incident.snapshot.clone(),
+                event: incident.event.clone(),
+                vantage: incident.vantage.clone(),
+            },
+        )
         .collect()
 }
 
@@ -394,7 +511,8 @@ mod tests {
         let rows = incident_rows(&[incident], &names);
         assert_eq!(rows[0].monitor, "Database");
         assert!(rows[0].resolved);
-        assert_eq!(rows[0].duration.as_deref(), Some("1m 30s"));
+        assert_eq!(rows[0].length.as_deref(), Some("1 minute"));
+        assert_eq!(rows[0].headline, "Database was down for 1 minute");
         assert_eq!(rows[0].impacted.as_deref(), Some("API, Web"));
         assert_eq!(rows[0].note.as_deref(), Some("fiber cut"));
         assert_eq!(rows[0].event.as_deref(), Some("deploy api v2.3, 3m before"));
@@ -422,6 +540,29 @@ mod tests {
         let rows = incident_rows(&[orphan], &HashMap::new());
         assert_eq!(rows[0].monitor, "gone");
         assert!(!rows[0].resolved);
+    }
+
+    #[test]
+    fn verdicts_read_as_calm_sentences() {
+        let (state, text) = humanize_verdict("confirmed down from 3/3 vantage points").unwrap();
+        assert_eq!(state, "down");
+        assert!(text.contains("all 3 places"), "{text}");
+        let (state, text) = humanize_verdict(
+            "seen UP by Frankfurt, Montréal - down from 1/3 vantage points (network issue near this node?)",
+        )
+        .unwrap();
+        assert_eq!(state, "degraded");
+        assert!(
+            text.contains("1 of 3 places only") && !text.contains("vantage"),
+            "{text}"
+        );
+        assert_eq!(
+            humanize_verdict("no peer vantage reachable, unconfirmed").map(|v| v.0),
+            Some("none")
+        );
+        assert!(humanize_verdict("something new").is_none());
+        assert_eq!(human_duration(41 * 60), "41 minutes");
+        assert_eq!(human_duration(1), "1 second");
     }
 
     #[test]

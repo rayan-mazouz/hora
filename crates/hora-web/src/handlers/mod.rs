@@ -3,6 +3,7 @@
 
 pub(crate) mod annotations;
 pub(crate) mod api;
+pub(crate) mod assets;
 pub(crate) mod badges;
 pub(crate) mod pages;
 pub(crate) mod peer;
@@ -21,10 +22,10 @@ use hora_core::config::{Config, Monitor};
 use hora_core::db::Point;
 use hora_core::mesh::wire::{HealthReport, PeerSeen};
 
+use crate::AppState;
 use crate::error::AppError;
 use crate::summary::{DayCell, IncidentView, MaintenanceView, MonitorView, Summary};
 use crate::visibility::Visibility;
-use crate::{AppState, FAVICON_SVG, FONT_WOFF2};
 
 // `paths(...)` below names the handlers unqualified: a module-qualified path
 // would become the operation's `OpenAPI` tag. utoipa resolves each
@@ -131,26 +132,6 @@ pub(crate) async fn healthz(State(state): State<AppState>) -> Response {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (status, Json(report)).into_response()
-}
-
-pub(crate) async fn favicon() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "image/svg+xml"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
-        FAVICON_SVG,
-    )
-}
-
-pub(crate) async fn font() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "font/woff2"),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-        ],
-        FONT_WOFF2,
-    )
 }
 
 pub(crate) async fn openapi() -> Response {

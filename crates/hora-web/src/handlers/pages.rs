@@ -18,7 +18,9 @@ use crate::AppState;
 use crate::auth::Viewer;
 use crate::error::AppError;
 use crate::history;
+use crate::layout::Chrome;
 use crate::snapshot::Body;
+use crate::status_page;
 use crate::summary::{StatusTemplate, Summary};
 use crate::text;
 use crate::visibility::{Audience, Visibility};
@@ -38,58 +40,89 @@ fn wants_text(headers: &HeaderMap) -> bool {
 
 /// The status page - whole, or one group's - as `audience` sees it: the HTML
 /// page or, for text clients, plain text. Rendered once per snapshot and
-/// audience, then served from memory. A group this audience sees nothing of
-/// answers 404.
+/// audience, then served from memory; the page's per-request parts (the
+/// viewer's `?token=` in its links, `?theme=`, `?refresh=`) are spliced into
+/// the shared render per request, so a token never enters the cache (see
+/// `crate::layout`). A group this audience sees nothing of answers 404.
 async fn status_response(
     state: &AppState,
     viewer: &Viewer,
     audience: &Audience,
     group: Option<&str>,
+    chrome: Chrome,
     headers: &HeaderMap,
 ) -> Result<Response, AppError> {
     let config = &viewer.config;
-    let text = wants_text(headers);
     let snapshot = state.snapshot().await;
-    let key = if text {
-        Body::Text(audience.clone(), group.map(str::to_owned))
-    } else {
-        Body::Page(audience.clone(), group.map(str::to_owned))
+    let operator = *audience == Audience::Operator;
+    let scoped = |whole: &Summary| -> Option<Summary> {
+        group.map(|group| crate::summary::for_group(whole, config, group))?
     };
-    let body = snapshot
-        .body(config, key, || {
-            let whole = snapshot.summary(config, audience);
-            let scoped;
-            let summary: &Summary = match group {
-                None => &whole,
-                Some(group) => match crate::summary::for_group(&whole, config, group) {
-                    Some(view) => {
-                        scoped = view;
-                        &scoped
-                    }
-                    None => return Ok(None),
+    if wants_text(headers) {
+        let body = snapshot
+            .body(
+                config,
+                Body::Text(audience.clone(), group.map(str::to_owned)),
+                || {
+                    let whole = snapshot.summary(config, audience);
+                    let body = match group {
+                        None => text::render(&whole, operator),
+                        Some(_) => match scoped(&whole) {
+                            Some(view) => text::render(&view, operator),
+                            None => return Ok(None),
+                        },
+                    };
+                    Ok::<_, AppError>(Some(Bytes::from(body)))
                 },
-            };
-            let body = if text {
-                text::render(summary)
-            } else {
-                StatusTemplate { summary }.render()?
-            };
-            Ok::<_, AppError>(Some(Bytes::from(body)))
-        })?
-        .ok_or(AppError::NotFound("unknown group"))?;
-    if text {
-        Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response())
-    } else {
-        Ok(Html(body).into_response())
+            )?
+            .ok_or(AppError::NotFound("unknown group"))?;
+        return Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response());
     }
+    // Only the anonymous view can be the private door, so only it varies
+    // with whether a token came.
+    let bad_token = chrome.req.has_token && *audience == Audience::Public;
+    let req = chrome.req.clone();
+    let page = snapshot
+        .page(
+            config,
+            Body::Page(audience.clone(), group.map(str::to_owned), bad_token),
+            || {
+                let whole = snapshot.summary(config, audience);
+                let view;
+                let summary: &Summary = match group {
+                    None => &whole,
+                    Some(_) => match scoped(&whole) {
+                        Some(found) => {
+                            view = found;
+                            &view
+                        }
+                        None => return Ok(None),
+                    },
+                };
+                let ask = status_page::Ask {
+                    operator,
+                    token_given: bad_token,
+                    group_page: group.is_some(),
+                };
+                let html = StatusTemplate {
+                    page: status_page::build(summary, config, &ask),
+                    chrome: chrome.cached().at("status").operator(operator),
+                }
+                .render()?;
+                Ok::<_, AppError>(Some(html))
+            },
+        )?
+        .ok_or(AppError::NotFound("unknown group"))?;
+    Ok(Html(page.serve(&req)).into_response())
 }
 
 pub(crate) async fn page(
     State(state): State<AppState>,
     viewer: Viewer,
+    chrome: Chrome,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    status_response(&state, &viewer, &viewer.audience, None, &headers).await
+    status_response(&state, &viewer, &viewer.audience, None, chrome, &headers).await
 }
 
 /// The per-group status page (`/status/{group}`): the monitors of one display
@@ -104,10 +137,106 @@ pub(crate) async fn group_page(
     State(state): State<AppState>,
     Path(group): Path<String>,
     viewer: Viewer,
+    chrome: Chrome,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let audience = viewer.audience_for_group(&group);
-    status_response(&state, &viewer, &audience, Some(&group), &headers).await
+    status_response(&state, &viewer, &audience, Some(&group), chrome, &headers).await
+}
+
+/// One monitor's page (`/monitor/{id}`): its figures, its days, where it is
+/// checked from, its incidents. Visibility follows the status pages: a
+/// private monitor answers 404 unless the operator token, or its group's
+/// token, is presented.
+pub(crate) async fn monitor_page(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    viewer: Viewer,
+    chrome: Chrome,
+) -> Result<Html<String>, AppError> {
+    let config = &viewer.config;
+    let monitor = config
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == id)
+        .ok_or(AppError::NotFound("unknown monitor"))?;
+    let audience = match &monitor.group {
+        Some(group) => viewer.audience_for_group(group),
+        None => viewer.audience.clone(),
+    };
+    let visibility = Visibility::new(config, &audience);
+    if !visibility.can_see_monitor(monitor) {
+        return Err(AppError::NotFound("unknown monitor"));
+    }
+    let summary = state.snapshot().await.summary(config, &audience);
+    let view = summary
+        .monitors
+        .iter()
+        .find(|view| view.id == id)
+        .cloned()
+        .ok_or(AppError::NotFound("unknown monitor"))?;
+
+    let mut incidents = visible_incidents(&state.pool, &visibility, 200).await?;
+    incidents.retain(|incident| incident.monitor_id == id);
+
+    // The heatmap, inlined so the stylesheet themes it; cached like the image.
+    let heatmap = if monitor.kind == Kind::Push {
+        None
+    } else {
+        let key = format!("{id}#inline");
+        let svg = state
+            .heatmaps
+            .get_or_build(&key, config, async {
+                let now = Utc::now().timestamp();
+                let since = (now / 86_400 - (crate::heatmap::HEATMAP_DAYS - 1)) * 86_400;
+                let cells = db::latency_hourly(&state.pool, &id, since).await?;
+                Ok::<_, sqlx::Error>(crate::heatmap::render(&cells, now, &monitor.name, false))
+            })
+            .await?;
+        Some(svg.as_ref().clone())
+    };
+
+    let operator = viewer.is_operator();
+    let group_view = matches!(audience, crate::visibility::Audience::Group(_));
+    let page = crate::monitor_page::build(
+        view,
+        config,
+        monitor,
+        &incidents,
+        &summary.events,
+        heatmap,
+        operator || visibility.detailed(&id),
+        operator || group_view,
+    );
+    let html = crate::monitor_page::MonitorTemplate {
+        chrome: chrome.at("status").operator(operator),
+        page,
+    }
+    .render()?;
+    Ok(Html(html))
+}
+
+/// The operator's view of the mesh (`/watchers`): this node's `/healthz`
+/// view of its peers, the 30-day confirmations, each shared service from
+/// each place. Anyone else gets a 404, like any page that is not theirs.
+pub(crate) async fn watchers_page(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    chrome: Chrome,
+) -> Result<Html<String>, AppError> {
+    if !viewer.is_operator() {
+        return Err(AppError::NotFound("unknown page"));
+    }
+    let config = &viewer.config;
+    let health = hora_core::mesh::peer::report(&state.pool, config, &state.last_tick).await;
+    let summary = state.snapshot().await.summary(config, &viewer.audience);
+    let incidents = db::recent_incidents(&state.pool, 1000).await?;
+    let html = crate::watchers::WatchersTemplate {
+        chrome: chrome.at("watchers").operator(true),
+        page: crate::watchers::build(config, &health, &summary, &incidents),
+    }
+    .render()?;
+    Ok(Html(html))
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +257,7 @@ pub(crate) async fn report_page(
     State(state): State<AppState>,
     Path(month): Path<String>,
     viewer: Viewer,
+    chrome: Chrome,
     Query(query): Query<ReportQuery>,
 ) -> Result<Html<String>, AppError> {
     let config = &viewer.config;
@@ -162,13 +292,15 @@ pub(crate) async fn report_page(
             hora_core::report::build(&state.pool, config, &month),
         )
         .await?;
-    let groups = crate::report::group_rows(&report, |row| {
+    let shown = |row: &hora_core::report::MonitorMonth| {
         visibility.can_see(&row.id)
             && query
                 .group
                 .as_deref()
                 .is_none_or(|group| row.group.as_deref() == Some(group))
-    });
+    };
+    let groups = crate::report::group_rows(&report, shown);
+    let kpis = crate::report::kpis(&report, shown);
     // A scoped report with nothing visible answers like the group page: 404,
     // revealing neither the group's existence nor its members.
     if groups.is_empty() && query.group.is_some() {
@@ -178,11 +310,36 @@ pub(crate) async fn report_page(
         Some(group) => format!("{} · {group}", config.page.title),
         None => config.page.title.clone(),
     };
+    let services = groups
+        .iter()
+        .map(crate::report::ReportGroup::len)
+        .sum::<usize>();
+    let lede = format!(
+        "{}, times in UTC. {services} service{}.",
+        crate::report::span(&month),
+        if services == 1 { "" } else { "s" }
+    );
+    let (prev, next) = crate::report::neighbours(&month);
+    let month_query = match (&query.group, chrome.req.q.is_empty()) {
+        (Some(group), true) => format!("?group={}", hora_core::fmt::percent_encode(group)),
+        (Some(group), false) => format!(
+            "{}&group={}",
+            chrome.req.q,
+            hora_core::fmt::percent_encode(group)
+        ),
+        (None, _) => chrome.req.q.clone(),
+    };
     let html = crate::report::ReportTemplate {
+        chrome: chrome.at("report").operator(viewer.is_operator()),
         title,
         label: report.label.clone(),
-        generated: Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
+        lede,
+        generated: Utc::now().format("%-d %B %Y, %H:%M UTC").to_string(),
+        kpis,
         groups,
+        prev,
+        next,
+        month_query,
     }
     .render()?;
     Ok(Html(html))
@@ -259,6 +416,7 @@ pub(crate) async fn incident_page(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     viewer: Viewer,
+    chrome: Chrome,
 ) -> Result<Html<String>, AppError> {
     let config = &viewer.config;
     let visibility = Visibility::new(config, &viewer.audience);
@@ -272,12 +430,21 @@ pub(crate) async fn incident_page(
 
     let monitor_name = config.monitor_name(&incident.monitor_id).to_owned();
     let markdown = hora_core::postmortem::render(&incident, &monitor_name);
+    let operator = viewer.is_operator();
     let html = crate::history::IncidentTemplate {
-        title: config.page.title.clone(),
-        monitor: monitor_name,
+        chrome: chrome.at("history").operator(operator),
         row: crate::history::incident_rows(std::slice::from_ref(&incident), &monitor_names(config))
             .remove(0),
         markdown,
+        owl: crate::render::owl(
+            if incident.ended_at.is_some() {
+                "up"
+            } else {
+                "down"
+            },
+            80,
+        ),
+        operator,
     }
     .render()?;
     Ok(Html(html))
@@ -295,6 +462,7 @@ fn monitor_names(config: &Config) -> std::collections::HashMap<String, String> {
 pub(crate) async fn history_page(
     State(state): State<AppState>,
     viewer: Viewer,
+    chrome: Chrome,
 ) -> Result<Html<String>, AppError> {
     let config = &viewer.config;
     let visibility = Visibility::new(config, &viewer.audience);
@@ -306,25 +474,13 @@ pub(crate) async fn history_page(
     } else {
         Vec::new()
     };
-    // The heatmap section lists what this viewer may see; the images load
-    // lazily from the API. Push monitors have no latency series to show.
-    let heatmaps = config
-        .monitors
-        .iter()
-        .filter(|monitor| visibility.can_see_monitor(monitor) && monitor.kind != Kind::Push)
-        .map(|monitor| history::HeatmapRef {
-            id: monitor.id.clone(),
-            name: monitor.name.clone(),
-        })
-        .collect();
+    // The latency heatmaps live on each monitor's own page now.
     let names = monitor_names(config);
     let html = history::HistoryTemplate {
-        title: config.page.title.clone(),
+        chrome: chrome.at("history").operator(viewer.is_operator()),
         incidents: history::incident_rows(&incidents, &names),
         pushed_alerts: history::alert_rows(&pushed_alerts, &names),
         events: history::event_rows(&events),
-        heatmaps,
-        token_query: viewer.token_query.clone(),
     }
     .render()?;
     Ok(Html(html))
@@ -342,6 +498,7 @@ const TIMELINE_LIMIT: usize = 200;
 pub(crate) async fn timeline_page(
     State(state): State<AppState>,
     viewer: Viewer,
+    chrome: Chrome,
 ) -> Result<Html<String>, AppError> {
     let config = &viewer.config;
     let visibility = Visibility::new(config, &viewer.audience);
@@ -364,9 +521,8 @@ pub(crate) async fn timeline_page(
         hora_core::timeline::merge(&sources, &monitor_names(config), since, TIMELINE_LIMIT);
 
     let html = history::TimelineTemplate {
-        title: config.page.title.clone(),
+        chrome: chrome.at("timeline").operator(viewer.is_operator()),
         entries: history::timeline_rows(&entries),
-        token_query: viewer.token_query.clone(),
     }
     .render()?;
     Ok(Html(html))

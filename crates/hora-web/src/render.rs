@@ -1,4 +1,5 @@
-//! Server-rendered SVG: the latency sparkline and the status/uptime badges.
+//! Server-rendered SVG: the owl, the daily bar, the latency sparkline and the
+//! status/uptime badges.
 
 use std::fmt::Write as _;
 
@@ -8,6 +9,146 @@ use badgelib::{Badge, Color, Style};
 
 use hora_core::db::{EventMarker, Point};
 use hora_core::fmt::xml_escape;
+
+// --- The owl ------------------------------------------------------------
+// HoraFace: outlined (surface fill, ink line) so it follows the theme; its
+// pose is the page's state, set by `data-state` and drawn by the stylesheet.
+// It is never the only carrier of the state, so it is `aria-hidden`.
+
+pub(crate) const OWL_PARTS: &str = concat!(
+    r#"<path class="ln tl" d="M17.6 16.8C15.4 15.9 13.9 14 13.4 11.3 15.9 11.7 18.4 13 20.2 15.2Z"/>"#,
+    r#"<path class="ln tr" d="M30.4 16.8C32.6 15.9 34.1 14 34.6 11.3 32.1 11.7 29.6 13 27.8 15.2Z"/>"#,
+    r#"<ellipse class="ft" cx="20.6" cy="41.1" rx="1.9" ry="1.2"/><ellipse class="ft" cx="27.4" cy="41.1" rx="1.9" ry="1.2"/>"#,
+    r#"<path class="ln" d="M24 14C30.9 14 35.6 19.2 35.6 26.6 35.6 34.6 30.6 40.4 24 40.4S12.4 34.6 12.4 26.6C12.4 19.2 17.1 14 24 14Z"/>"#,
+    r#"<g class="tx"><circle cx="18.9" cy="24.6" r="4.9"/><circle cx="29.1" cy="24.6" r="4.9"/><path d="M14.4 30.8C15.8 33.7 18.1 36.3 21 37.8M33.6 30.8C32.2 33.7 29.9 36.3 27 37.8"/></g>"#,
+    r#"<g class="ey"><g class="shut-l"><path d="M16.7 24.4a2.2 2.2 0 0 0 4.4 0"/></g><g class="shut-r"><path d="M26.9 24.4a2.2 2.2 0 0 0 4.4 0"/></g>"#,
+    r#"<g class="open-l"><ellipse cx="18.9" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="19.7" cy="23.6" r=".75"/></g>"#,
+    r#"<g class="open-r"><ellipse cx="29.1" cy="24.6" rx="2.2" ry="2.6"/><circle class="glint" cx="29.9" cy="23.6" r=".75"/></g>"#,
+    r#"<g class="dash"><path d="M16.9 24.8h4M27.1 24.8h4"/></g></g>"#,
+    r#"<path class="bk" d="M22.9 28.3h2.2L24 30.1Z"/>"#,
+    r#"<ellipse class="ck" cx="16.4" cy="30.6" rx="2" ry="1.2"/><ellipse class="ck" cx="31.6" cy="30.6" rx="2" ry="1.2"/>"#,
+    r#"<g class="badge"><circle class="bd" cx="39.5" cy="38.5" r="7.2"/>"#,
+    r##"<g class="b-degraded"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-degraded"/></svg></g>"##,
+    r##"<g class="b-down"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-down"/></svg></g>"##,
+    r##"<g class="b-maint"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-maint"/></svg></g>"##,
+    r##"<g class="b-none"><svg x="33.5" y="32.5" width="12" height="12"><use href="#g-none"/></svg></g></g>"##,
+);
+
+/// The owl in the pose of `state` (`up`, `degraded`, `down`, `maint`,
+/// `none`), `size` CSS pixels square. One per page, beside its sentence.
+pub(crate) fn owl(state: &str, size: u32) -> String {
+    format!(
+        "<svg class=\"owl\" data-state=\"{state}\" viewBox=\"6 6 40 40\" width=\"{size}\" \
+         height=\"{size}\" aria-hidden=\"true\" focusable=\"false\">{OWL_PARTS}</svg>"
+    )
+}
+
+/// Several owls on one branch, one per place, each in its own pose: the mesh
+/// drawn (the watchers page and the vantage panels only). `label` is the
+/// sentence the picture says, for assistive tech.
+pub(crate) fn owls(places: &[(&str, &str)], label: &str) -> String {
+    const STEP: usize = 46;
+    let width = STEP * places.len() + 8;
+    let mut out = format!(
+        "<svg class=\"owls\" viewBox=\"0 0 {width} 62\" role=\"img\" aria-label=\"{}\">\
+         <path class=\"branch\" d=\"M0 45.5C{:.0} 43.5 {:.0} 47.5 {width} 44.5\"/>",
+        xml_escape(label),
+        coord(width) * 0.3,
+        coord(width) * 0.7,
+    );
+    for (index, (state, _)) in places.iter().enumerate() {
+        let x = 4 + index * STEP;
+        let _ = write!(
+            out,
+            "<svg class=\"owl\" data-state=\"{state}\" x=\"{x}\" y=\"0\" width=\"46\" height=\"46\" \
+             viewBox=\"6 6 40 40\">{OWL_PARTS}</svg>"
+        );
+    }
+    for (index, (_, name)) in places.iter().enumerate() {
+        let _ = write!(
+            out,
+            "<text class=\"olab\" x=\"{}\" y=\"58\" text-anchor=\"middle\">{}</text>",
+            4 + index * STEP + 23,
+            xml_escape(name),
+        );
+    }
+    out.push_str("</svg>");
+    out
+}
+
+// --- The daily bar ------------------------------------------------------
+// ONE svg per monitor with a few run-length rects; the gaps between days are
+// one mask shared by the whole page (`#gaps`, in the sprite). A day's height
+// is part of its state, so the bar survives greyscale: up full height, slow
+// shorter, down full and below the line, maintenance half, no data a stub.
+
+/// A day's cell class in the bar: `u` up, `d` slow, `x` down, `m`
+/// maintenance, `n` no data.
+pub(crate) fn day_class(state: &str) -> u8 {
+    match state {
+        "up" => b'u',
+        "degraded" => b'd',
+        "down" => b'x',
+        "maint" => b'm',
+        _ => b'n',
+    }
+}
+
+/// How bad a day cell is, to fold several monitors' days into a group's bar.
+pub(crate) fn day_rank(class: u8) -> u8 {
+    match class {
+        b'x' => 4,
+        b'd' => 3,
+        b'm' => 2,
+        b'u' => 1,
+        _ => 0,
+    }
+}
+
+/// Render the daily bar, oldest day first, from day cell classes.
+pub(crate) fn day_bar(days: &[u8]) -> String {
+    let mut rects = String::new();
+    let mut start = 0;
+    while let Some(&class) = days.get(start) {
+        let run = days[start..]
+            .iter()
+            .take_while(|day| **day == class)
+            .count();
+        let (y, height) = match class {
+            b'u' => (0, 22),
+            b'd' => (7, 15),
+            b'x' => (0, 29),
+            b'm' => (11, 11),
+            _ => (18, 4),
+        };
+        let _ = write!(
+            rects,
+            "<rect class=\"{}\" x=\"{start}\" y=\"{y}\" width=\"{run}\" height=\"{height}\"/>",
+            char::from(class)
+        );
+        start += run;
+    }
+    format!(
+        "<svg viewBox=\"0 0 {} 29\" preserveAspectRatio=\"none\" aria-hidden=\"true\" \
+         focusable=\"false\"><g mask=\"url(#gaps)\">{rects}</g></svg>",
+        days.len().max(1)
+    )
+}
+
+/// A thin horizontal meter (`value` of `max`), drawn as an svg so its width is
+/// an attribute, not an inline style the CSP would refuse.
+pub(crate) fn meter(value: i64, max: i64, class: &str) -> String {
+    let filled = if max > 0 {
+        (value.clamp(0, max) * 100) / max
+    } else {
+        0
+    };
+    format!(
+        "<svg class=\"{class}\" viewBox=\"0 0 100 8\" preserveAspectRatio=\"none\" aria-hidden=\"true\" \
+         focusable=\"false\"><rect class=\"track\" width=\"100\" height=\"8\"/>\
+         <rect class=\"fill\" width=\"{filled}\" height=\"8\"/></svg>"
+    )
+}
 
 // --- Server-rendered latency chart --------------------------------------
 // Colours come from CSS (the `status` class on the <svg>), not inline here.
@@ -99,26 +240,33 @@ fn event_markers(points: &[Point], events: &[EventMarker]) -> String {
 
 // --- SVG status / uptime badges -----------------------------------------
 
+// The badges use the brand palette: up is petrol, not green. Text-grade
+// shades, so the white message keeps its contrast on every colour.
+const BADGE_UP: &str = "#0e5e68";
+const BADGE_UP_SOFT: &str = "#3e7a84";
+const BADGE_SLOW: &str = "#8f4b22";
+const BADGE_DOWN: &str = "#a5372a";
+/// A badge with no data yet (also the uptime badge's colour then).
+pub(crate) const BADGE_NONE: &str = "#6b6760";
+
 pub(crate) fn status_color(status: &str) -> &'static str {
     match status {
-        "up" => "#4c1",
-        "down" => "#e05d44",
-        "degraded" => "#fe7d37",
-        _ => "#9f9f9f",
+        "up" => BADGE_UP,
+        "down" => BADGE_DOWN,
+        "degraded" => BADGE_SLOW,
+        _ => BADGE_NONE,
     }
 }
 
 pub(crate) fn uptime_color(permille: i64) -> &'static str {
     if permille >= 999 {
-        "#4c1"
+        BADGE_UP
     } else if permille >= 990 {
-        "#97ca00"
-    } else if permille >= 950 {
-        "#dfb317"
+        BADGE_UP_SOFT
     } else if permille >= 900 {
-        "#fe7d37"
+        BADGE_SLOW
     } else {
-        "#e05d44"
+        BADGE_DOWN
     }
 }
 
@@ -136,7 +284,7 @@ pub(crate) fn svg_response(svg: String) -> impl IntoResponse {
 pub(crate) fn badge(label: &str, message: &str, color: &str, style: Style) -> String {
     Badge::new()
         .label(label)
-        .label_color(Color::Hex("555".into()))
+        .label_color(Color::Hex("1b222c".into()))
         .value(message)
         .value_color(Color::Hex(color.trim_start_matches('#').into()))
         .style(style)
@@ -221,8 +369,54 @@ mod tests {
     }
     #[test]
     fn uptime_color_tiers() {
-        assert_eq!(uptime_color(1000), "#4c1");
-        assert_eq!(uptime_color(995), "#97ca00");
-        assert_eq!(uptime_color(800), "#e05d44");
+        assert_eq!(uptime_color(1000), BADGE_UP);
+        assert_eq!(uptime_color(995), BADGE_UP_SOFT);
+        assert_eq!(uptime_color(950), BADGE_SLOW);
+        assert_eq!(uptime_color(800), BADGE_DOWN);
+        // Up is petrol, never green.
+        assert_eq!(status_color("up"), "#0e5e68");
+    }
+
+    #[test]
+    fn day_bar_is_one_svg_of_run_length_rects() {
+        let mut days = vec![b'u'; 90];
+        days[40] = b'x';
+        days[88] = b'd';
+        days[89] = b'd';
+        let svg = day_bar(&days);
+        assert!(svg.starts_with("<svg viewBox=\"0 0 90 29\""), "{svg}");
+        // up, down, up, slow: four runs, not ninety nodes.
+        assert_eq!(svg.matches("<rect").count(), 4, "{svg}");
+        assert!(
+            svg.contains("class=\"x\" x=\"40\" y=\"0\" width=\"1\" height=\"29\""),
+            "{svg}"
+        );
+        assert!(
+            svg.contains("class=\"d\" x=\"88\" y=\"7\" width=\"2\""),
+            "{svg}"
+        );
+        assert!(svg.contains("mask=\"url(#gaps)\""));
+        // An empty bar still renders a valid (blank) svg.
+        assert!(day_bar(&[]).contains("viewBox=\"0 0 1 29\""));
+    }
+
+    #[test]
+    fn owl_is_decorative_and_posed_by_state() {
+        let svg = owl("degraded", 96);
+        assert!(svg.contains("data-state=\"degraded\"") && svg.contains("aria-hidden=\"true\""));
+        let many = owls(
+            &[("down", "Paris <1>"), ("up", "Frankfurt")],
+            "Paris sees it down",
+        );
+        assert_eq!(many.matches("class=\"owl\"").count(), 2);
+        assert!(many.contains("Paris &lt;1&gt;") && many.contains("role=\"img\""));
+    }
+
+    #[test]
+    fn meter_width_is_an_attribute() {
+        let svg = meter(31, 43, "meter");
+        assert!(svg.contains("class=\"fill\" width=\"72\""), "{svg}");
+        assert!(!svg.contains("style"));
+        assert!(meter(5, 0, "meter").contains("width=\"0\""));
     }
 }

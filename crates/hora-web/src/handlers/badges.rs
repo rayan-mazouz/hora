@@ -44,7 +44,7 @@ pub(crate) async fn heatmap_svg(
             let now = Utc::now().timestamp();
             let since = (now / 86_400 - (crate::heatmap::HEATMAP_DAYS - 1)) * 86_400;
             let cells = db::latency_hourly(&state.pool, &id, since).await?;
-            Ok::<_, sqlx::Error>(crate::heatmap::render(&cells, now, &monitor.name))
+            Ok::<_, sqlx::Error>(crate::heatmap::render(&cells, now, &monitor.name, true))
         })
         .await?;
     Ok(svg_response(svg.as_ref().clone()))
@@ -121,7 +121,7 @@ pub(crate) async fn uptime_badge(
     let permille = (total > 0).then(|| available.saturating_mul(1000) / total);
     let (message, color) = match permille {
         Some(permille) => (hora_core::fmt::permille(permille), uptime_color(permille)),
-        None => ("n/a".to_owned(), "#9f9f9f"),
+        None => ("n/a".to_owned(), crate::render::BADGE_NONE),
     };
     Ok(svg_response(badge(
         "uptime",

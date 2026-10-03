@@ -79,6 +79,7 @@ pub(crate) fn build_bar(daily: &[DayRow], now: DateTime<Utc>, days: u16) -> Vec<
                 title: format!("{date}: no data"),
                 date: date.clone(),
                 state: "empty",
+                maint: false,
             },
             |row| day_cell(date.clone(), row),
         );
@@ -99,6 +100,7 @@ pub(crate) fn day_cell(date: String, row: &DayRow) -> DayCell {
             date,
             state: "empty",
             title,
+            maint: false,
         };
     }
     let permille = (row.up + row.degraded).saturating_mul(1000) / total;
@@ -110,5 +112,10 @@ pub(crate) fn day_cell(date: String, row: &DayRow) -> DayCell {
         "down"
     };
     let title = format!("{date}: {}", hora_core::fmt::permille(permille));
-    DayCell { date, state, title }
+    DayCell {
+        date,
+        state,
+        title,
+        maint: false,
+    }
 }

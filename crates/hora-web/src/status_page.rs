@@ -1,0 +1,1078 @@
+//! The status page's view, built from a [`Summary`]: the hero sentence that
+//! answers "is it working?" with the hour, what needs attention first, then
+//! the groups. Read-only over the summary (pure presentation), so it never
+//! touches the database or the summary cache.
+//!
+//! Two layouts. Up to [`SCALE_AT`] monitors, every group is a framed list of
+//! rows, each with its daily bar. Beyond, the page stays light: groups where
+//! all is well fold into one summary row (a `<details>`), and a group lists
+//! at most [`ROWS_PER_GROUP`] compact rows (no bar, no chart), problems first;
+//! "Show all" is the group's own page.
+
+use std::fmt::Write as _;
+
+use chrono::{DateTime, Utc};
+use hora_core::config::Config;
+
+use crate::layout::{count_word, join_and, ms, pct};
+use crate::render::{day_bar, day_class, day_rank, meter, owl};
+use crate::summary::{MonitorView, Summary};
+
+/// Above this many monitors the page uses its scale layout.
+pub(crate) const SCALE_AT: usize = 30;
+/// Compact rows a group lists on the scale layout before "Show all".
+pub(crate) const ROWS_PER_GROUP: usize = 24;
+/// Rows in "Needs attention" before the rest is left to the groups.
+pub(crate) const ATTENTION_ROWS: usize = 50;
+/// Local-only monitors detailed in the operator's "why nobody was woken".
+const LOCAL_DETAILED: usize = 5;
+
+// A template's view model: the flags are independent facts the template
+// reads (layout, audience, page), not a state machine.
+#[allow(clippy::struct_excessive_bools)]
+pub(crate) struct StatusPage<'a> {
+    pub(crate) summary: &'a Summary,
+    /// The page's state: `up`, `degraded`, `down`, `maint` or `none`.
+    pub(crate) state: &'static str,
+    /// The owl in that state's pose (one per page).
+    pub(crate) owl: String,
+    /// The hour, the hero's eyebrow.
+    pub(crate) when: String,
+    /// The one sentence: "Everything is running."
+    pub(crate) headline: String,
+    /// The line under it: `sub_lead` in bold, then `sub_rest`.
+    pub(crate) sub_lead: String,
+    pub(crate) sub_rest: String,
+    pub(crate) chips: Vec<Chip>,
+    /// The operator's announcements (`[[incidents]]`, `hora announce`).
+    pub(crate) announcements: Vec<Callout>,
+    /// The maintenance window the hero is about, when maintenance is the state.
+    pub(crate) window: Option<Window>,
+    /// Active maintenance windows (when something worse leads the hero).
+    pub(crate) maintenances: Vec<Callout>,
+    /// The next planned window, announced ahead.
+    pub(crate) next: Option<Callout>,
+    /// "Not an outage": monitors only this node sees down.
+    pub(crate) local: Option<LocalNotice<'a>>,
+    pub(crate) attention: Vec<Row<'a>>,
+    pub(crate) attention_more: usize,
+    pub(crate) scale: bool,
+    pub(crate) groups: Vec<GroupBlock<'a>>,
+    pub(crate) total: usize,
+    /// Places watching (this node and its peers).
+    pub(crate) places: usize,
+    /// The days in the bar (`[page].history_days`), for its legend.
+    pub(crate) days: u16,
+    /// `nothing` (no monitor configured), `private` (none visible without a
+    /// token) or empty.
+    pub(crate) empty: &'static str,
+    /// A token was given but opened nothing (the private door says so).
+    pub(crate) bad_token: bool,
+    /// One group's page (`/status/{group}`): every row, no folding.
+    pub(crate) group_page: bool,
+    /// The operator's view: node names, the mesh, the verdicts.
+    pub(crate) operator: bool,
+    /// The watched peers (operator only: node names stay off public pages).
+    pub(crate) peers: Vec<PeerRow>,
+    /// The latest incidents this audience may see.
+    pub(crate) recent: &'a [crate::summary::RecentIncident],
+}
+
+/// A watched peer, for the operator's "who keeps watch".
+pub(crate) struct PeerRow {
+    pub(crate) name: String,
+    pub(crate) state: &'static str,
+    pub(crate) word: &'static str,
+    pub(crate) note: String,
+}
+
+/// A count or a fact in the hero, as a chip: shape, colour, word.
+pub(crate) struct Chip {
+    /// `up`, `degraded`, `down`, `maint`, `none`; empty for a neutral fact.
+    pub(crate) state: &'static str,
+    /// The sprite icon of a neutral chip (`pin`), empty otherwise.
+    pub(crate) icon: &'static str,
+    pub(crate) text: String,
+    /// Where the chip leads (`#attention`), if anywhere.
+    pub(crate) href: Option<String>,
+}
+
+/// An announcement or a maintenance notice: an icon and a word on a wash.
+pub(crate) struct Callout {
+    /// `info`, `warning`, `critical` or `maint` (the wash).
+    pub(crate) class: &'static str,
+    /// The glyph: `info`, `degraded`, `down`, `maint`.
+    pub(crate) glyph: &'static str,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) when: Option<String>,
+}
+
+/// The maintenance window in the hero, with its progress.
+pub(crate) struct Window {
+    pub(crate) start: String,
+    pub(crate) end: String,
+    pub(crate) progress: String,
+    pub(crate) meter: String,
+}
+
+/// Monitors down from this node only, and what the page says about them.
+pub(crate) struct LocalNotice<'a> {
+    pub(crate) sentence: String,
+    /// The first few, detailed for the operator.
+    pub(crate) monitors: Vec<LocalDetail<'a>>,
+}
+
+/// One local-only monitor in the operator's panel: who sees what.
+pub(crate) struct LocalDetail<'a> {
+    pub(crate) monitor: &'a MonitorView,
+    pub(crate) owls: String,
+    pub(crate) places: Vec<Place>,
+}
+
+/// One place's view of a monitor: the state, and its answer time.
+pub(crate) struct Place {
+    pub(crate) name: String,
+    /// `this Hora` or `peer`.
+    pub(crate) role: &'static str,
+    pub(crate) state: &'static str,
+    pub(crate) word: &'static str,
+    pub(crate) answer: String,
+}
+
+/// A monitor's row: shape, name, word, why, and (on small pages) its bar.
+pub(crate) struct Row<'a> {
+    pub(crate) m: &'a MonitorView,
+    /// The monitor id, URL-encoded for `/monitor/{id}`.
+    pub(crate) href_id: String,
+    pub(crate) state: &'static str,
+    pub(crate) word: &'static str,
+    /// After the word: `· 99.98 %` or `· 1.8 s`; empty for none.
+    pub(crate) detail: String,
+    /// One line of why, for anything not plainly up.
+    pub(crate) why: Option<String>,
+    /// The group, named on the "Needs attention" rows.
+    pub(crate) group: Option<&'a str>,
+    /// The daily bar (full rows only), and its words for assistive tech.
+    pub(crate) bar: String,
+    pub(crate) bar_label: String,
+    /// Where a down was seen from ("confirmed from").
+    pub(crate) seen: Vec<Place>,
+    pub(crate) seen_note: String,
+}
+
+/// A display group: a framed list (small pages) or a disclosure (scale).
+pub(crate) struct GroupBlock<'a> {
+    /// The heading ("Other services" for ungrouped monitors).
+    pub(crate) name: String,
+    /// The group page, URL-encoded (`/status/{group}`); empty when ungrouped.
+    pub(crate) href: String,
+    pub(crate) state: &'static str,
+    /// "All 4 up", "1 down · 3 up".
+    pub(crate) fact: String,
+    /// The fact's lead (`1 down`), shown with the state's shape.
+    pub(crate) fact_lead: String,
+    pub(crate) fact_rest: String,
+    /// Open on arrival: something is wrong in it, or it is the group's page.
+    pub(crate) open: bool,
+    /// The group's daily bar (scale layout): each day its worst monitor's.
+    pub(crate) bar: String,
+    pub(crate) uptime: String,
+    pub(crate) rows: Vec<Row<'a>>,
+    pub(crate) total: usize,
+}
+
+#[derive(Default)]
+struct Counts {
+    up: usize,
+    degraded: usize,
+    down: usize,
+    maint: usize,
+    none: usize,
+    retrying: usize,
+}
+
+impl Counts {
+    fn add(&mut self, monitor: &MonitorView) {
+        match monitor.display_state() {
+            "up" => self.up += 1,
+            "degraded" => {
+                self.degraded += 1;
+                if monitor.word() == "Retrying" {
+                    self.retrying += 1;
+                }
+            }
+            "down" => self.down += 1,
+            "maint" => self.maint += 1,
+            _ => self.none += 1,
+        }
+    }
+
+    /// The page's state: the worst shown; `none` only when nothing has data.
+    fn state(&self, total: usize) -> &'static str {
+        if self.down > 0 {
+            "down"
+        } else if self.degraded > 0 {
+            "degraded"
+        } else if self.maint > 0 {
+            "maint"
+        } else if self.none == total {
+            "none"
+        } else {
+            "up"
+        }
+    }
+}
+
+/// How a page is asked for, beside its summary.
+pub(crate) struct Ask {
+    pub(crate) operator: bool,
+    /// A `?token=` was presented (a wrong one, if nothing is visible).
+    pub(crate) token_given: bool,
+    pub(crate) group_page: bool,
+}
+
+/// Build the status page's view.
+// One flat assembly of the page's parts; splitting it would only scatter it.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn build<'a>(summary: &'a Summary, config: &Config, ask: &Ask) -> StatusPage<'a> {
+    let now = Utc::now();
+    let total = summary.monitors.len();
+    let mut counts = Counts::default();
+    for monitor in &summary.monitors {
+        counts.add(monitor);
+    }
+    let state = counts.state(total);
+    let scale = total > SCALE_AT;
+    let places = summary.places();
+
+    let local_monitors: Vec<&MonitorView> = summary
+        .monitors
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|monitor| monitor.local_only() && monitor.maintenance.is_none())
+        .collect();
+
+    let windows = active_windows(summary, config, now);
+    let window = (state == "maint")
+        .then(|| {
+            windows
+                .first()
+                .map(|(start, end)| hero_window(*start, *end, now))
+        })
+        .flatten();
+
+    let (headline, sub_lead, sub_rest) =
+        sentence(summary, &counts, total, scale, places, &windows, now);
+
+    let attention_all: Vec<Row> = attention_rows(summary);
+    let attention_more = attention_all.len().saturating_sub(ATTENTION_ROWS);
+    let attention = attention_all.into_iter().take(ATTENTION_ROWS).collect();
+
+    let empty = if total > 0 {
+        ""
+    } else if config.monitors.is_empty() {
+        "nothing"
+    } else {
+        "private"
+    };
+
+    StatusPage {
+        summary,
+        state,
+        owl: owl(state, 96),
+        when: summary.when(),
+        headline,
+        sub_lead,
+        sub_rest,
+        chips: chips(&counts, &local_monitors, summary.quiet_days, config, now),
+        announcements: summary
+            .incidents
+            .iter()
+            .map(|incident| {
+                let (class, glyph) = match incident.severity {
+                    "critical" => ("critical", "down"),
+                    "warning" => ("warning", "degraded"),
+                    _ => ("info", "info"),
+                };
+                Callout {
+                    class,
+                    glyph,
+                    title: incident.title.clone(),
+                    body: incident.body.clone(),
+                    when: incident.at.as_ref().map(|at| format!("Posted {at}")),
+                }
+            })
+            .collect(),
+        window,
+        maintenances: if state == "maint" {
+            Vec::new()
+        } else {
+            summary
+                .maintenances
+                .iter()
+                .map(|window| Callout {
+                    class: "maint",
+                    glyph: "maint",
+                    title: "Planned maintenance".to_owned(),
+                    body: if window.reason.is_empty() {
+                        format!("Affects {}.", window.monitors)
+                    } else {
+                        format!("{}. Affects {}.", window.reason, window.monitors)
+                    },
+                    when: None,
+                })
+                .collect()
+        },
+        next: next_window(config, now).map(|(start, end, title)| Callout {
+            class: "info",
+            glyph: "info",
+            title: "Next".to_owned(),
+            body: format!(
+                "{} to {}: {}.",
+                start.format("%A %-d %B, %H:%M"),
+                if end.date_naive() == start.date_naive() {
+                    end.format("%H:%M UTC").to_string()
+                } else {
+                    end.format("%A %-d %B, %H:%M UTC").to_string()
+                },
+                if title.is_empty() {
+                    "planned maintenance"
+                } else {
+                    title
+                }
+            ),
+            when: None,
+        }),
+        local: local_notice(&local_monitors),
+        attention,
+        attention_more,
+        scale,
+        groups: summary
+            .groups
+            .iter()
+            .map(|group| group_block(&group.name, &group.monitors, scale, ask.group_page))
+            .collect(),
+        total,
+        places,
+        days: config.page.history_days,
+        empty,
+        bad_token: ask.token_given && empty == "private",
+        group_page: ask.group_page,
+        operator: ask.operator,
+        peers: if ask.operator {
+            summary
+                .peers
+                .iter()
+                .map(|peer| {
+                    let state = crate::layout::display_state(peer.status);
+                    let mut note = peer.last_seen.as_ref().map_or_else(
+                        || "never heard from".to_owned(),
+                        |seen| format!("last heartbeat {seen}"),
+                    );
+                    if peer.pings {
+                        note.push_str(" · this node heartbeats it too");
+                    }
+                    PeerRow {
+                        name: peer.name.clone(),
+                        state,
+                        word: match state {
+                            "up" => "Well",
+                            "down" => "Silent",
+                            _ => "Not heard yet",
+                        },
+                        note,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+        recent: &summary.recent,
+    }
+}
+
+/// The hero's words alone, for the plain-text page: "Everything is running.
+/// All 14 services are up."
+pub(crate) fn summary_sentence(summary: &Summary) -> String {
+    let total = summary.monitors.len();
+    let mut counts = Counts::default();
+    for monitor in &summary.monitors {
+        counts.add(monitor);
+    }
+    let (headline, lead, rest) = sentence(
+        summary,
+        &counts,
+        total,
+        total > SCALE_AT,
+        summary.places(),
+        &[],
+        Utc::now(),
+    );
+    format!("{headline} {lead}{rest}")
+}
+
+/// The active maintenance windows the page is about, soonest end first.
+fn active_windows(
+    summary: &Summary,
+    config: &Config,
+    now: DateTime<Utc>,
+) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+    // The summary already holds the windows this page may announce (a group
+    // page drops other groups'); the config adds their hours.
+    let mut windows: Vec<(DateTime<Utc>, DateTime<Utc>)> = config
+        .maintenance
+        .iter()
+        .filter(|window| now >= window.start && now <= window.end)
+        .filter(|window| {
+            summary
+                .maintenances
+                .iter()
+                .any(|shown| shown.reason == window.title)
+        })
+        .map(|window| (window.start, window.end))
+        .collect();
+    windows.sort_by_key(|(_, end)| *end);
+    windows
+}
+
+/// The next window that has not started, within a week.
+fn next_window(
+    config: &Config,
+    now: DateTime<Utc>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>, &str)> {
+    config
+        .maintenance
+        .iter()
+        .filter(|window| window.start > now && window.start <= now + chrono::TimeDelta::days(7))
+        .min_by_key(|window| window.start)
+        .map(|window| (window.start, window.end, window.title.as_str()))
+}
+
+fn hero_window(start: DateTime<Utc>, end: DateTime<Utc>, now: DateTime<Utc>) -> Window {
+    let length = (end - start).num_minutes().max(1);
+    let done = (now - start).num_minutes().clamp(0, length);
+    Window {
+        start: start.format("%H:%M").to_string(),
+        end: end.format("%H:%M").to_string(),
+        progress: format!("{done} of {length} min"),
+        meter: meter(done, length, "meter maint"),
+    }
+}
+
+/// The hero's sentence and the line under it.
+// The voice's cases side by side (all up, down, slow, maintenance, waiting):
+// easier to read and to reword as one function.
+#[allow(clippy::too_many_lines)]
+fn sentence(
+    summary: &Summary,
+    counts: &Counts,
+    total: usize,
+    scale: bool,
+    places: usize,
+    windows: &[(DateTime<Utc>, DateTime<Utc>)],
+    now: DateTime<Utc>,
+) -> (String, String, String) {
+    let names = |state: &str| -> Vec<&str> {
+        summary
+            .monitors
+            .iter()
+            .filter(|monitor| monitor.display_state() == state)
+            .map(|monitor| monitor.name.as_str())
+            .collect()
+    };
+    let is_are = |n: usize| if n == 1 { "is" } else { "are" };
+    let problems = counts.down + counts.degraded;
+    // At scale, a handful of problems among hundreds is "almost everything".
+    let almost = scale && problems * 50 <= total;
+
+    let headline = if total > 0 && counts.none == total {
+        "Waiting for the first checks.".to_owned()
+    } else if counts.down > 0 {
+        if almost {
+            "Almost everything is running.".to_owned()
+        } else if counts.down <= 3 {
+            let down = names("down");
+            format!("{} {} down.", join_and(&down), is_are(down.len()))
+        } else if counts.down * 2 < total {
+            "Some services are down.".to_owned()
+        } else {
+            "Most services are down.".to_owned()
+        }
+    } else if counts.degraded > 0 {
+        let trouble = if counts.retrying > 0 {
+            "having trouble"
+        } else {
+            "slow"
+        };
+        if almost {
+            "Almost everything is running.".to_owned()
+        } else if counts.degraded <= 3 {
+            let slow = names("degraded");
+            format!("{} {} {trouble}.", join_and(&slow), is_are(slow.len()))
+        } else {
+            format!("Some services are {trouble}.")
+        }
+    } else if counts.maint > 0 {
+        match windows.first() {
+            Some((_, end)) if end.date_naive() == now.date_naive() => {
+                format!("Planned maintenance, until {}.", end.format("%H:%M"))
+            }
+            Some((_, end)) => format!(
+                "Planned maintenance, until {}.",
+                end.format("%a %-d %b, %H:%M")
+            ),
+            None => "Planned maintenance.".to_owned(),
+        }
+    } else {
+        "Everything is running.".to_owned()
+    };
+
+    let mut rest = String::new();
+    let lead = if problems == 0 && counts.maint == 0 && counts.none == 0 {
+        rest.push_str(if total == 1 { " is up." } else { " are up." });
+        if total == 1 {
+            "The one service".to_owned()
+        } else {
+            format!("All {total} services")
+        }
+    } else {
+        rest.push_str(if total == 1 {
+            " service is up."
+        } else {
+            " services are up."
+        });
+        let mut parts = Vec::new();
+        if counts.down > 0 {
+            parts.push(format!(
+                "{} {} down",
+                count_word(counts.down),
+                is_are(counts.down)
+            ));
+        }
+        if counts.degraded > 0 {
+            let slow = counts.degraded - counts.retrying;
+            if slow > 0 {
+                parts.push(format!("{} {} slow", count_word(slow), is_are(slow)));
+            }
+            if counts.retrying > 0 {
+                parts.push(format!(
+                    "{} {} being checked again",
+                    count_word(counts.retrying),
+                    is_are(counts.retrying)
+                ));
+            }
+        }
+        if counts.maint > 0 {
+            parts.push(format!(
+                "{} {} in planned maintenance",
+                count_word(counts.maint),
+                is_are(counts.maint)
+            ));
+        }
+        if counts.none > 0 && counts.none < total {
+            parts.push(format!(
+                "{} {} waiting for its first check",
+                count_word(counts.none),
+                is_are(counts.none)
+            ));
+        }
+        if !parts.is_empty() {
+            let joined = join_and(&parts);
+            let mut chars = joined.chars();
+            let capitalised: String = chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default();
+            rest.push(' ');
+            rest.push_str(&capitalised);
+            rest.push_str(if counts.up > 0 {
+                "; the rest is fine."
+            } else {
+                "."
+            });
+        }
+        format!("{} of {total}", counts.up)
+    };
+    if places > 1 {
+        let _ = write!(rest, " Checked from {places} places.");
+    }
+    (headline, lead, rest)
+}
+
+fn chips(
+    counts: &Counts,
+    local: &[&MonitorView],
+    quiet_days: Option<i64>,
+    config: &Config,
+    now: DateTime<Utc>,
+) -> Vec<Chip> {
+    let mut chips = Vec::new();
+    let mut add = |state: &'static str, n: usize, text: &str, href: Option<&str>| {
+        if n > 0 {
+            chips.push(Chip {
+                state,
+                icon: "",
+                text: format!("{n} {text}"),
+                href: href.map(str::to_owned),
+            });
+        }
+    };
+    add("down", counts.down, "down", Some("#attention"));
+    add(
+        "degraded",
+        counts.degraded,
+        if counts.retrying == counts.degraded {
+            "retrying"
+        } else {
+            "slow"
+        },
+        Some("#attention"),
+    );
+    add("maint", counts.maint, "in maintenance", None);
+    add("none", counts.none, "waiting", None);
+    add("up", counts.up, "up", None);
+    if !local.is_empty() {
+        chips.push(Chip {
+            state: "",
+            icon: "pin",
+            text: "One checkpoint: network issue".to_owned(),
+            href: Some("#local".to_owned()),
+        });
+    }
+    // A calm fact, only while nothing is down (an open incident clears it).
+    if counts.down == 0
+        && let Some(days) = quiet_days
+    {
+        chips.push(Chip {
+            state: "",
+            icon: "",
+            text: format!(
+                "No incident in {days} day{}",
+                if days == 1 { "" } else { "s" }
+            ),
+            href: None,
+        });
+    }
+    if counts.maint == 0
+        && let Some((start, _, _)) = next_window(config, now)
+    {
+        chips.push(Chip {
+            state: "maint",
+            icon: "",
+            text: format!("Planned: {}", start.format("%a %-d %b, %H:%M UTC")),
+            href: Some("#next".to_owned()),
+        });
+    }
+    chips
+}
+
+/// "Not an outage": what the page says when only this node sees some
+/// monitors down. Public visitors read one calm sentence; the operator also
+/// gets who saw what.
+fn local_notice<'a>(local: &[&'a MonitorView]) -> Option<LocalNotice<'a>> {
+    let first = local.first()?;
+    let sentence = if local.len() == 1 {
+        let others: Vec<&str> = first.vantages.iter().map(|v| v.peer.as_str()).collect();
+        format!(
+            "One of our checkpoints can't reach {}; {} {} it normally, so the problem is on the \
+             road from that checkpoint, not in the service.",
+            first.name,
+            join_and(&others),
+            if others.len() == 1 {
+                "reaches"
+            } else {
+                "reach"
+            },
+        )
+    } else {
+        format!(
+            "One of our checkpoints can't reach {} services; the other places reach them \
+             normally, so the problem is on the road from that checkpoint, not in the services.",
+            local.len()
+        )
+    };
+    let monitors = local
+        .iter()
+        .take(LOCAL_DETAILED)
+        .map(|monitor| {
+            let mut places = vec![Place {
+                name: "This Hora".to_owned(),
+                role: "this node",
+                state: "down",
+                word: "Down",
+                answer: monitor
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "no answer".to_owned()),
+            }];
+            places.extend(monitor.vantages.iter().map(|vantage| {
+                let state = crate::layout::display_state(&vantage.status);
+                Place {
+                    name: vantage.peer.clone(),
+                    role: "peer",
+                    state,
+                    word: crate::layout::word(state),
+                    answer: vantage.p50_ms.map_or_else(|| "-".to_owned(), ms),
+                }
+            }));
+            let pictured: Vec<(&str, &str)> = places
+                .iter()
+                .map(|place| (place.state, place.name.as_str()))
+                .collect();
+            let owls = crate::render::owls(
+                &pictured,
+                &format!(
+                    "Only this Hora sees {} down; the other places see it up.",
+                    monitor.name
+                ),
+            );
+            LocalDetail {
+                monitor,
+                owls,
+                places,
+            }
+        })
+        .collect();
+    Some(LocalNotice { sentence, monitors })
+}
+
+/// How urgent a display state is, for "problems first".
+fn urgency(state: &str) -> u8 {
+    match state {
+        "down" => 0,
+        "degraded" => 1,
+        "maint" => 2,
+        "none" => 3,
+        _ => 4,
+    }
+}
+
+/// The monitors that are not plainly up, worst first, each with its group.
+fn attention_rows(summary: &Summary) -> Vec<Row<'_>> {
+    let mut rows: Vec<Row> = summary
+        .monitors
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|monitor| matches!(monitor.display_state(), "down" | "degraded" | "maint"))
+        .map(|monitor| {
+            let mut row = row(monitor, false);
+            row.group = monitor.group.as_deref();
+            row
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        urgency(a.state)
+            .cmp(&urgency(b.state))
+            .then_with(|| a.m.name.cmp(&b.m.name))
+    });
+    rows
+}
+
+/// One monitor's row. `with_bar` draws its daily bar (small pages).
+fn row(monitor: &MonitorView, with_bar: bool) -> Row<'_> {
+    let state = monitor.display_state();
+    let now = Utc::now().timestamp();
+    let detail = match state {
+        // Up over the bar's days, the figure its bar shows.
+        "up" | "maint" => monitor
+            .uptime_long_permille
+            .or(monitor.uptime_permille)
+            .map(pct)
+            .unwrap_or_default(),
+        "down" => crate::monitor_page::down_for(monitor, now).map_or_else(
+            || monitor.last_latency_ms.map(ms).unwrap_or_default(),
+            crate::layout::minutes,
+        ),
+        "degraded" => monitor.last_latency_ms.map(ms).unwrap_or_default(),
+        _ => String::new(),
+    };
+    let (seen, seen_note) = seen_from(monitor);
+    Row {
+        m: monitor,
+        href_id: hora_core::fmt::percent_encode(&monitor.id),
+        state,
+        word: monitor.word(),
+        detail,
+        why: why(monitor),
+        group: None,
+        bar: if with_bar {
+            day_bar(&day_classes(monitor))
+        } else {
+            String::new()
+        },
+        bar_label: bar_label(monitor),
+        seen,
+        seen_note,
+    }
+}
+
+/// One line of why, in the visitor's words.
+fn why(monitor: &MonitorView) -> Option<String> {
+    let state = monitor.display_state();
+    if monitor.local_only() {
+        let others: Vec<&str> = monitor.vantages.iter().map(|v| v.peer.as_str()).collect();
+        return Some(format!(
+            "Up from {}. One checkpoint can't reach it: a network problem near that checkpoint.",
+            join_and(&others)
+        ));
+    }
+    let mut parts = Vec::new();
+    match state {
+        "maint" => {
+            let title = monitor.maintenance.as_deref().unwrap_or_default();
+            parts.push(if title.is_empty() {
+                "Planned maintenance.".to_owned()
+            } else {
+                format!("Planned maintenance: {title}.")
+            });
+        }
+        "down" => {
+            if let Some(since) = crate::monitor_page::since_line(monitor, Utc::now().timestamp()) {
+                parts.push(since);
+            }
+            if let Some(error) = &monitor.last_error {
+                parts.push(format!("Last answer: {error}."));
+            }
+        }
+        "degraded" => match (&monitor.last_error, monitor.last_latency_ms, monitor.p50_ms) {
+            (Some(error), _, _) => parts.push(format!(
+                "The last check failed ({error}); checking again before calling it down."
+            )),
+            (None, Some(latency), Some(p50)) if p50 < latency => parts.push(format!(
+                "Answers take {} (usually {}).",
+                ms(latency),
+                ms(p50)
+            )),
+            (None, Some(latency), _) => parts.push(format!("Answers take {}.", ms(latency))),
+            _ => {}
+        },
+        "none" => parts.push("Waiting for the first check.".to_owned()),
+        _ => {}
+    }
+    if let Some(cause) = &monitor.cause {
+        parts.push(format!("Probably caused by {cause}."));
+    }
+    if !monitor.impacted.is_empty() {
+        parts.push(format!(
+            "{} {} on it.",
+            join_and(&monitor.impacted),
+            if monitor.impacted.len() == 1 {
+                "depends"
+            } else {
+                "depend"
+            }
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+/// Where a down monitor was seen from: this node and each peer, and what
+/// the agreement means. Empty without peers.
+fn seen_from(monitor: &MonitorView) -> (Vec<Place>, String) {
+    if monitor.vantages.is_empty() || monitor.display_state() != "down" {
+        return (Vec::new(), String::new());
+    }
+    let mut places = vec![Place {
+        name: "Here".to_owned(),
+        role: "this node",
+        state: "down",
+        word: "Down",
+        answer: String::new(),
+    }];
+    places.extend(monitor.vantages.iter().map(|vantage| {
+        let state = crate::layout::display_state(&vantage.status);
+        Place {
+            name: vantage.peer.clone(),
+            role: "peer",
+            state,
+            word: crate::layout::word(state),
+            answer: String::new(),
+        }
+    }));
+    let down = places.iter().filter(|place| place.state == "down").count();
+    let note = if down == places.len() {
+        format!("{down} of {down} places: not a local problem")
+    } else {
+        format!("Seen down from {down} of {} places", places.len())
+    };
+    (places, note)
+}
+
+/// The monitor's daily bar classes, oldest first. A day a planned window
+/// touched is maintenance unless it still was an outage; maintenance now
+/// marks today.
+fn day_classes(monitor: &MonitorView) -> Vec<u8> {
+    let mut days: Vec<u8> = monitor
+        .bar
+        .iter()
+        .map(|cell| match day_class(cell.state) {
+            b'u' | b'd' if cell.maint => b'm',
+            class => class,
+        })
+        .collect();
+    if monitor.maintenance.is_some()
+        && let Some(today) = days.last_mut()
+        && *today == b'u'
+    {
+        *today = b'm';
+    }
+    days
+}
+
+/// The bar's words: the period, the outages, the slow days.
+fn bar_label(monitor: &MonitorView) -> String {
+    let outages = monitor
+        .bar
+        .iter()
+        .filter(|cell| cell.state == "down")
+        .count();
+    let slow = monitor
+        .bar
+        .iter()
+        .filter(|cell| cell.state == "degraded")
+        .count();
+    let mut label = match monitor.uptime_long_permille {
+        Some(permille) => format!(
+            "{}: {} up over {} days, ",
+            monitor.name,
+            pct(permille),
+            monitor.bar.len()
+        ),
+        None => format!("{}, last {} days: ", monitor.name, monitor.bar.len()),
+    };
+    if outages == 0 && slow == 0 {
+        label.push_str("no incident");
+    } else {
+        let mut parts = Vec::new();
+        if outages > 0 {
+            parts.push(format!(
+                "{outages} day{} with an outage",
+                if outages == 1 { "" } else { "s" }
+            ));
+        }
+        if slow > 0 {
+            parts.push(format!(
+                "{slow} slow day{}",
+                if slow == 1 { "" } else { "s" }
+            ));
+        }
+        label.push_str(&join_and(&parts));
+    }
+    label.push_str(". Open its history");
+    label
+}
+
+fn group_block<'a>(
+    name: &str,
+    monitors: &'a [std::sync::Arc<MonitorView>],
+    scale: bool,
+    group_page: bool,
+) -> GroupBlock<'a> {
+    let mut counts = Counts::default();
+    for monitor in monitors {
+        counts.add(monitor);
+    }
+    let total = monitors.len();
+    let state = counts.state(total);
+
+    let (fact_lead, fact_rest) = if counts.up == total {
+        (format!("All {total} up"), String::new())
+    } else {
+        let mut lead = Vec::new();
+        if counts.down > 0 {
+            lead.push(format!("{} down", counts.down));
+        }
+        if counts.degraded > 0 {
+            lead.push(format!(
+                "{} {}",
+                counts.degraded,
+                if counts.retrying == counts.degraded {
+                    "retrying"
+                } else {
+                    "slow"
+                }
+            ));
+        }
+        if counts.maint > 0 {
+            lead.push(format!("{} in maintenance", counts.maint));
+        }
+        if counts.none > 0 {
+            lead.push(format!("{} waiting", counts.none));
+        }
+        let rest = if counts.up > 0 {
+            format!("{} up", counts.up)
+        } else {
+            String::new()
+        };
+        (lead.join(" · "), rest)
+    };
+    let fact = if fact_rest.is_empty() {
+        fact_lead.clone()
+    } else {
+        format!("{fact_lead} · {fact_rest}")
+    };
+
+    // Small pages: every row with its bar. Scale: compact rows, problems
+    // first then A to Z, at most a page of them unless this is the group's
+    // own page (or the ungrouped monitors, which have no page of their own).
+    let compact = scale || (group_page && total > SCALE_AT);
+    let mut rows: Vec<Row> = monitors
+        .iter()
+        .map(|monitor| row(monitor, !compact))
+        .collect();
+    if compact {
+        rows.sort_by(|a, b| {
+            urgency(a.state)
+                .cmp(&urgency(b.state))
+                .then_with(|| a.m.name.cmp(&b.m.name))
+        });
+        if !group_page && !name.is_empty() {
+            rows.truncate(ROWS_PER_GROUP);
+        }
+    }
+
+    let bar = if scale {
+        let length = monitors.iter().map(|m| m.bar.len()).max().unwrap_or(0);
+        let mut days = vec![b'n'; length];
+        for monitor in monitors {
+            for (day, class) in days.iter_mut().zip(day_classes(monitor)) {
+                if day_rank(class) > day_rank(*day) {
+                    *day = class;
+                }
+            }
+        }
+        day_bar(&days)
+    } else {
+        String::new()
+    };
+    let measured: Vec<i64> = monitors.iter().filter_map(|m| m.uptime_permille).collect();
+    let uptime = if measured.is_empty() {
+        String::new()
+    } else {
+        let average = measured.iter().sum::<i64>() / i64::try_from(measured.len()).unwrap_or(1);
+        format!("{} over 24 h", pct(average))
+    };
+
+    GroupBlock {
+        name: if name.is_empty() {
+            "Other services".to_owned()
+        } else {
+            name.to_owned()
+        },
+        href: if name.is_empty() {
+            String::new()
+        } else {
+            format!("/status/{}", hora_core::fmt::percent_encode(name))
+        },
+        state,
+        fact,
+        fact_lead,
+        fact_rest,
+        open: group_page || !matches!(state, "up" | "none"),
+        bar,
+        uptime,
+        rows,
+        total,
+    }
+}

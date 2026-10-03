@@ -151,7 +151,7 @@ async fn report_renders_and_rejects_bad_months() {
     let body = body_text(res).await;
     let label = chrono::Utc::now().format("%B %Y").to_string();
     assert!(
-        body.contains("SLA report") && body.contains(&label),
+        body.contains("Service report") && body.contains(&label),
         "{body}"
     );
     // Anonymous: the private monitor stays out of the report.
@@ -316,36 +316,38 @@ async fn group_token_gets_its_detail_but_no_operator_data() {
         .await
         .unwrap();
 
-    // The operator sees everything: the cross-tenant cause and the
-    // deploy marker.
-    let operator = body_text(
-        app.clone()
-            .oneshot(get("/status/App?token=0123456789abcdef"))
-            .await
-            .unwrap(),
-    )
-    .await;
+    // The operator sees everything: the cross-tenant cause on the status
+    // page, the deploy marker on the monitor's response-time chart.
+    let page = |uri: &str| {
+        let app = app.clone();
+        let uri = uri.to_owned();
+        async move { body_text(app.oneshot(get(&uri)).await.unwrap()).await }
+    };
+    let operator = page("/status/App?token=0123456789abcdef").await;
     assert!(operator.contains("Internal DB"), "{operator}");
+    let operator = page("/monitor/intra?token=0123456789abcdef").await;
     assert!(operator.contains("deploy billing v9"), "{operator}");
 
     // The group token: its private monitor with full detail...
-    let group = body_text(
-        app.clone()
-            .oneshot(get("/status/App?token=appappappappapp1"))
-            .await
-            .unwrap(),
-    )
-    .await;
+    let group = page("/status/App?token=appappappappapp1").await;
     assert!(group.contains("Intra"), "{group}");
     assert!(group.contains("tenant secret"), "{group}");
     // ...but neither another tenant's private monitor nor deploy titles.
     assert!(!group.contains("Internal DB"), "{group}");
-    assert!(!group.contains("deploy billing v9"), "{group}");
+    let group_monitor = page("/monitor/intra?token=appappappappapp1").await;
+    assert!(group_monitor.contains("tenant secret"), "{group_monitor}");
+    assert!(
+        !group_monitor.contains("deploy billing v9"),
+        "{group_monitor}"
+    );
 
-    // Anonymous: public monitors only, sanitized.
-    let public = body_text(app.oneshot(get("/status/App")).await.unwrap()).await;
+    // Anonymous: public monitors only, sanitized; the private monitor's own
+    // page is a 404, like a missing one.
+    let public = page("/status/App").await;
     assert!(!public.contains("Intra") && !public.contains("tenant secret"));
     assert!(!public.contains("Internal DB") && !public.contains("deploy billing v9"));
+    let res = app.oneshot(get("/monitor/intra")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -387,4 +389,312 @@ async fn group_token_reveals_its_group_and_nothing_else() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert!(!body_text(res).await.contains("intra"));
+}
+
+#[tokio::test]
+async fn pages_share_one_stylesheet_and_no_inline_style() {
+    let app = test_app().await;
+    let version = crate::handlers::assets::ASSET_VERSION.as_str();
+    for uri in ["/", "/status/App", "/history", "/timeline", "/monitor/web"] {
+        let res = app.clone().oneshot(get(uri)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{uri}");
+        // The CSP drops 'unsafe-inline': nothing may rely on it.
+        let csp = res.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            !csp.contains("unsafe-inline") && csp.contains("script-src 'none'"),
+            "{csp}"
+        );
+        let body = body_text(res).await;
+        assert!(
+            !body.contains("style=") && !body.contains("<style"),
+            "{uri}:\n{body}"
+        );
+        assert!(!body.contains("<script"), "{uri}");
+        assert!(
+            body.contains(&format!("/assets/hora.css?v={version}")),
+            "{uri}"
+        );
+        // The navigation is on every page.
+        assert!(body.contains("href=\"/timeline\""), "{uri}");
+    }
+
+    // The stylesheet and fonts are immutable, versioned assets.
+    let res = app.clone().oneshot(get("/assets/hora.css")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        res.headers()["cache-control"]
+            .to_str()
+            .unwrap()
+            .contains("immutable")
+    );
+    let res = app
+        .clone()
+        .oneshot(get("/assets/fonts/MonaSansMono.woff2"))
+        .await
+        .unwrap();
+    assert_eq!(res.headers()["content-type"], "font/woff2");
+    let res = app.oneshot(get("/assets/nope.css")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn theme_and_token_travel_with_the_navigation() {
+    let app = test_app().await;
+    let body = body_text(
+        app.clone()
+            .oneshot(get("/?theme=dark&token=0123456789abcdef"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        body.contains("<html lang=\"en\" data-theme=\"dark\">"),
+        "{body}"
+    );
+    assert!(
+        // `&` escaped as `&amp;` in the attribute (the same `&` once parsed).
+        body.contains("href=\"/history?token=0123456789abcdef&amp;theme=dark\""),
+        "{body}"
+    );
+    // The operator sees the operator's links; an unknown theme is ignored.
+    assert!(body.contains("/watchers?token="), "{body}");
+    let body = body_text(app.oneshot(get("/?theme=sepia")).await.unwrap()).await;
+    assert!(body.contains("<html lang=\"en\">") && !body.contains("/watchers"));
+}
+
+#[tokio::test]
+async fn status_page_states_every_state_in_words() {
+    let (app, pool) = test_app_with_pool().await;
+    let now = chrono::Utc::now().timestamp();
+    for offset in [30, 60, 90] {
+        sqlx::query(
+            "INSERT INTO checks (time, monitor_id, status, error) VALUES (?, 'web', 0, 'HTTP 503')",
+        )
+        .bind(now - offset)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let body = body_text(app.oneshot(get("/")).await.unwrap()).await;
+    // The sentence, the owl's pose, the shape and the word.
+    assert!(body.contains("Web is down."), "{body}");
+    assert!(body.contains("data-state=\"down\""), "{body}");
+    assert!(body.contains("Needs attention"), "{body}");
+    assert!(
+        body.contains("#g-down") && body.contains(">Down</span>"),
+        "{body}"
+    );
+    // The daily bar is one svg per monitor, never a node per day.
+    assert!(!body.contains("class=\"day "), "{body}");
+}
+
+#[tokio::test]
+async fn watchers_page_is_the_operators_only() {
+    let app = test_app().await;
+    let res = app.clone().oneshot(get("/watchers")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let body = body_text(
+        app.oneshot(get("/watchers?token=0123456789abcdef"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        body.contains("Peer X") && body.contains("test-node"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn curl_reads_the_same_sentence_with_words() {
+    let res = test_app()
+        .await
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("user-agent", "curl/8.0")
+                .extension(fake_peer())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_text(res).await;
+    // Nothing has data yet: the sentence says so, each row has its word,
+    // and a peer's name stays off the public text.
+    assert!(body.contains("Waiting for the first checks."), "{body}");
+    assert!(body.contains("No data"), "{body}");
+    assert!(!body.contains("Peer X"), "{body}");
+}
+
+/// The peers' view of the test app's `web` monitor: `status` from Paris.
+fn web_seen_from_paris(status: &str) -> hora_core::mesh::vantage::VantageMap {
+    let map = hora_core::mesh::vantage::new_map();
+    map.store(Arc::new(std::collections::HashMap::from([(
+        "http|https://example.com".to_owned(),
+        vec![hora_core::mesh::vantage::PeerVantage {
+            peer: "Paris".to_owned(),
+            status: status.to_owned(),
+            p50_ms: Some(80),
+        }],
+    )])));
+    map
+}
+
+/// Web is down from this node: three failed checks and the incident open.
+async fn web_down_here(pool: &sqlx::SqlitePool) {
+    let now = chrono::Utc::now().timestamp();
+    for offset in [30, 60, 90] {
+        sqlx::query(
+            "INSERT INTO checks (time, monitor_id, status, error) VALUES (?, 'web', 0, 'timeout')",
+        )
+        .bind(now - offset)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("INSERT INTO incidents (monitor_id, started_at, created_at) VALUES ('web', ?, ?)")
+        .bind(now - 9 * 60)
+        .bind(now - 9 * 60)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Down on this node only, while the peer watching the same target sees it
+/// up: the page says "Up" with a calm "Not an outage", never "Web is down".
+#[tokio::test]
+async fn a_down_seen_from_here_only_reads_as_up_with_the_notice() {
+    let (app, pool) = test_app_with_vantage(web_seen_from_paris("up")).await;
+    web_down_here(&pool).await;
+
+    let body = body_text(app.clone().oneshot(get("/")).await.unwrap()).await;
+    assert!(body.contains("Not an outage"), "{body}");
+    // The peer's view is what says so: the vantage data reached the page.
+    assert!(body.contains("Paris reaches it normally"), "{body}");
+    assert!(body.contains("Everything is running."), "{body}");
+    assert!(!body.contains("Web is down."), "{body}");
+    assert!(
+        body.contains(">Web</a><span class=\"state\"><span class=\"word up\">Up</span>"),
+        "{body}"
+    );
+    assert!(!body.contains("Needs attention"), "{body}");
+    assert!(!body.contains("Down ·"), "{body}");
+    // Who saw what is the operator's business.
+    assert!(!body.contains("Why nobody was woken"), "{body}");
+    let operator = body_text(
+        app.clone()
+            .oneshot(get("/?token=0123456789abcdef"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(operator.contains("Why nobody was woken"), "{operator}");
+    // The monitor's own page agrees.
+    let page = body_text(app.oneshot(get("/monitor/web")).await.unwrap()).await;
+    assert!(page.contains("Not an outage"), "{page}");
+    assert!(page.contains("word up\">Up</span>"), "{page}");
+}
+
+/// The control: when the peer sees it down too, it is an outage, with how
+/// long it has lasted.
+#[tokio::test]
+async fn a_down_the_peers_confirm_is_an_outage_with_its_length() {
+    let (app, pool) = test_app_with_vantage(web_seen_from_paris("down")).await;
+    web_down_here(&pool).await;
+
+    let body = body_text(app.clone().oneshot(get("/")).await.unwrap()).await;
+    assert!(body.contains("Web is down."), "{body}");
+    assert!(!body.contains("Not an outage"), "{body}");
+    assert!(body.contains("Needs attention"), "{body}");
+    assert!(body.contains("9 min"), "{body}");
+    assert!(body.contains("Since "), "{body}");
+    assert!(!body.contains("No incident in"), "{body}");
+    let page = body_text(app.oneshot(get("/monitor/web")).await.unwrap()).await;
+    assert!(page.contains("Down · 9 min"), "{page}");
+}
+
+/// The status pages are rendered once per audience and shared: a token
+/// given in one request is only ever spliced into that request's response,
+/// never into the shared render another viewer gets.
+#[tokio::test]
+async fn a_token_never_reaches_another_viewers_page() {
+    let app = test_app().await;
+    let fetch = |uri: &str, bearer: Option<&str>| {
+        let mut request = Request::builder().uri(uri).extension(fake_peer());
+        if let Some(token) = bearer {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let app = app.clone();
+        let request = request.body(Body::empty()).unwrap();
+        async move { body_text(app.oneshot(request).await.unwrap()).await }
+    };
+
+    // The operator by query: its links carry the token...
+    let operator = fetch("/?token=0123456789abcdef&theme=dark", None).await;
+    assert!(
+        operator.contains("/history?token=0123456789abcdef"),
+        "{operator}"
+    );
+    // ...the operator by header, same audience and same cached render, does
+    // not get it; neither does anyone else.
+    let by_header = fetch("/", Some("0123456789abcdef")).await;
+    assert!(by_header.contains("Operator"), "{by_header}");
+    assert!(!by_header.contains("0123456789abcdef"), "{by_header}");
+    assert!(!by_header.contains("data-theme"), "{by_header}");
+
+    // A wrong token falls back to the public view: echoed in its own links
+    // only, never into the next anonymous visitor's page.
+    let wrong = fetch("/?token=guess-guess-guess", None).await;
+    assert!(wrong.contains("?token=guess-guess-guess"), "{wrong}");
+    let public = fetch("/", None).await;
+    assert!(!public.contains("guess-guess-guess"), "{public}");
+    assert!(!public.contains("0123456789abcdef"), "{public}");
+
+    // A group's token on its page, then the same page anonymously.
+    let group = fetch("/status/App?token=appappappappapp1", None).await;
+    assert!(
+        group.contains("Intra") && group.contains("appappappappapp1"),
+        "{group}"
+    );
+    let anonymous = fetch("/status/App", None).await;
+    assert!(!anonymous.contains("appappappappapp1"), "{anonymous}");
+    assert!(!anonymous.contains("Intra"), "{anonymous}");
+}
+
+/// The page no longer reloads itself unless asked: `?refresh=` within
+/// 10..=3600 seconds, for kiosks; anything else is ignored.
+#[tokio::test]
+async fn refresh_is_off_by_default_and_bounded_when_asked() {
+    let app = test_app().await;
+    let page = |uri: &'static str| {
+        let app = app.clone();
+        async move { body_text(app.oneshot(get(uri)).await.unwrap()).await }
+    };
+    let plain = page("/").await;
+    assert!(!plain.contains("http-equiv=\"refresh\""), "{plain}");
+    assert!(!plain.contains("Updates every"), "{plain}");
+
+    let kiosk = page("/?refresh=60").await;
+    assert!(
+        kiosk.contains("<meta http-equiv=\"refresh\" content=\"60\">"),
+        "{kiosk}"
+    );
+    assert!(kiosk.contains("Updates every 1 min"), "{kiosk}");
+    // The kiosk's theme switch keeps it refreshing; links elsewhere do not.
+    assert!(
+        kiosk.contains("href=\"?refresh=60&amp;theme=light\""),
+        "{kiosk}"
+    );
+    assert!(kiosk.contains("href=\"/history\""), "{kiosk}");
+
+    for ignored in ["/?refresh=5", "/?refresh=86400", "/?refresh=soon"] {
+        let body = page(ignored).await;
+        assert!(!body.contains("http-equiv=\"refresh\""), "{ignored}");
+    }
+    // The shared render was not touched by the kiosk's request.
+    assert!(!page("/").await.contains("http-equiv=\"refresh\""));
 }

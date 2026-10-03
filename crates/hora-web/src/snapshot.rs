@@ -29,6 +29,7 @@ use sqlx::SqlitePool;
 use tokio::sync::{Notify, watch};
 
 use crate::AppState;
+use crate::layout::Spliced;
 use crate::summary::{BuildState, Built, Summary, build_summary, derive};
 use crate::visibility::{Audience, Visibility};
 
@@ -40,8 +41,11 @@ const WRITE_VISIBLE_TIMEOUT: Duration = Duration::from_mins(1);
 /// A rendered body: which view, in which format.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Body {
-    /// The status page (whole, or one group's) as HTML.
-    Page(Audience, Option<String>),
+    /// The status page (whole, or one group's) as HTML, with its per-request
+    /// parts left as holes (see `crate::layout::Spliced`). The flag is a
+    /// `?token=` that opened nothing (the private door says so): whether one
+    /// came, never which.
+    Page(Audience, Option<String>, bool),
     /// The same, as aligned plain text.
     Text(Audience, Option<String>),
     /// `/api/summary`.
@@ -63,6 +67,7 @@ struct Derived {
     config: Option<Arc<Config>>,
     summaries: HashMap<Audience, Arc<Summary>>,
     bodies: HashMap<Body, Bytes>,
+    pages: HashMap<Body, Arc<Spliced>>,
 }
 
 impl Derived {
@@ -132,6 +137,30 @@ impl Snapshot {
             .bodies
             .insert(key, body.clone());
         Ok(Some(body))
+    }
+}
+
+impl Snapshot {
+    /// A page with holes, rendered and cut once per snapshot (see
+    /// [`Snapshot::body`]); each request splices its own parts in.
+    pub(crate) fn page<E>(
+        &self,
+        config: &Arc<Config>,
+        key: Body,
+        render: impl FnOnce() -> Result<Option<String>, E>,
+    ) -> Result<Option<Arc<Spliced>>, E> {
+        if let Some(page) = self.derived().for_config(config).pages.get(&key) {
+            return Ok(Some(Arc::clone(page)));
+        }
+        let Some(rendered) = render()? else {
+            return Ok(None);
+        };
+        let page = Arc::new(Spliced::new(rendered));
+        self.derived()
+            .for_config(config)
+            .pages
+            .insert(key, Arc::clone(&page));
+        Ok(Some(page))
     }
 }
 

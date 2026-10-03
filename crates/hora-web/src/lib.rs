@@ -7,14 +7,18 @@ mod flood;
 mod handlers;
 mod heatmap;
 mod history;
+mod layout;
 mod metrics;
+mod monitor_page;
 mod render;
 mod report;
 mod routes;
 mod snapshot;
+mod status_page;
 mod summary;
 mod text;
 mod visibility;
+mod watchers;
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -53,12 +57,10 @@ pub(crate) const MAX_LATENCY_POINTS: usize = 2000;
 /// fixed no matter the check frequency (the chart is `CHART_W`px wide).
 pub(crate) const SPARK_BUCKETS: i64 = 120;
 
-pub(crate) const FAVICON_SVG: &str = include_str!("../assets/favicon.svg");
-pub(crate) const FONT_WOFF2: &[u8] = include_bytes!("../assets/CalSans-SemiBold.woff2");
-
-// The page is fully self-contained (inline styles, same-origin font/icon, no
-// JS). No `data:` images: nothing embeds one.
-pub(crate) const CSP: &str = "default-src 'self'; script-src 'none'; style-src 'self' 'unsafe-inline'; \
+// The pages are self-contained: one same-origin stylesheet (no inline style,
+// not even an attribute), same-origin fonts and icons, no JS. No `data:`
+// images: nothing embeds one.
+pub(crate) const CSP: &str = "default-src 'self'; script-src 'none'; style-src 'self'; \
      img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'";
 /// Powerful browser features the pages never use, denied outright.
 pub(crate) const PERMISSIONS_POLICY: &str = "accelerometer=(), camera=(), geolocation=(), \

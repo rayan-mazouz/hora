@@ -14,7 +14,7 @@ mod view;
 
 pub(crate) use view::{
     ChannelView, DayCell, GroupView, IncidentView, MaintenanceView, MonitorView, PeerView,
-    StatusTemplate, Summary, VantageView,
+    RecentIncident, StatusTemplate, Summary, VantageView,
 };
 
 use monitor::{MonitorData, build_groups, build_monitor_view};
@@ -54,11 +54,20 @@ pub(crate) struct BuildState {
 }
 
 /// One build: the operator's summary, plus every configured monitor's status
-/// (the topology walk of another audience's view needs them all).
+/// (the topology walk of another audience's view needs them all) and the
+/// newest incidents unfiltered (each audience lists the ones it may see).
 pub(crate) struct Built {
     pub(crate) summary: Arc<Summary>,
     pub(crate) statuses: HashMap<String, &'static str>,
+    pub(crate) incidents: Vec<db::Incident>,
 }
+
+/// How many of the newest incidents a build keeps, for every audience to
+/// pick its [`RECENT_SHOWN`] from: a public page whose newest incidents are
+/// all private ones may list fewer, never another audience's.
+const RECENT_SCAN: i64 = 50;
+/// Incidents the status page lists under "Recent incidents".
+const RECENT_SHOWN: usize = 3;
 
 /// Build the operator's page/API view model - every monitor, full detail,
 /// event markers and channel health. Every other audience's view is derived
@@ -108,19 +117,23 @@ pub(crate) async fn build_summary(
         sparklines,
         daily,
     } = state;
-    let (window, daily, sparklines, certs, recent, events) = tokio::join!(
+    let (window, daily, sparklines, certs, recent, events, marks, logged) = tokio::join!(
         window.refresh(pool, since_24h, timestamp),
         daily.refresh(pool, since_history, timestamp),
         sparklines.refresh(pool, since_24h, bucket_secs, timestamp),
         db::cert_all(pool),
         recent_checks_map(pool, &monitors, ctx.threshold.max(1)),
         db::events_since(pool, since_24h),
+        db::incident_marks(pool),
+        db::recent_incidents(pool, RECENT_SCAN),
     );
     let window = or_empty(window, "24h window");
     let daily = or_empty(daily, "daily");
     let sparklines = or_empty(sparklines, "latency sparklines");
     let certs = or_empty(certs, "certificates");
     let events = or_empty(events, "events");
+    let marks = or_empty(marks, "incident marks");
+    let logged = or_empty(logged, "recent incidents");
     let (availability, percentiles) = split_window(&window);
     let statuses: HashMap<String, &'static str> = recent
         .iter()
@@ -135,20 +148,12 @@ pub(crate) async fn build_summary(
         percentiles: &percentiles,
         sparklines: &sparklines,
         certs: &certs,
-        events: &events,
+        marks: &marks,
+        maintenance: &config.maintenance,
         vantage,
     };
 
-    let monitors: Vec<Arc<MonitorView>> = monitors
-        .iter()
-        .map(|monitor| {
-            let mut view = build_monitor_view(monitor, &ctx, &data, &config.monitors, &visibility);
-            view.maintenance = config
-                .active_maintenance(&monitor.id, now)
-                .map(|window| window.title.clone());
-            Arc::new(view)
-        })
-        .collect();
+    let monitors = cards(&monitors, &ctx, &data, config, &visibility);
 
     let overall = monitors
         .iter()
@@ -182,11 +187,126 @@ pub(crate) async fn build_summary(
         groups,
         peers,
         channels: channel_views(channel_health),
+        events: events.into(),
+        recent: Vec::new(),
+        quiet_days: None,
     };
+    let summary = with_incidents(summary, &logged, config, &visibility, now);
     Built {
         summary: Arc::new(summary),
         statuses,
+        incidents: logged,
     }
+}
+
+/// Every monitor's card, with the maintenance window it is in.
+fn cards(
+    monitors: &[&Monitor],
+    ctx: &SummaryCtx,
+    data: &MonitorData<'_>,
+    config: &Config,
+    visibility: &Visibility<'_>,
+) -> Vec<Arc<MonitorView>> {
+    monitors
+        .iter()
+        .map(|monitor| {
+            let mut view = build_monitor_view(monitor, ctx, data, &config.monitors, visibility);
+            view.maintenance = config
+                .active_maintenance(&monitor.id, ctx.now)
+                .map(|window| window.title.clone());
+            Arc::new(view)
+        })
+        .collect()
+}
+
+/// Fill a summary's "Recent incidents" (the newest ones this audience may
+/// see, sanitized for it, among its monitors) and its quiet days.
+fn with_incidents(
+    mut summary: Summary,
+    incidents: &[db::Incident],
+    config: &Config,
+    visibility: &Visibility<'_>,
+    now: DateTime<Utc>,
+) -> Summary {
+    let since = now.timestamp() - i64::from(config.page.history_days) * SECONDS_PER_DAY;
+    summary.recent = incidents
+        .iter()
+        .filter(|incident| incident.ended_at.is_none_or(|ended| ended >= since))
+        .filter(|incident| {
+            visibility.can_see(&incident.monitor_id)
+                && summary.monitors.iter().any(|m| m.id == incident.monitor_id)
+        })
+        .take(RECENT_SHOWN)
+        .map(|incident| {
+            let mut incident = incident.clone();
+            visibility.sanitize_incident(&mut incident);
+            recent_view(&incident, config)
+        })
+        .collect();
+    summary.quiet_days = quiet_days(&summary.monitors, now.timestamp());
+    summary
+}
+
+/// One incident as the status page lists it.
+fn recent_view(incident: &db::Incident, config: &Config) -> RecentIncident {
+    let name = config.monitor_name(&incident.monitor_id);
+    let started = DateTime::from_timestamp(incident.started_at, 0);
+    let title = match (incident.ended_at, incident.duration_s) {
+        (Some(_), Some(secs)) => format!(
+            "{name} was down for {}",
+            crate::layout::minutes((secs + 59) / 60)
+        ),
+        (Some(_), None) => format!("{name} was down"),
+        (None, _) => format!("{name} is down"),
+    };
+    let note = incident
+        .note
+        .clone()
+        .or_else(|| {
+            incident
+                .cause
+                .as_ref()
+                .map(|cause| format!("Caused by {cause}."))
+        })
+        .or_else(|| {
+            incident
+                .error
+                .as_ref()
+                .map(|error| format!("Last answer: {error}."))
+        });
+    RecentIncident {
+        id: incident.id,
+        monitor_id: incident.monitor_id.clone(),
+        date: started
+            .map(|at| at.format("%Y-%m-%d").to_string())
+            .unwrap_or_default(),
+        day: started
+            .map(|at| at.format("%-d %b").to_string())
+            .unwrap_or_default(),
+        title,
+        note,
+        resolved: incident.ended_at.is_some(),
+    }
+}
+
+/// Whole days without an incident among `monitors`: since the last one
+/// ended, or, when none ever did, since the oldest day with data. `None`
+/// while one is open, or without a single day of data.
+pub(crate) fn quiet_days(monitors: &[Arc<MonitorView>], now: i64) -> Option<i64> {
+    if monitors.iter().any(|m| m.marks.open_since.is_some()) {
+        return None;
+    }
+    let days = match monitors.iter().filter_map(|m| m.marks.last_end).max() {
+        Some(last_end) => (now - last_end).max(0) / SECONDS_PER_DAY,
+        None => monitors
+            .iter()
+            .filter_map(|m| {
+                let oldest = m.bar.iter().position(|cell| cell.state != "empty")?;
+                i64::try_from(m.bar.len() - oldest).ok()
+            })
+            .max()?,
+    };
+    (days > 0).then_some(days)
 }
 
 /// The 24h figures as the cards read them: `(available, total)` and the
@@ -212,8 +332,9 @@ fn split_window(
 /// not see are left out entirely - cards, groups and daily bars alike;
 /// failure reasons collapse to safe categories (see `probe::public_reason`)
 /// without detail; topology annotations never name a monitor it may not see;
-/// event markers and channel health are operator streams, so they go. A card
-/// that needs none of that is shared with the operator's view as is.
+/// event markers and channel health are operator streams, so they go; the
+/// recent incidents are the ones it may see, sanitized for it. A card that
+/// needs none of that is shared with the operator's view as is.
 /// `config` is the live one: a monitor made private by a reload disappears
 /// from the next request, before the next build.
 pub(crate) fn derive(built: &Built, config: &Config, visibility: &Visibility<'_>) -> Summary {
@@ -231,7 +352,7 @@ pub(crate) fn derive(built: &Built, config: &Config, visibility: &Visibility<'_>
         .iter()
         .fold("up", |worst, m| worse(worst, m.status));
     let groups = build_groups(&monitors, &config.monitors);
-    Summary {
+    let summary = Summary {
         title: operator.title.clone(),
         overall,
         overall_label: overall_label(overall),
@@ -243,7 +364,13 @@ pub(crate) fn derive(built: &Built, config: &Config, visibility: &Visibility<'_>
         groups,
         peers: operator.peers.clone(),
         channels: Vec::new(),
-    }
+        events: Arc::from([]),
+        recent: Vec::new(),
+        quiet_days: None,
+    };
+    let now = DateTime::parse_from_rfc3339(&operator.generated_at)
+        .map_or_else(|_| Utc::now(), |at| at.with_timezone(&Utc));
+    with_incidents(summary, &built.incidents, config, visibility, now)
 }
 
 /// One card for a non-operator audience (see [`derive`]).
@@ -268,18 +395,13 @@ fn derive_view(
     } else {
         (None, Vec::new())
     };
-    if last_error == view.last_error
-        && cause == view.cause
-        && impacted == view.impacted
-        && Arc::ptr_eq(&view.chart_svg, &view.chart_plain)
-    {
+    if last_error == view.last_error && cause == view.cause && impacted == view.impacted {
         return Arc::clone(view);
     }
     let mut derived = MonitorView::clone(view);
     derived.last_error = last_error;
     derived.cause = cause;
     derived.impacted = impacted;
-    derived.chart_svg = Arc::clone(&view.chart_plain);
     Arc::new(derived)
 }
 
@@ -384,9 +506,17 @@ pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Opti
             ids: monitors.iter().map(|view| view.id.clone()).collect(),
             monitors: monitors.clone(),
         }],
-        monitors,
         peers: Vec::new(),
         channels: Vec::new(),
+        events: Arc::clone(&summary.events),
+        recent: summary
+            .recent
+            .iter()
+            .filter(|incident| ids.contains(incident.monitor_id.as_str()))
+            .cloned()
+            .collect(),
+        quiet_days: quiet_days(&monitors, Utc::now().timestamp()),
+        monitors,
     })
 }
 

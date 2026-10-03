@@ -1,367 +1,48 @@
-<!doctype html>
-<html lang="en">
+{% extends "base.html" %}
+{% import "partials/macros.html" as m %}
+{% block title %}History · {{ chrome.site }} status{% endblock %}
+{% block description %}Every incident of {{ chrome.site }}, newest first.{% endblock %}
+{% block head %}
+<link rel="alternate" type="application/atom+xml" title="Incident history" href="/history.atom">
+{%- endblock %}
+{% block main %}
+<main id="main" class="page">
+<div class="page-head"><h1>History</h1>
+<p class="lede">Every incident, newest first. Each one has its own page, written up as it happened. <a href="/history.atom">Follow them in a feed reader</a>.</p></div>
 
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{{ title }} · Incident history</title>
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <link rel="alternate" type="application/atom+xml" href="/history.atom" />
-  <link rel="preload" href="/assets/CalSans-SemiBold.woff2" as="font" type="font/woff2" crossorigin />
-  <style>
-    @font-face {
-      font-family: "Cal Sans";
-      src: url("/assets/CalSans-SemiBold.woff2") format("woff2");
-      font-weight: 600;
-      font-display: swap;
-    }
+<section class="section near" aria-labelledby="inc">
+<div class="section-head"><h2 id="inc">Incidents</h2><span class="fact">{{ incidents.len() }} shown</span></div>
+{%- if incidents.is_empty() %}
+<p class="quiet-line">{% call m::glyph("up") %}{% endcall %}Nothing to report: no incident recorded yet.</p>
+{%- else %}
+<ul class="past">
+{%- for incident in incidents %}
+  <li><time>{{ incident.day }}</time><span class="t"><a href="/incident/{{ incident.id }}{{ chrome.q()|safe }}">{{ incident.headline }}</a><small>{{ incident.span }}{% if let Some(error) = incident.error %} · {{ error }}{% endif %}{% if let Some(cause) = incident.cause %} · caused by {{ cause }}{% endif %}{% if let Some((_, verdict)) = incident.verdict %} · {{ verdict }}{% endif %}</small></span><span class="r">{% if incident.resolved %}{% call m::state("up", "Resolved") %}{% endcall %}{% else %}{% call m::state("down", "Ongoing") %}{% endcall %}{% endif %}</span></li>
+{%- endfor %}
+</ul>
+{%- endif %}
+</section>
 
-    :root {
-      --bg: #0b0e14;
-      --card: #11161f;
-      --border: #1d2430;
-      --text: #e6e8eb;
-      --muted: #8b93a1;
-      --up: #10b981;
-      --down: #ef4444;
-      --degraded: #f59e0b;
-      --info: #3b82f6;
-      --brand: "Cal Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
-    }
+{%- if !pushed_alerts.is_empty() %}
+<section class="section" aria-labelledby="alerts">
+<div class="section-head"><h2 id="alerts">Alerts from your systems</h2><span class="fact">Sent to Hora by the services themselves</span></div>
+<ul class="past">
+{%- for alert in pushed_alerts %}
+  <li><time>{{ alert.at }}</time><span class="t">{{ alert.monitor }}: {{ alert.title }}{% if let Some(message) = alert.message %}<small>{{ message }}</small>{% endif %}</span><span class="r">{% call m::state(alert.state, alert.severity) %}{% endcall %}</span></li>
+{%- endfor %}
+</ul>
+</section>
+{%- endif %}
 
-    * {
-      box-sizing: border-box;
-    }
-
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--text);
-      font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-      -webkit-font-smoothing: antialiased;
-    }
-
-    .wrap {
-      width: 100%;
-      max-width: 1500px;
-      margin: 0 auto;
-      padding: 40px 20px 56px;
-    }
-
-    /* On large displays, use the width instead of stranding the list in the middle. */
-    @media (min-width: 1700px) {
-      .wrap {
-        max-width: 92vw;
-      }
-    }
-
-    .top {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 12px 16px;
-      margin-bottom: 24px;
-    }
-
-    h1 {
-      font-family: var(--brand);
-      font-size: 24px;
-      font-weight: 600;
-      margin: 0;
-      letter-spacing: 0.01em;
-    }
-
-    .nav {
-      margin-left: auto;
-      display: flex;
-      gap: 8px;
-    }
-
-    .nav-pill {
-      color: var(--muted);
-      font-size: 13px;
-      text-decoration: none;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      padding: 8px 14px;
-      background: var(--card);
-    }
-
-    .nav-pill:hover {
-      color: var(--text);
-    }
-
-    .incidents {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .incident {
-      border: 1px solid var(--border);
-      border-left-width: 3px;
-      border-radius: 8px;
-      padding: 10px 12px;
-      background: var(--card);
-    }
-
-    .incident.ongoing {
-      border-left-color: var(--down);
-    }
-
-    .incident.resolved {
-      border-left-color: var(--up);
-    }
-
-    /* Pushed alerts: the left border tracks the producer-supplied severity. */
-    .incident.info {
-      border-left-color: var(--info);
-    }
-
-    .incident.warning {
-      border-left-color: var(--degraded);
-    }
-
-    .incident.error,
-    .incident.critical {
-      border-left-color: var(--down);
-    }
-
-    .sev {
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      font-size: 11px;
-      font-weight: 600;
-    }
-
-    .incident-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 8px;
-      align-items: baseline;
-    }
-
-    .incident-title {
-      font-weight: 600;
-    }
-
-    .incident-at {
-      color: var(--muted);
-      font-size: 11px;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .incident-body {
-      margin: 4px 0 0;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .incident-body.cause {
-      color: var(--degraded);
-    }
-
-    .incident-body.impacted {
-      color: var(--down);
-    }
-
-    /* Operator notes are the human story of the incident: full text color. */
-    .incident-body.note {
-      color: var(--text);
-    }
-
-    /* The correlated change ("recent change: ..."). */
-    .incident-body.event {
-      color: var(--info);
-    }
-
-    /* Operator-recorded event markers get the info accent. */
-    .incident.event-marker {
-      border-left-color: var(--info);
-    }
-
-    .postmortem-link {
-      color: var(--muted);
-      text-decoration: none;
-      border-bottom: 1px solid var(--border);
-    }
-
-    .postmortem-link:hover {
-      color: var(--text);
-    }
-
-    /* The captured failing response, collapsed by default. */
-    .snapshot {
-      margin-top: 6px;
-    }
-
-    .snapshot summary {
-      color: var(--muted);
-      font-size: 12px;
-      cursor: pointer;
-    }
-
-    .snapshot pre {
-      margin: 6px 0 0;
-      padding: 8px 10px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: var(--bg);
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.45;
-      overflow-x: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-
-    .empty-state {
-      color: var(--muted);
-      text-align: center;
-      padding: 48px 0;
-    }
-
-    .section-title {
-      font-family: var(--brand);
-      font-size: 18px;
-      font-weight: 600;
-      margin: 36px 0 12px;
-      letter-spacing: 0.01em;
-    }
-
-    .heatmaps {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .heatmap {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--card);
-      padding: 8px 12px;
-    }
-
-    .heatmap summary {
-      cursor: pointer;
-      font-weight: 600;
-      font-size: 13px;
-    }
-
-    .heatmap img {
-      display: block;
-      margin-top: 8px;
-      max-width: 100%;
-      height: auto;
-    }
-
-    footer {
-      color: var(--muted);
-      font-size: 12px;
-      text-align: center;
-      margin-top: 28px;
-    }
-
-    footer a {
-      color: var(--muted);
-      text-decoration: none;
-      border-bottom: 1px solid var(--border);
-    }
-
-    footer a:hover {
-      color: var(--text);
-    }
-  </style>
-</head>
-
-<body>
-  <main class="wrap">
-    <div class="top">
-      <h1>Incident history</h1>
-      <nav class="nav">
-        <a class="nav-pill" href="/">Status page</a>
-        <a class="nav-pill" href="/history.atom">Atom feed</a>
-      </nav>
-    </div>
-
-    {% if incidents.is_empty() %}
-    <p class="empty-state">No incidents recorded yet.</p>
-    {% else %}
-    <div class="incidents">
-      {% for incident in incidents %}
-      <div class="incident {% if incident.resolved %}resolved{% else %}ongoing{% endif %}">
-        <div class="incident-head">
-          <span class="incident-title">{{ incident.monitor }} · {% if incident.resolved %}Resolved{% else
-            %}Ongoing{% endif %}</span>
-          <span class="incident-at"><a class="postmortem-link" href="/incident/{{ incident.id }}{{ token_query }}">post-mortem</a>
-            · {{ incident.started }}{% if let Some(ended) = incident.ended %} → {{ ended }}{%
-            endif %}{% if let Some(duration) = incident.duration %} · {{ duration }}{% endif %}</span>
-        </div>
-        {% if let Some(error) = incident.error %}<p class="incident-body">{{ error }}</p>{% endif %}
-        {% if let Some(vantage) = incident.vantage %}<p class="incident-body">{{ vantage }}</p>{% endif %}
-        {% if let Some(cause) = incident.cause %}<p class="incident-body cause">caused by {{ cause }}</p>{% endif %}
-        {% if let Some(impacted) = incident.impacted %}<p class="incident-body impacted">impacts: {{ impacted }}</p>{%
-        endif %}
-        {% if let Some(event) = incident.event %}<p class="incident-body event">recent change: {{ event }}</p>{% endif %}
-        {% if let Some(note) = incident.note %}<p class="incident-body note">{{ note }}</p>{% endif %}
-        {% if let Some(snapshot) = incident.snapshot %}
-        <details class="snapshot">
-          <summary>what the service answered</summary>
-          <pre>{{ snapshot }}</pre>
-        </details>
-        {% endif %}
-      </div>
-      {% endfor %}
-    </div>
-    {% endif %}
-
-    {% if !pushed_alerts.is_empty() %}
-    <h2 class="section-title">Pushed alerts · external</h2>
-    <div class="incidents">
-      {% for alert in pushed_alerts %}
-      <div class="incident {{ alert.severity }}">
-        <div class="incident-head">
-          <span class="incident-title"><span class="sev">{{ alert.severity }}</span> · {{ alert.monitor }} · {{
-            alert.title }}</span>
-          <span class="incident-at">{{ alert.at }}</span>
-        </div>
-        {% if let Some(message) = alert.message %}<p class="incident-body">{{ message }}</p>{% endif %}
-      </div>
-      {% endfor %}
-    </div>
-    {% endif %}
-
-    {% if !events.is_empty() %}
-    <h2 class="section-title">Events · changes</h2>
-    <div class="incidents">
-      {% for event in events %}
-      <div class="incident event-marker">
-        <div class="incident-head">
-          <span class="incident-title">{{ event.title }}</span>
-          <span class="incident-at">{{ event.at }}</span>
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-    {% endif %}
-
-    {% if !heatmaps.is_empty() %}
-    <h2 class="section-title">Latency heatmaps · last 28 days</h2>
-    <div class="heatmaps">
-      {% for monitor in heatmaps %}
-      <details class="heatmap">
-        <summary>{{ monitor.name }}</summary>
-        <img loading="lazy" src="/api/monitors/{{ monitor.id }}/heatmap.svg{{ token_query }}"
-          alt="Latency heatmap of {{ monitor.name }}: hours by days, colour = latency vs the monitor's median" />
-      </details>
-      {% endfor %}
-    </div>
-    {% endif %}
-
-    <footer>
-      Powered by <a href="https://github.com/uplg/hora" rel="noopener">Hora</a>
-    </footer>
-  </main>
-</body>
-
-</html>
+{%- if !events.is_empty() %}
+<section class="section" aria-labelledby="events">
+<div class="section-head"><h2 id="events">Changes</h2><span class="fact">Deploys and other events, operators only</span></div>
+<ul class="past">
+{%- for event in events %}
+  <li><time>{{ event.at }}</time><span class="t">{{ event.title }}</span><span class="r">{% call m::state("info", "Change") %}{% endcall %}</span></li>
+{%- endfor %}
+</ul>
+</section>
+{%- endif %}
+</main>
+{%- endblock %}

@@ -17,13 +17,15 @@ use tower_http::trace::TraceLayer;
 use crate::auth::deprecate_query_token;
 use crate::handlers::annotations::{announce, announce_clear, post_event, silence};
 use crate::handlers::api::{latency_json, metrics_prometheus, summary_json};
+use crate::handlers::assets::{asset, favicon};
 use crate::handlers::badges::{heatmap_svg, status_badge, uptime_badge};
 use crate::handlers::pages::{
-    group_page, history_atom, history_page, incident_page, page, report_page, timeline_page,
+    group_page, history_atom, history_page, incident_page, monitor_page, page, report_page,
+    timeline_page, watchers_page,
 };
 use crate::handlers::peer::{peer_monitors, peer_probe};
 use crate::handlers::push::{post_alert, push};
-use crate::handlers::{favicon, font, healthz, openapi};
+use crate::handlers::{healthz, openapi};
 use crate::{AppState, CSP, ConfiguredIp, PERMISSIONS_POLICY};
 
 /// How much more generous the page limiter is than the API one, in both burst
@@ -74,6 +76,8 @@ pub fn router(state: AppState) -> Router {
         .route("/history", get(history_page))
         .route("/history.atom", get(history_atom))
         .route("/incident/{id}", get(incident_page))
+        .route("/monitor/{id}", get(monitor_page))
+        .route("/watchers", get(watchers_page))
         .route("/timeline", get(timeline_page))
         .route("/status/{group}", get(group_page))
         .route("/report/{month}", get(report_page));
@@ -87,7 +91,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         // Static: compiled-in assets and the generated document, never limited.
         .route("/favicon.svg", get(favicon))
-        .route("/assets/CalSans-SemiBold.woff2", get(font))
+        .route("/assets/{*path}", get(asset))
         .route("/api/openapi.json", get(openapi))
         .merge(pages)
         .merge(api)

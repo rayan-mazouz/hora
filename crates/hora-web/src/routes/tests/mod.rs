@@ -20,6 +20,13 @@ async fn test_app() -> Router {
 }
 
 async fn test_app_with_pool() -> (Router, sqlx::SqlitePool) {
+    test_app_with_vantage(hora_core::mesh::vantage::new_map()).await
+}
+
+/// The test app, with the peers' view of the shared targets already polled.
+async fn test_app_with_vantage(
+    vantage: hora_core::mesh::vantage::VantageMap,
+) -> (Router, sqlx::SqlitePool) {
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(":memory:")
         .create_if_missing(true);
@@ -69,12 +76,15 @@ async fn test_app_with_pool() -> (Router, sqlx::SqlitePool) {
     let client = hora_core::http::client(None).expect("client");
     let notifier = hora_core::notifications::shared(&config, &client);
     let (_tx, rx) = watch::channel(config);
-    let app = router(AppState::new(
-        pool.clone(),
-        rx,
-        Arc::new(AtomicU64::new(fresh_tick())),
-        notifier,
-    ));
+    let app = router(
+        AppState::new(
+            pool.clone(),
+            rx,
+            Arc::new(AtomicU64::new(fresh_tick())),
+            notifier,
+        )
+        .with_vantage(vantage),
+    );
     (app, pool)
 }
 

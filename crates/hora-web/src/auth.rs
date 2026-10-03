@@ -169,10 +169,6 @@ pub(crate) struct Viewer {
     /// The presented credential (Bearer first, then `?token=`), kept so a
     /// group page can check it against its own group token.
     token: Option<String>,
-    /// `?token=...` to append to in-page links (post-mortems, heatmap
-    /// images), only when the operator authenticated by query: an `<img>` or
-    /// a plain link cannot carry an Authorization header.
-    pub(crate) token_query: String,
     /// Operator only through `?token=` (no matching Bearer header), and the
     /// request's flag to report it with on a write endpoint.
     operator_by_query: bool,
@@ -193,16 +189,11 @@ impl Viewer {
         } else {
             Audience::Public
         };
-        let token_query = query_token
-            .as_deref()
-            .filter(|_| by_query)
-            .map(|token| format!("?token={}", hora_core::fmt::percent_encode(token)))
-            .unwrap_or_default();
+        // In-page links carry the `?token=` themselves (see `layout::Chrome`).
         Self {
             config,
             audience,
             token: bearer.or(query_token),
-            token_query,
             operator_by_query: by_query && !by_bearer,
             query_auth: parts
                 .extensions

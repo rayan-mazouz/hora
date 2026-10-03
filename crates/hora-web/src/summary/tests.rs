@@ -151,8 +151,9 @@ fn budget_durations_and_pct_format() {
     assert_eq!(format_slo_pct(9900), "99");
 }
 
-#[tokio::test]
-async fn derived_views_share_unchanged_cards_and_redact_the_rest() {
+/// Three monitors - `ok` (up), `bad` (degraded, a detailed reason) and
+/// `hidden` (private) - with one check each, and their config.
+async fn three_monitors() -> (sqlx::SqlitePool, hora_core::config::Config, i64) {
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(":memory:")
         .create_if_missing(true);
@@ -203,6 +204,12 @@ async fn derived_views_share_unchanged_cards_and_redact_the_rest() {
         .await
         .unwrap();
     }
+    (pool, config, now)
+}
+
+#[tokio::test]
+async fn derived_views_share_unchanged_cards_and_redact_the_rest() {
+    let (pool, config, _) = three_monitors().await;
     let built = build_summary(
         &pool,
         &config,
@@ -223,9 +230,67 @@ async fn derived_views_share_unchanged_cards_and_redact_the_rest() {
     let (theirs, ours) = (&public.monitors[1], &built.summary.monitors[1]);
     assert_eq!(theirs.last_error.as_deref(), Some("HTTP 500"));
     assert_eq!(ours.last_error.as_deref(), Some("HTTP 500: stack trace"));
-    assert!(Arc::ptr_eq(&theirs.chart_svg, &ours.chart_svg));
+    assert!(Arc::ptr_eq(&theirs.spark, &ours.spark));
     assert!(std::ptr::eq(theirs.bar.as_ptr(), ours.bar.as_ptr()));
     assert_eq!(public.groups.len(), 1);
     assert_eq!(public.groups[0].ids, ["ok", "bad"]);
     assert_eq!(public.overall, "degraded");
+}
+
+#[tokio::test]
+async fn each_audience_lists_the_incidents_it_may_see() {
+    let (pool, config, now) = three_monitors().await;
+    // Two finished incidents: the hidden monitor's, a day ago, and the
+    // public one's, three days ago (with a detailed reason).
+    for (id, ended, error) in [
+        ("ok", now - 3 * 86_400, "HTTP 503: upstream db-7 refused"),
+        ("hidden", now - 86_400, "timeout"),
+    ] {
+        sqlx::query(
+            "INSERT INTO incidents (monitor_id, started_at, ended_at, duration_s, error, created_at) \
+             VALUES (?, ?, ?, 600, ?, ?)",
+        )
+        .bind(id)
+        .bind(ended - 600)
+        .bind(ended)
+        .bind(error)
+        .bind(ended - 600)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let built = build_summary(
+        &pool,
+        &config,
+        &mut BuildState::default(),
+        &[],
+        &HashMap::new(),
+    )
+    .await;
+    // The operator sees both incidents, newest first, and the last day.
+    let titles: Vec<&str> = built
+        .summary
+        .recent
+        .iter()
+        .map(|i| i.title.as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        ["Hidden was down for 10 min", "Fine was down for 10 min"]
+    );
+    assert_eq!(built.summary.quiet_days, Some(1));
+
+    let audience = Audience::Public;
+    let public = derive(&built, &config, &Visibility::new(&config, &audience));
+    // The public list leaves the private monitor's incident out, the reason
+    // reduced to its safe category; its quiet days count from its own.
+    assert_eq!(public.recent.len(), 1);
+    assert_eq!(public.recent[0].title, "Fine was down for 10 min");
+    assert_eq!(
+        public.recent[0].note.as_deref(),
+        Some("Last answer: HTTP 503.")
+    );
+    assert_eq!(public.quiet_days, Some(3));
+    // No event marker reaches a derived view.
+    assert!(public.events.is_empty());
 }
