@@ -5,6 +5,7 @@
 //! certificate watcher and pruner, and serve the status page and JSON API.
 
 use std::fmt::Write as _;
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -17,116 +18,203 @@ use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    if run_subcommand().await? {
-        return Ok(());
+async fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    // Plain `hora` (no arguments) starts the monitor; anything else is a
+    // one-shot subcommand. Either way the outcome comes back here instead of a
+    // `process::exit` deep inside, so destructors run (the SQLite pool closes,
+    // the terminal is restored) before the process ends.
+    let outcome = if args.len() > 1 {
+        run_subcommand(&args).await
+    } else {
+        init_tracing();
+        serve().await.map_err(CliError::from)
+    };
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => err.report(),
     }
-
-    init_tracing();
-    serve().await
 }
 
-/// Handle a CLI subcommand. `Ok(true)` means one ran and the process should
-/// exit; plain `hora` (no arguments) returns `Ok(false)` and starts the
-/// monitor.
-async fn run_subcommand() -> anyhow::Result<bool> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
-        match args[1].as_str() {
-            "import" => import_kuma(&args)?,
-            "check" => check_config(),
-            "test-alert" => {
-                // Tracing first: delivery failures surface as per-channel
-                // warnings from the notifiers, and that is the whole point.
-                init_tracing();
-                test_alert(args.get(2).map(String::as_str)).await?;
-            }
-            "backup" => {
-                let Some(dest) = args.get(2) else {
-                    eprintln!("Usage: hora backup <destination.db>");
-                    std::process::exit(1);
-                };
-                backup(dest).await?;
-            }
-            "incidents" => {
-                let limit = args
-                    .get(2)
-                    .map_or(Ok(20), |raw| raw.parse::<i64>())
-                    .unwrap_or_else(|_| {
-                        eprintln!("Usage: hora incidents [limit]");
-                        std::process::exit(1);
-                    });
-                list_incidents(limit.max(1)).await?;
-            }
-            "annotate" => {
-                if args.len() < 4 {
-                    eprintln!("Usage: hora annotate <incident-id|last> <note>");
-                    eprintln!("An empty note (\"\") clears the annotation.");
-                    std::process::exit(1);
-                }
-                annotate(&args[2], &args[3..].join(" ")).await?;
-            }
-            "event" => {
-                event(&args[2..]).await?;
-            }
-            "timeline" => {
-                timeline(&args[2..]).await?;
-            }
-            "peers" => {
-                peers(&args[2..]).await?;
-            }
-            "postmortem" => {
-                let Some(id) = args.get(2) else {
-                    eprintln!("Usage: hora postmortem <incident-id|last>");
-                    std::process::exit(1);
-                };
-                postmortem(id).await?;
-            }
-            "silence" => {
-                silence(&args[2..]).await?;
-            }
-            "digest" => {
-                digest_preview().await?;
-            }
-            "report" => {
-                report(args.get(2).map(String::as_str)).await?;
-            }
-            "doctor" => {
-                doctor().await?;
-            }
-            "tune" => {
-                tune(&args[2..]).await?;
-            }
-            "probe" => {
-                probe(&args[2..]).await?;
-            }
-            "announce" => {
-                announce(&args[2..]).await?;
-            }
-            "top" => {
-                top::run(&args[2..]).await?;
-            }
-            "--version" | "-V" => println!("hora {}", env!("CARGO_PKG_VERSION")),
-            "--help" | "-h" => print_help(),
-            _ => {
-                eprintln!("Unknown command: {}", args[1]);
-                eprintln!("Run 'hora --help' for usage information.");
-                std::process::exit(1);
-            }
-        }
-        return Ok(true);
+/// Why a command ended unsuccessfully, turned into stderr output and an exit
+/// code by [`CliError::report`].
+#[derive(Debug)]
+enum CliError {
+    /// A malformed invocation (missing argument, bad flag value, unknown id):
+    /// the message, usually a usage line, goes to stderr verbatim.
+    Usage(String),
+    /// The command ran and reached a negative verdict (delivery failed, a
+    /// capability is missing, no such incident): the message goes to stderr
+    /// verbatim.
+    Failed(String),
+    /// A negative verdict already printed on stdout (a down probe, peer
+    /// drift): nothing more to say, only the exit code.
+    Silent,
+    /// Anything else (config, database, I/O), printed exactly as an error
+    /// returned from `main` always was: `Error: ...` with its causes.
+    Other(anyhow::Error),
+}
+
+impl<E: Into<anyhow::Error>> From<E> for CliError {
+    fn from(err: E) -> Self {
+        Self::Other(err.into())
     }
-    Ok(false)
+}
+
+impl CliError {
+    /// Print the error and return the process exit code. Every failure exits
+    /// 1, usage errors included: scripts already gate on that (`hora probe url
+    /// && deploy`), so the conventional 2 for usage would be a breaking change.
+    fn report(self) -> ExitCode {
+        match self {
+            Self::Usage(message) | Self::Failed(message) => eprintln!("{message}"),
+            Self::Silent => {}
+            Self::Other(err) => eprintln!("Error: {err:?}"),
+        }
+        ExitCode::FAILURE
+    }
+}
+
+/// A [`CliError::Usage`] from any message.
+fn usage(message: impl Into<String>) -> CliError {
+    CliError::Usage(message.into())
+}
+
+/// Dispatch a CLI subcommand (`args[1]`; the caller checked it exists).
+async fn run_subcommand(args: &[String]) -> Result<(), CliError> {
+    let rest = &args[2..];
+    match args[1].as_str() {
+        "import" => import_kuma(rest),
+        "check" => check_config(),
+        "test-alert" => {
+            // Tracing first: delivery failures surface as per-channel
+            // warnings from the notifiers, and that is the whole point.
+            init_tracing();
+            test_alert(rest.first().map(String::as_str)).await
+        }
+        "backup" => {
+            let dest = rest
+                .first()
+                .ok_or_else(|| usage("Usage: hora backup <destination.db>"))?;
+            backup(dest).await
+        }
+        "incidents" => {
+            let limit = parse_limit(rest.first(), "Usage: hora incidents [limit]")?;
+            list_incidents(limit).await
+        }
+        "annotate" => match rest {
+            [id, note @ ..] if !note.is_empty() => annotate(id, &note.join(" ")).await,
+            _ => Err(usage(
+                "Usage: hora annotate <incident-id|last> <note>\n\
+                 An empty note (\"\") clears the annotation.",
+            )),
+        },
+        "event" => event(rest).await,
+        "timeline" => timeline(rest).await,
+        "peers" => peers(rest).await,
+        "postmortem" => {
+            let id = rest
+                .first()
+                .ok_or_else(|| usage("Usage: hora postmortem <incident-id|last>"))?;
+            postmortem(id).await
+        }
+        "silence" => silence(rest).await,
+        "digest" => digest_preview().await,
+        "report" => report(rest.first().map(String::as_str)).await,
+        "doctor" => doctor().await,
+        "tune" => tune(rest).await,
+        "probe" => probe(rest).await,
+        "announce" => announce(rest).await,
+        "top" => top::run(rest).await.map_err(CliError::from),
+        "--version" | "-V" => {
+            println!("hora {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        "--help" | "-h" => {
+            print_help();
+            Ok(())
+        }
+        unknown => Err(usage(format!(
+            "Unknown command: {unknown}\nRun 'hora --help' for usage information."
+        ))),
+    }
+}
+
+/// An optional `[limit]` argument (default 20, at least 1); `usage_line` is
+/// the error when it is not a number.
+fn parse_limit(raw: Option<&String>, usage_line: &str) -> Result<i64, CliError> {
+    raw.map_or(Ok(20), |raw| raw.parse::<i64>())
+        .map(|limit| limit.max(1))
+        .map_err(|_| usage(usage_line))
+}
+
+/// A `--days N` value: a positive whole number of days.
+fn parse_days(raw: Option<&String>) -> Result<i64, CliError> {
+    raw.and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|&days| days > 0)
+        .ok_or_else(|| usage("--days must be a positive number of days"))
+}
+
+/// The configured monitor `id`, or a usage error listing the configured ids:
+/// a typo'd id fails loudly rather than testing, tuning or silencing nothing.
+fn find_monitor<'c>(
+    config: &'c hora_core::config::Config,
+    id: &str,
+) -> Result<&'c hora_core::config::Monitor, CliError> {
+    config
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == id)
+        .ok_or_else(|| {
+            let mut message = format!("Unknown monitor {id:?}. Configured ids:");
+            for monitor in &config.monitors {
+                let _ = write!(message, "\n  {}", monitor.id);
+            }
+            usage(message)
+        })
+}
+
+/// A monitor's display name, falling back to its id (a monitor removed from
+/// the config after its incidents were recorded).
+fn monitor_name<'a>(config: &'a hora_core::config::Config, id: &'a str) -> &'a str {
+    config
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == id)
+        .map_or(id, |monitor| monitor.name.as_str())
+}
+
+/// Resolve an incident argument: a numeric id, or `last` for the most recent
+/// incident.
+async fn resolve_incident_id(pool: &hora_core::db::SqlitePool, arg: &str) -> Result<i64, CliError> {
+    if arg == "last" {
+        return hora_core::db::latest_incident_id(pool)
+            .await?
+            .ok_or_else(|| CliError::Failed("No incidents recorded yet.".to_owned()));
+    }
+    arg.parse().map_err(|_| {
+        usage(format!(
+            "Invalid incident id {arg:?} (a number, or 'last')."
+        ))
+    })
+}
+
+/// The error for an incident id that matches no row.
+fn no_such_incident(id: i64) -> CliError {
+    CliError::Failed(format!(
+        "No incident #{id}. 'hora incidents' lists the recent ones."
+    ))
 }
 
 /// `hora import kuma <backup.json>`: convert an Uptime Kuma backup to Hora
 /// TOML on stdout.
-fn import_kuma(args: &[String]) -> anyhow::Result<()> {
-    if args.len() < 4 || args[2] != "kuma" {
-        eprintln!("Usage: hora import kuma <backup.json>");
-        std::process::exit(1);
+fn import_kuma(args: &[String]) -> Result<(), CliError> {
+    let [kind, json_path, ..] = args else {
+        return Err(usage("Usage: hora import kuma <backup.json>"));
+    };
+    if kind != "kuma" {
+        return Err(usage("Usage: hora import kuma <backup.json>"));
     }
-    let json_path = &args[3];
     let json_str =
         std::fs::read_to_string(json_path).with_context(|| format!("reading {json_path}"))?;
     let toml_out = hora_core::import::convert_kuma_to_hora(&json_str)?;
@@ -136,14 +224,14 @@ fn import_kuma(args: &[String]) -> anyhow::Result<()> {
 
 /// `hora check`: validate the config and exit non-zero on error - meant for
 /// CI and pre-deploy hooks.
-fn check_config() {
+fn check_config() -> Result<(), CliError> {
     let config_path = config::path();
     match config::load_from(&config_path) {
-        Ok(_) => println!("{} is valid.", config_path.display()),
-        Err(err) => {
-            eprintln!("Configuration error: {err:#}");
-            std::process::exit(1);
+        Ok(_) => {
+            println!("{} is valid.", config_path.display());
+            Ok(())
         }
+        Err(err) => Err(CliError::Failed(format!("Configuration error: {err:#}"))),
     }
 }
 
@@ -153,20 +241,14 @@ fn check_config() {
 /// the monitor's `notify` routing applies - testing exactly what would fire.
 /// Failures surface as the notifiers' own per-channel warnings *and* as a
 /// non-zero exit, so a CI pipeline can gate on the notification chain.
-async fn test_alert(monitor_id: Option<&str>) -> anyhow::Result<()> {
+async fn test_alert(monitor_id: Option<&str>) -> Result<(), CliError> {
     let config_path = config::path();
     let config = config::load_from(&config_path).context("loading configuration")?;
 
     let (name, notify) = match monitor_id {
         None => ("Hora test".to_owned(), None),
         Some(id) => {
-            let Some(monitor) = config.monitors.iter().find(|monitor| monitor.id == id) else {
-                eprintln!("Unknown monitor {id:?}. Configured ids:");
-                for monitor in &config.monitors {
-                    eprintln!("  {}", monitor.id);
-                }
-                std::process::exit(1);
-            };
+            let monitor = find_monitor(&config, id)?;
             (monitor.name.clone(), monitor.notify.clone())
         }
     };
@@ -182,8 +264,9 @@ async fn test_alert(monitor_id: Option<&str>) -> anyhow::Result<()> {
         })
         .collect();
     if targeted.is_empty() {
-        eprintln!("No notification channel to test (none configured, or none routed).");
-        std::process::exit(1);
+        return Err(CliError::Failed(
+            "No notification channel to test (none configured, or none routed).".to_owned(),
+        ));
     }
 
     println!(
@@ -215,11 +298,10 @@ async fn test_alert(monitor_id: Option<&str>) -> anyhow::Result<()> {
         println!("Done. Every channel accepted both notifications.");
         Ok(())
     } else {
-        eprintln!(
+        Err(CliError::Failed(format!(
             "Delivery failed on: {} (the warnings above say why).",
             failed.join(", ")
-        );
-        std::process::exit(1);
+        )))
     }
 }
 
@@ -245,6 +327,8 @@ fn print_help() {
     println!("  announce <title> [body] [--severity s] [--until 4h|18:00]");
     println!("                      Pin a public banner on the status page");
     println!("  announce list / clear  Show or remove the pinned announcements");
+    println!("                      ('hora announce -- clear ...' pins a title starting");
+    println!("                      with list or clear)");
     println!("  silence clear       Remove every silence");
     println!("  top [--url U] [--token T] [--interval S]");
     println!("                      Live terminal dashboard over the JSON API");
@@ -256,7 +340,8 @@ fn print_help() {
     println!("                      most recent one; an empty note clears it)");
     println!("  event <title...>    Record an event marker (\"deploy api v2.3\"): shown on");
     println!("                      the charts and correlated into incidents");
-    println!("  event list [limit]  List the recent event markers");
+    println!("  event list [limit]  List the recent event markers ('hora event -- list ...'");
+    println!("                      records a title that starts with the word list)");
     println!("  postmortem <id|last>  Print an incident's auto-generated markdown");
     println!("                      post-mortem (the web twin is /incident/{{id}})");
     println!("  timeline [--days N] Unified chronology: downs/recoveries, events,");
@@ -291,7 +376,7 @@ async fn open_database() -> anyhow::Result<(hora_core::config::Config, hora_core
 /// Snapshot the database to `dest` via `VACUUM INTO`: consistent and compacted,
 /// safe while the daemon runs. Meant for cron ("a one-statement answer to 'what
 /// if I lose a year of history?'").
-async fn backup(dest: &str) -> anyhow::Result<()> {
+async fn backup(dest: &str) -> Result<(), CliError> {
     let config_path = config::path();
     let config = config::load_from(&config_path).context("loading configuration")?;
     let source = &config.server.database_path;
@@ -304,9 +389,11 @@ async fn backup(dest: &str) -> anyhow::Result<()> {
 /// `hora announce`: pin (or list/clear) a public banner on the status page -
 /// the communication side of incidents, written straight into the daemon's
 /// database and live within the summary cache TTL (~5s). The HTTP twin is
-/// `POST /api/announce`.
-async fn announce(args: &[String]) -> anyhow::Result<()> {
+/// `POST /api/announce`. A leading `--` ends the subcommand words, so a banner
+/// titled "clear skies" is `hora announce -- clear skies`.
+async fn announce(args: &[String]) -> Result<(), CliError> {
     match args.first().map(String::as_str) {
+        Some("--") if args.len() > 1 => pin_announcement(&args[1..]).await?,
         Some("list") => {
             let (_, pool) = open_database().await?;
             let now = chrono::Utc::now().timestamp();
@@ -331,25 +418,27 @@ async fn announce(args: &[String]) -> anyhow::Result<()> {
                 hora_core::db::clear_announcements(&pool, chrono::Utc::now().timestamp()).await?;
             println!("Cleared {cleared} announcement(s).");
         }
-        Some(_) => {
-            let (title, body, severity, until) = parse_announce_args(args)?;
-            let (_, pool) = open_database().await?;
-            hora_core::db::insert_announcement(&pool, &title, &body, severity, until).await?;
-            let expiry = until.map_or_else(
-                || "until `hora announce clear`".to_owned(),
-                |ts| format!("until {}", format_epoch(ts)),
-            );
-            println!("Pinned [{severity}] {title:?} ({expiry}).");
-        }
-        None => {
-            eprintln!(
-                "Usage: hora announce <title> [body...] [--severity info|warning|critical|resolved] [--until 4h|18:00]"
-            );
-            eprintln!("       hora announce list");
-            eprintln!("       hora announce clear");
-            std::process::exit(1);
+        Some(first) if first != "--" => pin_announcement(args).await?,
+        _ => {
+            return Err(usage(concat!(
+                "Usage: hora announce <title> [body...] [--severity info|warning|critical|resolved] [--until 4h|18:00]\n",
+                "       hora announce list\n",
+                "       hora announce clear",
+            )));
         }
     }
+    Ok(())
+}
+
+async fn pin_announcement(args: &[String]) -> anyhow::Result<()> {
+    let (title, body, severity, until) = parse_announce_args(args)?;
+    let (_, pool) = open_database().await?;
+    hora_core::db::insert_announcement(&pool, &title, &body, severity, until).await?;
+    let expiry = until.map_or_else(
+        || "until `hora announce clear`".to_owned(),
+        |ts| format!("until {}", format_epoch(ts)),
+    );
+    println!("Pinned [{severity}] {title:?} ({expiry}).");
     Ok(())
 }
 
@@ -394,8 +483,15 @@ fn parse_announce_args(
         anyhow::bail!("announce needs a title");
     };
     Ok((
-        title.trim().chars().take(200).collect(),
-        body.join(" ").chars().take(500).collect(),
+        title
+            .trim()
+            .chars()
+            .take(MAX_ANNOUNCE_TITLE_CHARS)
+            .collect(),
+        body.join(" ")
+            .chars()
+            .take(MAX_ANNOUNCE_BODY_CHARS)
+            .collect(),
         severity,
         until,
     ))
@@ -416,9 +512,9 @@ fn parse_until(raw: &str, now: i64) -> Option<i64> {
     Some(if today > now { today } else { today + 86_400 })
 }
 
-/// Print the digest exactly as the `[digest]` task would send it/// Print the digest exactly as the `[digest]` task would send it - a dry run
+/// Print the digest exactly as the `[digest]` task would send it - a dry run
 /// to check the wording (and the data) without notifying anyone.
-async fn digest_preview() -> anyhow::Result<()> {
+async fn digest_preview() -> Result<(), CliError> {
     let (config, pool) = open_database().await?;
     let now = chrono::Utc::now().timestamp();
     let (period, summary) = hora_core::digest::build_summary(&pool, &config, now).await?;
@@ -430,7 +526,7 @@ async fn digest_preview() -> anyhow::Result<()> {
 /// Diagnose the runtime environment against what the config needs: `hora
 /// check` says the config is sound, `hora doctor` says the *host* can honour
 /// it. Exits non-zero when a needed capability is missing.
-async fn doctor() -> anyhow::Result<()> {
+async fn doctor() -> Result<(), CliError> {
     let config_path = config::path();
     let config = config::load_from(&config_path).context("loading configuration")?;
     println!(
@@ -453,27 +549,24 @@ async fn doctor() -> anyhow::Result<()> {
     }
     if failed {
         println!();
-        eprintln!("Some capabilities the configuration needs are missing.");
-        std::process::exit(1);
+        return Err(CliError::Failed(
+            "Some capabilities the configuration needs are missing.".to_owned(),
+        ));
     }
     Ok(())
 }
 
 /// Print the monthly SLA report as text - the terminal twin of the printable
 /// `/report/{month}` page. Defaults to last month: "here is your May report".
-async fn report(month: Option<&str>) -> anyhow::Result<()> {
+async fn report(month: Option<&str>) -> Result<(), CliError> {
     let (config, pool) = open_database().await?;
     let month = month.map_or_else(
         || hora_core::report::previous_month(chrono::Utc::now().timestamp()),
         str::to_owned,
     );
-    let report = match hora_core::report::build(&pool, &config, &month).await {
-        Ok(report) => report,
-        Err(err) => {
-            eprintln!("{err:#}");
-            std::process::exit(1);
-        }
-    };
+    let report = hora_core::report::build(&pool, &config, &month)
+        .await
+        .map_err(|err| CliError::Failed(format!("{err:#}")))?;
 
     println!("SLA report - {} ({})", report.label, config.page.title);
     let mut current_group: Option<&str> = None;
@@ -521,46 +614,30 @@ async fn report(month: Option<&str>) -> anyhow::Result<()> {
 /// read-only analytics over data that already exists - it never probes, never
 /// writes. With an id, it focuses one monitor; without, every monitor that has
 /// history. `--days` narrows the lookback (default: the monitor's retention).
-async fn tune(args: &[String]) -> anyhow::Result<()> {
+async fn tune(args: &[String]) -> Result<(), CliError> {
     let mut only: Option<&str> = None;
     let mut days: Option<i64> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--days" => {
-                let raw = iter.next().unwrap_or_else(|| {
-                    eprintln!("Usage: hora tune [monitor_id] [--days N]");
-                    std::process::exit(1);
-                });
-                let parsed = raw.parse::<i64>().ok().filter(|&d| d > 0);
-                let Some(parsed) = parsed else {
-                    eprintln!("--days must be a positive number of days");
-                    std::process::exit(1);
-                };
-                days = Some(parsed);
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| usage("Usage: hora tune [monitor_id] [--days N]"))?;
+                days = Some(parse_days(Some(raw))?);
             }
             other if only.is_none() => only = Some(other),
             other => {
-                eprintln!(
+                return Err(usage(format!(
                     "Unexpected argument {other:?} (usage: hora tune [monitor_id] [--days N])"
-                );
-                std::process::exit(1);
+                )));
             }
         }
     }
 
     let (config, pool) = open_database().await?;
     let selected: Vec<&hora_core::config::Monitor> = match only {
-        Some(id) => {
-            let Some(monitor) = config.monitors.iter().find(|monitor| monitor.id == id) else {
-                eprintln!("Unknown monitor {id:?}. Configured ids:");
-                for monitor in &config.monitors {
-                    eprintln!("  {}", monitor.id);
-                }
-                std::process::exit(1);
-            };
-            vec![monitor]
-        }
+        Some(id) => vec![find_monitor(&config, id)?],
         None => config.monitors.iter().collect(),
     };
 
@@ -814,8 +891,8 @@ fn percent(part: usize, whole: usize) -> String {
 /// `--confirm` asks the configured peers to probe the same target - the
 /// distributed "down for everyone or just me?" in one command. Exits non-zero
 /// when the target is down, so it doubles as a scriptable health check.
-async fn probe(args: &[String]) -> anyhow::Result<()> {
-    let parsed = parse_probe_args(args);
+async fn probe(args: &[String]) -> Result<(), CliError> {
+    let parsed = parse_probe_args(args)?;
     let config = config::load_from(&config::path()).context("loading configuration")?;
 
     // A bare id (no --kind) reuses that monitor's full config - assertions,
@@ -841,12 +918,11 @@ async fn probe(args: &[String]) -> anyhow::Result<()> {
         monitor.kind,
         hora_core::config::Kind::Push | hora_core::config::Kind::Exec
     ) {
-        eprintln!(
+        return Err(CliError::Failed(format!(
             "hora probe runs a live network check, but {:?} is a {} monitor (no active probe)",
             monitor.id,
             monitor.kind.as_str()
-        );
-        std::process::exit(1);
+        )));
     }
     // Force confirmation on regardless of the monitor's own setting: the flag
     // is the explicit ask. confirm_with_peers is read by confirm::enabled only.
@@ -879,21 +955,22 @@ async fn probe(args: &[String]) -> anyhow::Result<()> {
     // Down exits non-zero so `hora probe url && deploy` works as a gate;
     // degraded is still up.
     if !outcome.up {
-        std::process::exit(1);
+        return Err(CliError::Silent);
     }
     Ok(())
 }
 
 /// A parsed `hora probe` invocation. Borrows the target straight from `args`.
+#[derive(Debug)]
 struct ProbeArgs<'a> {
     target: &'a str,
     confirm: bool,
     kind_override: Option<hora_core::config::Kind>,
 }
 
-/// Parse `hora probe`'s arguments, exiting with a usage message on anything
-/// malformed (a missing target, an unknown flag, a bad `--kind`, extra args).
-fn parse_probe_args(args: &[String]) -> ProbeArgs<'_> {
+/// Parse `hora probe`'s arguments: a usage error on anything malformed (a
+/// missing target, an unknown flag, a bad `--kind`, extra args).
+fn parse_probe_args(args: &[String]) -> Result<ProbeArgs<'_>, CliError> {
     let mut target: Option<&str> = None;
     let mut confirm = false;
     let mut kind_override: Option<hora_core::config::Kind> = None;
@@ -903,33 +980,32 @@ fn parse_probe_args(args: &[String]) -> ProbeArgs<'_> {
             "--confirm" => confirm = true,
             "--kind" => {
                 let raw = iter.next().map_or("", String::as_str);
-                kind_override = Some(parse_probe_kind(raw).unwrap_or_else(|| {
-                    eprintln!("--kind must be one of: http, tcp, icmp (ping), dns");
-                    std::process::exit(1);
-                }));
+                kind_override =
+                    Some(parse_probe_kind(raw).ok_or_else(|| {
+                        usage("--kind must be one of: http, tcp, icmp (ping), dns")
+                    })?);
             }
             flag if flag.starts_with('-') => {
-                eprintln!(
+                return Err(usage(format!(
                     "Unknown option {flag:?} (usage: hora probe <id|target> [--confirm] [--kind K])"
-                );
-                std::process::exit(1);
+                )));
             }
             value if target.is_none() => target = Some(value),
             extra => {
-                eprintln!("Unexpected argument {extra:?} - hora probe takes a single target");
-                std::process::exit(1);
+                return Err(usage(format!(
+                    "Unexpected argument {extra:?} - hora probe takes a single target"
+                )));
             }
         }
     }
-    let Some(target) = target else {
-        eprintln!("Usage: hora probe <monitor-id|target> [--confirm] [--kind http|tcp|icmp|dns]");
-        std::process::exit(1);
-    };
-    ProbeArgs {
+    let target = target.ok_or_else(|| {
+        usage("Usage: hora probe <monitor-id|target> [--confirm] [--kind http|tcp|icmp|dns]")
+    })?;
+    Ok(ProbeArgs {
         target,
         confirm,
         kind_override,
-    }
+    })
 }
 
 /// Print the probe outcome, then the TLS expiry for https targets - the latter
@@ -1056,18 +1132,11 @@ fn format_date(timestamp: i64) -> String {
 /// straight into the daemon's database. Markers overlay the latency
 /// sparklines, list on /history, and a down confirming within the hour is
 /// annotated "recent change: ...". The HTTP twin is `POST /api/event`.
-async fn event(args: &[String]) -> anyhow::Result<()> {
-    match args.first().map(String::as_str) {
-        Some("list") => {
-            let limit = args
-                .get(1)
-                .map_or(Ok(20), |raw| raw.parse::<i64>())
-                .unwrap_or_else(|_| {
-                    eprintln!("Usage: hora event list [limit]");
-                    std::process::exit(1);
-                });
+async fn event(args: &[String]) -> Result<(), CliError> {
+    match parse_event_args(args)? {
+        EventCommand::List(limit) => {
             let (_, pool) = open_database().await?;
-            let events = hora_core::db::recent_events(&pool, limit.max(1)).await?;
+            let events = hora_core::db::recent_events(&pool, limit).await?;
             if events.is_empty() {
                 println!("No events recorded.");
             }
@@ -1075,23 +1144,59 @@ async fn event(args: &[String]) -> anyhow::Result<()> {
                 println!("{}  {}", format_epoch(event.created_at), event.title);
             }
         }
-        Some(_) => {
-            let title: String = args.join(" ").trim().chars().take(200).collect();
-            if title.is_empty() {
-                eprintln!("Usage: hora event <title...>");
-                std::process::exit(1);
-            }
+        EventCommand::Record(title) => {
             let (_, pool) = open_database().await?;
             hora_core::db::insert_event(&pool, &title).await?;
             println!("Recorded event: {title}");
         }
-        None => {
-            eprintln!("Usage: hora event <title...>");
-            eprintln!("       hora event list [limit]");
-            std::process::exit(1);
-        }
     }
     Ok(())
+}
+
+/// What `hora event` was asked to do.
+#[derive(Debug, PartialEq, Eq)]
+enum EventCommand {
+    /// `list [limit]`.
+    List(i64),
+    /// Record a marker with this title (trimmed, at most 200 chars).
+    Record(String),
+}
+
+/// Parse `hora event` arguments. `list` is the subcommand only when followed
+/// by nothing or a number: `hora event list deploy` is a usage error that
+/// points at `--` rather than guessing - a leading `--` ends the subcommand
+/// words, so `hora event -- list deploy` records "list deploy".
+fn parse_event_args(args: &[String]) -> Result<EventCommand, CliError> {
+    let title_words = match args {
+        [] => {
+            return Err(usage(
+                "Usage: hora event <title...>\n       hora event list [limit]",
+            ));
+        }
+        [first, rest @ ..] if first == "list" => {
+            return match rest.first().map(|raw| raw.parse::<i64>()) {
+                None => Ok(EventCommand::List(20)),
+                Some(Ok(limit)) => Ok(EventCommand::List(limit.max(1))),
+                Some(Err(_)) => Err(usage(format!(
+                    "Usage: hora event list [limit]\n\
+                     To record an event whose title starts with \"list\": hora event -- {}",
+                    args.join(" ")
+                ))),
+            };
+        }
+        [first, rest @ ..] if first == "--" => rest,
+        _ => args,
+    };
+    let title: String = title_words
+        .join(" ")
+        .trim()
+        .chars()
+        .take(MAX_EVENT_TITLE_CHARS)
+        .collect();
+    if title.is_empty() {
+        return Err(usage("Usage: hora event <title...>"));
+    }
+    Ok(EventCommand::Record(title))
 }
 
 /// `hora peers diff`: compare this node's probeable monitors (kind + target)
@@ -1099,24 +1204,27 @@ async fn event(args: &[String]) -> anyhow::Result<()> {
 /// `confirm_with_peers` only works on monitors both nodes know, and nothing
 /// else verifies that alignment - this does, and exits non-zero on any drift
 /// or unreachable peer so it can gate a config deploy.
-async fn peers(args: &[String]) -> anyhow::Result<()> {
+async fn peers(args: &[String]) -> Result<(), CliError> {
     if args.first().map(String::as_str) != Some("diff") {
-        eprintln!("Usage: hora peers diff");
-        std::process::exit(1);
+        return Err(usage("Usage: hora peers diff"));
     }
     let config = config::load_from(&config::path()).context("loading configuration")?;
     let Some(from) = config.health.as_ref().map(|health| health.id.clone()) else {
-        eprintln!("hora peers diff needs [health].id (the identity the peers authenticate).");
-        std::process::exit(1);
+        return Err(CliError::Failed(
+            "hora peers diff needs [health].id (the identity the peers authenticate).".to_owned(),
+        ));
     };
-    let askable: Vec<&hora_core::config::Peer> = config
+    // Each askable peer paired with the URL that made it askable.
+    let askable: Vec<(&hora_core::config::Peer, String)> = config
         .peers
         .iter()
-        .filter(|peer| peer.monitors_url().is_some())
+        .filter_map(|peer| peer.monitors_url().map(|url| (peer, url)))
         .collect();
     if askable.is_empty() {
-        eprintln!("No askable peers: [[peers]] entries need a ping_url to derive the API origin.");
-        std::process::exit(1);
+        return Err(CliError::Failed(
+            "No askable peers: [[peers]] entries need a ping_url to derive the API origin."
+                .to_owned(),
+        ));
     }
 
     let local: std::collections::BTreeSet<(String, String)> = config
@@ -1134,8 +1242,7 @@ async fn peers(args: &[String]) -> anyhow::Result<()> {
     let client = hora_core::http::client(None).context("building HTTP client")?;
     let mut drift = false;
     println!("hora peers diff - {} local probeable monitors", local.len());
-    for peer in askable {
-        let url = peer.monitors_url().expect("filtered on monitors_url");
+    for (peer, url) in askable {
         let answer = hora_core::vantage::fetch_peer_monitors(
             &client,
             &url,
@@ -1149,7 +1256,7 @@ async fn peers(args: &[String]) -> anyhow::Result<()> {
     if drift {
         println!();
         println!("Configs have drifted - multi-vantage confirmation only covers shared monitors.");
-        std::process::exit(1);
+        return Err(CliError::Silent);
     }
     Ok(())
 }
@@ -1189,25 +1296,16 @@ fn print_peer_diff(
 /// `hora timeline [--days N]`: the unified chronology - down/recovered
 /// transitions, operator events, pushed alerts, announcements, silences -
 /// merged newest-first. "What happened this week?" in one command.
-async fn timeline(args: &[String]) -> anyhow::Result<()> {
+async fn timeline(args: &[String]) -> Result<(), CliError> {
     let mut days: i64 = 7;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--days" => {
-                let parsed = iter
-                    .next()
-                    .and_then(|raw| raw.parse::<i64>().ok())
-                    .filter(|&d| d > 0);
-                let Some(parsed) = parsed else {
-                    eprintln!("--days must be a positive number of days");
-                    std::process::exit(1);
-                };
-                days = parsed;
-            }
+            "--days" => days = parse_days(iter.next())?,
             other => {
-                eprintln!("Unexpected argument {other:?} (usage: hora timeline [--days N])");
-                std::process::exit(1);
+                return Err(usage(format!(
+                    "Unexpected argument {other:?} (usage: hora timeline [--days N])"
+                )));
             }
         }
     }
@@ -1250,37 +1348,19 @@ async fn timeline(args: &[String]) -> anyhow::Result<()> {
 /// `hora postmortem <id|last>`: print the auto-generated markdown post-mortem
 /// of an incident - everything Hora already recorded about it, ready to paste
 /// into a ticket. The web twin is `/incident/{id}`.
-async fn postmortem(id_arg: &str) -> anyhow::Result<()> {
+async fn postmortem(id_arg: &str) -> Result<(), CliError> {
     let (config, pool) = open_database().await?;
-    let id = if id_arg == "last" {
-        let Some(id) = hora_core::db::latest_incident_id(&pool).await? else {
-            eprintln!("No incidents recorded yet.");
-            std::process::exit(1);
-        };
-        id
-    } else {
-        id_arg.parse().unwrap_or_else(|_| {
-            eprintln!("Invalid incident id {id_arg:?} (a number, or 'last').");
-            std::process::exit(1);
-        })
-    };
+    let id = resolve_incident_id(&pool, id_arg).await?;
     let Some(incident) = hora_core::db::incident_by_id(&pool, id).await? else {
-        eprintln!("No incident #{id}. 'hora incidents' lists the recent ones.");
-        std::process::exit(1);
+        return Err(no_such_incident(id));
     };
-    let name = config
-        .monitors
-        .iter()
-        .find(|monitor| monitor.id == incident.monitor_id)
-        .map_or(incident.monitor_id.as_str(), |monitor| {
-            monitor.name.as_str()
-        });
+    let name = monitor_name(&config, &incident.monitor_id);
     print!("{}", hora_core::postmortem::render(&incident, name));
     Ok(())
 }
 
 /// List recent incidents with their ids - the lookup companion of `annotate`.
-async fn list_incidents(limit: i64) -> anyhow::Result<()> {
+async fn list_incidents(limit: i64) -> Result<(), CliError> {
     let (config, pool) = open_database().await?;
     let incidents = hora_core::db::recent_incidents(&pool, limit).await?;
     if incidents.is_empty() {
@@ -1288,13 +1368,7 @@ async fn list_incidents(limit: i64) -> anyhow::Result<()> {
         return Ok(());
     }
     for incident in incidents {
-        let name = config
-            .monitors
-            .iter()
-            .find(|monitor| monitor.id == incident.monitor_id)
-            .map_or(incident.monitor_id.as_str(), |monitor| {
-                monitor.name.as_str()
-            });
+        let name = monitor_name(&config, &incident.monitor_id);
         let span = match incident.ended_at {
             Some(ended) => format!(
                 "{} -> {} ({})",
@@ -1325,23 +1399,11 @@ async fn list_incidents(limit: i64) -> anyhow::Result<()> {
 
 /// Attach (or clear, with an empty note) an annotation on an incident, shown
 /// on /history and in the Atom feed. `last` targets the most recent incident.
-async fn annotate(id_arg: &str, note: &str) -> anyhow::Result<()> {
+async fn annotate(id_arg: &str, note: &str) -> Result<(), CliError> {
     let (_, pool) = open_database().await?;
-    let id = if id_arg == "last" {
-        let Some(id) = hora_core::db::latest_incident_id(&pool).await? else {
-            eprintln!("No incidents recorded yet.");
-            std::process::exit(1);
-        };
-        id
-    } else {
-        id_arg.parse().unwrap_or_else(|_| {
-            eprintln!("Invalid incident id {id_arg:?} (a number, or 'last').");
-            std::process::exit(1);
-        })
-    };
+    let id = resolve_incident_id(&pool, id_arg).await?;
     if !hora_core::db::set_incident_note(&pool, id, note).await? {
-        eprintln!("No incident #{id}. 'hora incidents' lists the recent ones.");
-        std::process::exit(1);
+        return Err(no_such_incident(id));
     }
     if note.is_empty() {
         println!("Cleared the note on incident #{id}.");
@@ -1354,7 +1416,7 @@ async fn annotate(id_arg: &str, note: &str) -> anyhow::Result<()> {
 /// `hora silence <ids|all> <duration> [reason]` / `list` / `clear`: ad-hoc
 /// alert muting (a deploy window) written straight into the daemon's database,
 /// picked up on its next tick. The HTTP counterpart is `POST /api/silence`.
-async fn silence(args: &[String]) -> anyhow::Result<()> {
+async fn silence(args: &[String]) -> Result<(), CliError> {
     match args.first().map(String::as_str) {
         Some("list") => {
             let (_, pool) = open_database().await?;
@@ -1390,30 +1452,22 @@ async fn silence(args: &[String]) -> anyhow::Result<()> {
             let Some(duration_secs) = hora_core::parse_duration(&args[1])
                 .filter(|secs| *secs <= hora_core::MAX_SILENCE_SECS)
             else {
-                eprintln!(
+                return Err(usage(format!(
                     "Invalid duration {:?} (use e.g. 10m, 1h30m; max 7d).",
                     args[1]
-                );
-                std::process::exit(1);
+                )));
             };
             let (config, pool) = open_database().await?;
             let monitors: Vec<&str> = if ids == "all" || ids == "*" {
                 vec!["*"]
             } else {
                 let ids: Vec<&str> = ids.split(',').map(str::trim).collect();
-                // Fail on a typo'd id rather than silencing nothing.
                 for id in &ids {
-                    if !config.monitors.iter().any(|monitor| monitor.id == *id) {
-                        eprintln!("Unknown monitor {id:?}. Configured ids:");
-                        for monitor in &config.monitors {
-                            eprintln!("  {}", monitor.id);
-                        }
-                        std::process::exit(1);
-                    }
+                    find_monitor(&config, id)?;
                 }
                 ids
             };
-            let reason = (args.len() > 2).then(|| args[2..].join(" "));
+            let reason = silence_reason(&args[2..]);
             let until =
                 chrono::Utc::now().timestamp() + i64::try_from(duration_secs).unwrap_or(i64::MAX);
             for id in &monitors {
@@ -1427,14 +1481,36 @@ async fn silence(args: &[String]) -> anyhow::Result<()> {
             println!("Silenced {target} until {}.", format_epoch(until));
         }
         _ => {
-            eprintln!("Usage: hora silence <ids|all> <duration> [reason]");
-            eprintln!("       hora silence list");
-            eprintln!("       hora silence clear");
-            std::process::exit(1);
+            return Err(usage(concat!(
+                "Usage: hora silence <ids|all> <duration> [reason]\n",
+                "       hora silence list\n",
+                "       hora silence clear",
+            )));
         }
     }
     Ok(())
 }
+
+/// The optional free-text reason after `hora silence <ids> <duration>`,
+/// bounded like the API's (`POST /api/silence`) so neither path can bloat the
+/// database.
+fn silence_reason(words: &[String]) -> Option<String> {
+    (!words.is_empty()).then(|| {
+        words
+            .join(" ")
+            .chars()
+            .take(MAX_SILENCE_REASON_CHARS)
+            .collect()
+    })
+}
+
+/// Caps on CLI-written free text, mirroring the HTTP API's limits
+/// (`hora-web`'s `MAX_ALERT_TITLE_CHARS` / `MAX_PUSH_MSG_CHARS`) so a record
+/// looks the same whichever door it came in through.
+const MAX_EVENT_TITLE_CHARS: usize = 200;
+const MAX_ANNOUNCE_TITLE_CHARS: usize = 200;
+const MAX_ANNOUNCE_BODY_CHARS: usize = 500;
+const MAX_SILENCE_REASON_CHARS: usize = 500;
 
 fn format_epoch(timestamp: i64) -> String {
     chrono::DateTime::from_timestamp(timestamp, 0).map_or_else(
@@ -1540,8 +1616,9 @@ async fn serve() -> anyhow::Result<()> {
         handle.notifier.clone(),
     )
     .with_vantage(vantage_map);
-    // Connect-info gives the rate limiter a peer IP to fall back on when there
-    // is no `X-Forwarded-For` (i.e. direct access, not behind a proxy).
+    // Connect-info gives the rate limiter the peer socket IP: the client key
+    // unless `server.client_ip_header` names a trusted proxy header (forwarded
+    // headers are never read by default - a direct client could forge them).
     let app = hora_web::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -1642,6 +1719,135 @@ mod tests {
         assert!(parse_announce_args(&strings(&["--severity", "warning"])).is_err());
         assert!(parse_announce_args(&strings(&["t", "--severity", "panic"])).is_err());
         assert!(parse_announce_args(&strings(&["t", "--until", "nope"])).is_err());
+    }
+
+    /// The message a usage error would print, or a panic for any other outcome.
+    fn usage_message<T: std::fmt::Debug>(result: Result<T, CliError>) -> String {
+        match result {
+            Err(CliError::Usage(message)) => message,
+            other => panic!("expected a usage error, got {other:?}"),
+        }
+    }
+
+    fn two_monitor_config() -> hora_core::config::Config {
+        hora_core::config::parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "api"
+            name = "Public API"
+            target = "https://api.example.com"
+            interval_secs = 60
+            [[monitors]]
+            id = "db"
+            name = "Database"
+            target = "db.internal:5432"
+            kind = "tcp"
+            interval_secs = 60
+            "#,
+        )
+        .expect("config")
+    }
+
+    #[test]
+    fn probe_args_return_usage_errors_instead_of_exiting() {
+        let args = strings(&["example.com", "--confirm", "--kind", "ping"]);
+        let parsed = parse_probe_args(&args).expect("parse");
+        assert_eq!(parsed.target, "example.com");
+        assert!(parsed.confirm);
+        assert_eq!(parsed.kind_override, Some(hora_core::config::Kind::Icmp));
+
+        assert!(usage_message(parse_probe_args(&[])).starts_with("Usage: hora probe"));
+        assert!(usage_message(parse_probe_args(&strings(&["a", "b"]))).contains("single target"));
+        assert!(usage_message(parse_probe_args(&strings(&["--nope"]))).contains("Unknown option"));
+        assert!(
+            usage_message(parse_probe_args(&strings(&["a", "--kind", "smtp"])))
+                .starts_with("--kind must be")
+        );
+    }
+
+    #[test]
+    fn event_args_disambiguate_list_from_a_title() {
+        assert_eq!(
+            parse_event_args(&strings(&["list"])).expect("list"),
+            EventCommand::List(20)
+        );
+        assert_eq!(
+            parse_event_args(&strings(&["list", "0"])).expect("list 0"),
+            EventCommand::List(1)
+        );
+        assert_eq!(
+            parse_event_args(&strings(&["deploy", "api", "v2.3"])).expect("record"),
+            EventCommand::Record("deploy api v2.3".to_owned())
+        );
+        // `list <words>` is ambiguous: refuse, and point at the `--` escape.
+        let message = usage_message(parse_event_args(&strings(&["list", "deploy"])));
+        assert!(message.contains("hora event -- list deploy"), "{message}");
+        assert_eq!(
+            parse_event_args(&strings(&["--", "list", "deploy"])).expect("escaped"),
+            EventCommand::Record("list deploy".to_owned())
+        );
+        // Titles are capped like the API's; empty ones are refused.
+        let long = "x".repeat(300);
+        assert_eq!(
+            parse_event_args(&strings(&[&long])).expect("long"),
+            EventCommand::Record("x".repeat(MAX_EVENT_TITLE_CHARS))
+        );
+        assert!(usage_message(parse_event_args(&[])).starts_with("Usage: hora event"));
+        usage_message(parse_event_args(&strings(&["--"])));
+        usage_message(parse_event_args(&strings(&["  "])));
+    }
+
+    #[test]
+    fn silence_reason_is_capped_like_the_api() {
+        assert_eq!(silence_reason(&[]), None);
+        assert_eq!(
+            silence_reason(&strings(&["deploy", "window"])).as_deref(),
+            Some("deploy window")
+        );
+        let long = "é".repeat(MAX_SILENCE_REASON_CHARS + 50);
+        let capped = silence_reason(&strings(&[&long])).expect("reason");
+        assert_eq!(capped.chars().count(), MAX_SILENCE_REASON_CHARS);
+    }
+
+    #[test]
+    fn unknown_monitor_lists_the_configured_ids() {
+        let config = two_monitor_config();
+        assert_eq!(find_monitor(&config, "db").expect("db").name, "Database");
+        assert_eq!(
+            usage_message(find_monitor(&config, "dbb")),
+            "Unknown monitor \"dbb\". Configured ids:\n  api\n  db"
+        );
+        assert_eq!(monitor_name(&config, "api"), "Public API");
+        // A monitor removed since its incident was recorded keeps its id.
+        assert_eq!(monitor_name(&config, "gone"), "gone");
+    }
+
+    #[test]
+    fn limit_and_days_flags_validate() {
+        assert_eq!(parse_limit(None, "u").expect("default"), 20);
+        assert_eq!(
+            parse_limit(Some(&"-5".to_owned()), "u").expect("clamped"),
+            1
+        );
+        assert_eq!(usage_message(parse_limit(Some(&"x".to_owned()), "u")), "u");
+        assert_eq!(parse_days(Some(&"3".to_owned())).expect("days"), 3);
+        usage_message(parse_days(Some(&"0".to_owned())));
+        usage_message(parse_days(None));
+    }
+
+    #[tokio::test]
+    async fn incident_ids_resolve_last_or_a_number() {
+        let pool = hora_core::db::connect(":memory:").await.expect("db");
+        assert_eq!(resolve_incident_id(&pool, "42").await.expect("number"), 42);
+        assert!(
+            usage_message(resolve_incident_id(&pool, "4x2").await).contains("a number, or 'last'")
+        );
+        match resolve_incident_id(&pool, "last").await {
+            Err(CliError::Failed(message)) => assert_eq!(message, "No incidents recorded yet."),
+            other => panic!("expected a failure on an empty database, got {other:?}"),
+        }
     }
 
     #[test]
