@@ -8,6 +8,7 @@ pub mod confirm;
 pub mod db;
 pub mod digest;
 pub mod doctor;
+mod domain_expiry;
 mod exec;
 pub mod fmt;
 mod heartbeat;

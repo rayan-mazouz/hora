@@ -37,6 +37,7 @@ use crate::SECONDS_PER_DAY;
 use crate::config::Config;
 use crate::db;
 use crate::notifications::Notifiers;
+use crate::{domain_expiry, release};
 
 const CHECK_INTERVAL: Duration = Duration::from_hours(12);
 
@@ -47,17 +48,6 @@ const CERT_CONCURRENCY: usize = 8;
 /// The whole certificate sweep must finish within this; monitors still
 /// unchecked by then are retried on the next tick.
 const CERT_SWEEP_DEADLINE: Duration = Duration::from_mins(5);
-
-/// RDAP lookups happen at most this often per monitor (just under a day, so
-/// the 12h ticks land on a daily cadence): registries rate-limit, the answer
-/// moves yearly, and the gate is the stored `checked_at`, so a restart never
-/// re-queries early.
-const DOMAIN_CHECK_SECS: i64 = 20 * 3600;
-
-/// Ask GitHub for a project's latest release at most this often. Under the
-/// watcher's 12-hour tick, so every tick asks; over a restart loop, so a
-/// crashing daemon does not spend the anonymous API's 60 requests an hour.
-const RELEASE_CHECK_SECS: i64 = 6 * 3600;
 
 /// A verifier that accepts any certificate: we want to read the dates, not
 /// establish trust.
@@ -399,7 +389,7 @@ pub fn spawn_watcher(
             // A shutdown mid-sweep stops it rather than waiting out every
             // remaining lookup and handshake.
             let sweep = async {
-                check_domains(
+                domain_expiry::check_domains(
                     &pool,
                     &snapshot,
                     &notifier,
@@ -408,7 +398,7 @@ pub fn spawn_watcher(
                     now,
                 )
                 .await;
-                check_releases(&pool, &snapshot, &notifier, &client, now).await;
+                release::check_releases(&pool, &snapshot, &notifier, &client, now).await;
                 check_certs(&pool, &snapshot, &notifier, &tls, &mut warned, now).await;
             };
             tokio::select! {
@@ -637,165 +627,6 @@ async fn remember_pin(
     let against_key = format!("{}{monitor_id}", db::CERT_PIN_AGAINST_META_PREFIX);
     if let Err(err) = db::meta_set(pool, &against_key, &expected_pin.to_ascii_lowercase()).await {
         warn!(monitor = %monitor_id, "failed to store cert pin: {err:#}");
-    }
-}
-
-/// One pass of the RDAP domain-expiry checks: for each monitor with a
-/// `domain_expiry`, refresh the registry's expiration date at most daily
-/// (gated on the stored `checked_at`, so restarts never re-query early) and
-/// alert once when it enters the warning window - the same edge-triggered,
-/// maintenance-muted policy as the certificate expiry above.
-async fn check_domains(
-    pool: &SqlitePool,
-    snapshot: &Config,
-    notifier: &Notifiers,
-    client: &reqwest::Client,
-    domain_warned: &mut HashMap<String, bool>,
-    now: i64,
-) {
-    let threshold_days = i64::from(snapshot.alerts.domain_expiry_days);
-    for monitor in &snapshot.monitors {
-        let Some(domain) = &monitor.domain_expiry else {
-            continue;
-        };
-        let stored = match db::domain_expiry(pool, &monitor.id).await {
-            Ok(stored) => stored,
-            Err(err) => {
-                warn!(monitor = %monitor.id, "failed to read domain expiry: {err:#}");
-                continue;
-            }
-        };
-        // A changed `domain_expiry` in the config re-queries immediately.
-        let expires_at = match stored {
-            Some((ref stored_domain, expires_at, checked_at))
-                if stored_domain == domain && now - checked_at < DOMAIN_CHECK_SECS =>
-            {
-                expires_at
-            }
-            _ => match crate::rdap::domain_expiration(client, domain).await {
-                Ok(expires_at) => {
-                    if let Err(err) =
-                        db::upsert_domain_expiry(pool, &monitor.id, domain, expires_at, now).await
-                    {
-                        warn!(monitor = %monitor.id, "failed to store domain expiry: {err:#}");
-                    }
-                    let days_left = (expires_at - now) / SECONDS_PER_DAY;
-                    info!(monitor = %monitor.id, domain, days_left, "checked domain expiry (RDAP)");
-                    expires_at
-                }
-                Err(err) => {
-                    warn!(monitor = %monitor.id, domain, "RDAP domain check failed: {err:#}");
-                    continue;
-                }
-            },
-        };
-
-        let days_left = (expires_at - now) / SECONDS_PER_DAY;
-        let expiring = days_left <= threshold_days;
-        let already_warned = domain_warned.get(&monitor.id).copied().unwrap_or(false);
-        // Mute (without recording the warned state) during maintenance, so
-        // the alert still fires once the window ends.
-        if snapshot.in_maintenance(&monitor.id, chrono::Utc::now()) {
-            continue;
-        }
-        if expiring && !already_warned {
-            notifier
-                .load_full()
-                .dispatch(
-                    Event::DomainExpiring {
-                        monitor: &monitor.name,
-                        domain,
-                        days_left,
-                    },
-                    monitor.notify.as_deref(),
-                )
-                .await;
-        }
-        domain_warned.insert(monitor.id.clone(), expiring);
-    }
-}
-
-/// One pass of the release watches: for each monitor with a `release`, refresh
-/// the project's latest release (gated on the stored `checked_at`), learn the
-/// version that runs, and alert when the first is newer - once per release,
-/// the release alerted for being stored, so a restart does not repeat it.
-/// Muted during maintenance without being recorded, like the expiries above.
-async fn check_releases(
-    pool: &SqlitePool,
-    snapshot: &Config,
-    notifier: &Notifiers,
-    client: &reqwest::Client,
-    now: i64,
-) {
-    for monitor in &snapshot.monitors {
-        let Some(watch) = &monitor.release else {
-            continue;
-        };
-        let stored = match db::release_watch(pool, &monitor.id).await {
-            Ok(stored) => stored,
-            Err(err) => {
-                warn!(monitor = %monitor.id, "failed to read release watch: {err:#}");
-                continue;
-            }
-        };
-        // A changed `release.github` in the config asks again immediately.
-        let stored = stored.filter(|stored| stored.project == watch.github);
-        let (latest, url, alerted) = match stored {
-            Some(stored) if now - stored.checked_at < RELEASE_CHECK_SECS => {
-                (stored.latest, stored.url, stored.notified)
-            }
-            stored => match crate::release::latest(client, &watch.github).await {
-                Ok(release) => {
-                    if let Err(err) = db::upsert_release_watch(
-                        pool,
-                        &monitor.id,
-                        &watch.github,
-                        &release.tag,
-                        &release.url,
-                        now,
-                    )
-                    .await
-                    {
-                        warn!(monitor = %monitor.id, "failed to store release watch: {err:#}");
-                    }
-                    info!(monitor = %monitor.id, project = %watch.github, latest = %release.tag, "checked latest release");
-                    (release.tag, release.url, stored.and_then(|s| s.notified))
-                }
-                Err(err) => {
-                    warn!(monitor = %monitor.id, project = %watch.github, "release check failed: {err:#}");
-                    continue;
-                }
-            },
-        };
-        let current = match crate::release::running(client, watch).await {
-            Ok(current) => current,
-            Err(err) => {
-                warn!(monitor = %monitor.id, "could not learn the running version: {err:#}");
-                continue;
-            }
-        };
-        if !crate::release::is_newer(&latest, &current)
-            || alerted.as_deref() == Some(latest.as_str())
-            || snapshot.in_maintenance(&monitor.id, chrono::Utc::now())
-        {
-            continue;
-        }
-        notifier
-            .load_full()
-            .dispatch(
-                Event::ReleaseAvailable(hora_notify::Release {
-                    monitor: &monitor.name,
-                    project: &watch.github,
-                    current: &current,
-                    latest: &latest,
-                    url: &url,
-                }),
-                monitor.notify.as_deref(),
-            )
-            .await;
-        if let Err(err) = db::mark_release_notified(pool, &monitor.id, &latest).await {
-            warn!(monitor = %monitor.id, "failed to record the release alert: {err:#}");
-        }
     }
 }
 
