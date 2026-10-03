@@ -768,7 +768,7 @@ impl HeartbeatWatch {
 /// error falls back to `now`, unpersisted: the watch still works, just from
 /// this start.
 pub(crate) async fn heartbeat_expected_since(pool: &SqlitePool, id: &str, now: i64) -> i64 {
-    let key = format!("heartbeat_expected_since:{id}");
+    let key = format!("{}{id}", db::HEARTBEAT_EXPECTED_META_PREFIX);
     match db::meta_get(pool, &key).await {
         Ok(Some(stored)) => {
             if let Ok(since) = stored.parse::<i64>() {

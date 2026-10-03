@@ -38,6 +38,12 @@ const ORPHAN_GRACE_SECS: i64 = 7 * SECONDS_PER_DAY;
 /// `meta` key prefix recording when an id was first seen missing from the
 /// config (`orphan_since:<id>` = unix seconds).
 const ORPHAN_META_PREFIX: &str = "orphan_since:";
+/// `meta` key prefix recording since when a push monitor or watched peer has
+/// been expecting its first heartbeat (`heartbeat_expected_since:<id>`).
+pub(crate) const HEARTBEAT_EXPECTED_META_PREFIX: &str = "heartbeat_expected_since:";
+/// Every `meta` key prefix that holds per-id state, swept with the id's rows
+/// (see [`delete_orphans`]).
+const PER_ID_META_PREFIXES: &[&str] = &[HEARTBEAT_EXPECTED_META_PREFIX];
 
 // --- Shared SQL fragments ----------------------------------------------------
 // Macros rather than consts so each query stays one `&'static str` literal
@@ -1939,7 +1945,8 @@ const ORPHAN_TABLES: [&str; 9] = [
 /// in `meta`) and logs a warning naming the ids and the deletion date; an id
 /// that comes back before then simply loses its mark. Only a mark older than
 /// the grace period deletes anything, so a rename or a monitor commented out
-/// for a while keeps its year of history.
+/// for a while keeps its year of history. The id's per-id `meta` state
+/// ([`PER_ID_META_PREFIXES`]) goes with its rows.
 ///
 /// The sweep first *reads* which ids each table actually holds and only then
 /// deletes the orphaned ones, one targeted `DELETE` per id. The previous
@@ -2021,6 +2028,9 @@ async fn delete_orphans(pool: &SqlitePool, config: &Config, now: i64) -> anyhow:
                     .await?;
                 }
                 meta_delete(pool, &key).await?;
+                for prefix in PER_ID_META_PREFIXES {
+                    meta_delete(pool, &format!("{prefix}{id}")).await?;
+                }
                 tracing::warn!(
                     monitor = %id,
                     "deleted the history of a monitor missing from the config since {}",
@@ -2028,6 +2038,22 @@ async fn delete_orphans(pool: &SqlitePool, config: &Config, now: i64) -> anyhow:
                 );
             }
             Some(_) => {}
+        }
+    }
+    // Per-id state of an id that is gone and has no rows to wait for (a push
+    // monitor removed before its first heartbeat): nothing to restore, so no
+    // grace - otherwise re-adding it months later would start "overdue".
+    for prefix in PER_ID_META_PREFIXES {
+        let keys: Vec<String> =
+            sqlx::query_scalar("SELECT key FROM meta WHERE substr(key, 1, length(?1)) = ?1")
+                .bind(prefix)
+                .fetch_all(pool)
+                .await?;
+        for key in keys {
+            let id = &key[prefix.len()..];
+            if !keep.contains(id) && !orphans.contains_key(id) {
+                meta_delete(pool, &key).await?;
+            }
         }
     }
     if !scheduled.is_empty() {
@@ -2368,6 +2394,16 @@ mod tests {
         insert(&pool, "keep", now - 200 * SECONDS_PER_DAY, 1, Some(5)).await; // beyond retention
         insert(&pool, "gone", now - 10, 1, Some(5)).await; // monitor removed from config
         upsert_cert(&pool, "gone", now + 1000, now).await.unwrap();
+        meta_set(&pool, "heartbeat_expected_since:gone", "5")
+            .await
+            .unwrap();
+        meta_set(&pool, "heartbeat_expected_since:keep", "5")
+            .await
+            .unwrap();
+        // A push monitor removed before it ever pinged: no rows, only state.
+        meta_set(&pool, "heartbeat_expected_since:never", "5")
+            .await
+            .unwrap();
 
         let config: Config = toml::from_str(
             r#"
@@ -2392,6 +2428,14 @@ mod tests {
         assert_eq!(recent_checks(&pool, "gone", 10).await.unwrap().len(), 1);
         let mark = meta_get(&pool, "orphan_since:gone").await.unwrap();
         assert!(mark.is_some_and(|at| at.parse::<i64>().unwrap() >= now));
+        let expected = |id: &str| {
+            let pool = pool.clone();
+            let key = format!("heartbeat_expected_since:{id}");
+            async move { meta_get(&pool, &key).await.unwrap() }
+        };
+        assert!(expected("gone").await.is_some(), "kept through the grace");
+        assert!(expected("keep").await.is_some());
+        assert_eq!(expected("never").await, None, "nothing to wait for");
 
         // A week later the sweep deletes it entirely, mark included.
         delete_orphans(&pool, &config, now + ORPHAN_GRACE_SECS + 60)
@@ -2400,6 +2444,12 @@ mod tests {
         assert!(recent_checks(&pool, "gone", 10).await.unwrap().is_empty());
         assert_eq!(cert_not_after(&pool, "gone").await.unwrap(), None);
         assert_eq!(meta_get(&pool, "orphan_since:gone").await.unwrap(), None);
+        assert_eq!(
+            expected("gone").await,
+            None,
+            "per-id meta goes with the rows"
+        );
+        assert!(expected("keep").await.is_some());
         assert_eq!(recent_checks(&pool, "keep", 10).await.unwrap().len(), 1);
     }
 
