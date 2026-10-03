@@ -80,11 +80,13 @@ pub(crate) fn truncate(text: &str, max: usize, unit: Unit) -> String {
     out
 }
 
-/// Marker error for a notification the API refused as malformed or too large
-/// (HTTP 400 / 413). The channel itself answered, so the dispatcher does not
-/// count it toward the channel's failure streak - one oversized alert must not
-/// make the watchdog report a healthy channel as broken. Still logged and
-/// returned as a delivery failure.
+/// Marker error for a notification the API refused as too large (HTTP 413).
+/// The channel itself answered, so the dispatcher does not count it toward the
+/// channel's failure streak - one oversized alert must not make the watchdog
+/// report a healthy channel as broken. Still logged and returned as a delivery
+/// failure. A 400 is deliberately *not* treated this way: messages are already
+/// cut to each API's limits, and the 400s that remain are misconfigurations
+/// (Telegram "chat not found", a Pushover user key) the watchdog must report.
 #[derive(Debug)]
 pub(crate) struct PayloadRejected(pub String);
 
@@ -156,11 +158,11 @@ where
     unreachable!("every iteration either returns, bails or continues within MAX_ATTEMPTS")
 }
 
-/// Whether `status` means "this request's content was refused" (see
-/// [`PayloadRejected`]) rather than "the channel is broken" (401/403/404:
-/// revoked token, deleted webhook - those must trip the watchdog).
+/// Whether `status` means "this request's content was too large" (see
+/// [`PayloadRejected`]) rather than "the channel is broken" (400/401/403/404:
+/// bad chat id, revoked token, deleted webhook - those must trip the watchdog).
 fn payload_rejected(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::PAYLOAD_TOO_LARGE
+    status == reqwest::StatusCode::PAYLOAD_TOO_LARGE
 }
 
 /// POST `payload` as JSON, retrying transient failures (see [`send_retrying`]).
@@ -284,8 +286,8 @@ mod tests {
 
     #[test]
     fn payload_statuses_are_classified() {
-        assert!(payload_rejected(reqwest::StatusCode::BAD_REQUEST));
         assert!(payload_rejected(reqwest::StatusCode::PAYLOAD_TOO_LARGE));
+        assert!(!payload_rejected(reqwest::StatusCode::BAD_REQUEST));
         // A revoked token or deleted webhook is a broken channel, not a bad payload.
         assert!(!payload_rejected(reqwest::StatusCode::UNAUTHORIZED));
         assert!(!payload_rejected(reqwest::StatusCode::FORBIDDEN));

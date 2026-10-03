@@ -363,7 +363,7 @@ impl Dispatcher {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut triggered = Vec::new();
             for (channel, outcome) in targets.iter().zip(outcomes.iter()) {
-                // A payload the API refused (400/413) says nothing about the
+                // A payload the API refused as too large (413) says nothing about the
                 // channel's health - the channel answered - so it neither
                 // extends nor forgives the current streak.
                 if outcome
@@ -604,7 +604,7 @@ mod tests {
         assert!(d.health.lock().unwrap().contains_key("new"));
     }
 
-    /// A channel whose API refuses every payload (HTTP 400/413).
+    /// A channel whose API refuses every payload as too large (HTTP 413).
     struct RejectingNotifier;
 
     #[async_trait]
@@ -614,7 +614,7 @@ mod tests {
         }
 
         async fn notify(&self, _event: Event<'_>) -> anyhow::Result<()> {
-            Err(util::PayloadRejected("rejected (HTTP 400 Bad Request)".to_owned()).into())
+            Err(util::PayloadRejected("rejected (HTTP 413 Payload Too Large)".to_owned()).into())
         }
     }
 
