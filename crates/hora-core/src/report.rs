@@ -13,7 +13,7 @@ use sqlx::SqlitePool;
 
 use crate::SECONDS_PER_DAY;
 use crate::config::{Config, Monitor};
-use crate::{db, slo};
+use crate::{db, fmt, slo};
 
 /// One monitor's month.
 #[derive(Debug)]
@@ -101,10 +101,12 @@ pub async fn build(pool: &SqlitePool, config: &Config, month: &str) -> anyhow::R
     // For the running month, judge against what has elapsed, not the future.
     let covered_end = end.min(now);
 
-    // Daily counts from raw checks and the downsampled buckets, keyed by day
-    // string - the month is a prefix match away.
-    let daily = db::daily_all(pool, start, now).await?;
-    let incidents = db::recent_incidents(pool, 1000).await?;
+    // Daily counts from raw checks and the downsampled buckets over the
+    // covered part of the month only, keyed by day string - the month prefix
+    // filter below drops a bucket straddling the end.
+    let daily = db::daily_all(pool, start, covered_end).await?;
+    // Every incident overlapping the month, however many came after it.
+    let incidents = db::incidents_between(pool, start, covered_end).await?;
 
     let mut rows = Vec::with_capacity(config.monitors.len());
     for monitor in &config.monitors {
@@ -118,7 +120,7 @@ pub async fn build(pool: &SqlitePool, config: &Config, month: &str) -> anyhow::R
         }
         let total = up + down + degraded;
         let available = up + degraded;
-        let uptime_bp = (total > 0).then(|| (available * 10_000 + total / 2) / total);
+        let uptime_bp = fmt::basis_points(available, total);
 
         let mut count = 0_usize;
         let mut downtime_secs = 0_i64;
@@ -129,7 +131,7 @@ pub async fn build(pool: &SqlitePool, config: &Config, month: &str) -> anyhow::R
         {
             let incident_end = incident.ended_at.unwrap_or(now);
             let overlap = incident_end.min(covered_end) - incident.started_at.max(start);
-            if incident.started_at >= covered_end || overlap <= 0 {
+            if overlap <= 0 {
                 continue;
             }
             count += 1;
@@ -202,23 +204,9 @@ fn month_label(start: i64) -> String {
         .map_or_else(String::new, |dt| dt.format("%B %Y").to_string())
 }
 
-/// `"99.97%"` from basis points.
-#[must_use]
-pub fn format_bp(basis_points: i64) -> String {
-    format!("{}.{:02}%", basis_points / 100, basis_points % 100)
-}
-
-/// `"2h 05m"`, `"12m"`, `"45s"` - downtime and MTTR formatting.
-#[must_use]
-pub fn format_secs(seconds: i64) -> String {
-    if seconds >= 3600 {
-        format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60)
-    } else if seconds >= 60 {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{seconds}s")
-    }
-}
+// Kept under their historical names for the web report and `hora report`;
+// both are the shared [`crate::fmt`] helpers.
+pub use crate::fmt::{duration as format_secs, pct_bp as format_bp};
 
 #[cfg(test)]
 mod tests {
@@ -254,8 +242,8 @@ mod tests {
         assert_eq!(format_bp(10_000), "100.00%");
         assert_eq!(format_bp(9_997), "99.97%");
         assert_eq!(format_secs(45), "45s");
-        assert_eq!(format_secs(720), "12m");
-        assert_eq!(format_secs(7500), "2h 05m");
+        assert_eq!(format_secs(720), "12m 0s");
+        assert_eq!(format_secs(7500), "2h 5m");
     }
 
     #[tokio::test]
@@ -334,6 +322,21 @@ mod tests {
         // is far past it.
         assert_eq!(row.budget_minutes, Some(44));
         assert!(row.budget_consumed_minutes.unwrap() > 44);
+
+        // A busy February (more incidents than any "latest N" read would
+        // fetch) must not push January's incident out of its own report.
+        sqlx::query(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 1500) \
+             INSERT INTO incidents (monitor_id, started_at, ended_at, duration_s, created_at) \
+             SELECT 'm', ?1 + i * 60, ?1 + i * 60 + 30, 30, ?1 FROM n",
+        )
+        .bind(start + 35 * SECONDS_PER_DAY)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let report = build(&pool, &config, "2021-01").await.expect("report");
+        assert_eq!(report.rows[0].incidents, 1);
+        assert_eq!(report.rows[0].downtime_secs, 600);
 
         // A malformed or future month is rejected.
         assert!(build(&pool, &config, "garbage").await.is_err());

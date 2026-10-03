@@ -30,6 +30,73 @@ const DOWNSAMPLE_DAILY_AFTER_DAYS: i64 = 90;
 /// Daily buckets and closed incidents are kept this long.
 const AGGREGATE_RETENTION_DAYS: i64 = 365;
 
+/// How long a monitor id missing from the config keeps its history before the
+/// pruner deletes it. A rename, a monitor commented out for an afternoon or a
+/// bad merge must not cost a year of aggregates and incidents on the next
+/// prune tick; a week is long enough to notice and restore it.
+const ORPHAN_GRACE_SECS: i64 = 7 * SECONDS_PER_DAY;
+/// `meta` key prefix recording when an id was first seen missing from the
+/// config (`orphan_since:<id>` = unix seconds).
+const ORPHAN_META_PREFIX: &str = "orphan_since:";
+
+// --- Shared SQL fragments ----------------------------------------------------
+// Macros rather than consts so each query stays one `&'static str` literal
+// (`concat!` only takes literals), never a runtime-built string.
+
+/// The `Incident` columns, in struct order.
+macro_rules! incident_columns {
+    () => {
+        "id, monitor_id, started_at, ended_at, duration_s, cause, impacted, error, note, \
+         snapshot, event, vantage, created_at"
+    };
+}
+
+/// The `Announcement` columns.
+macro_rules! announcement_columns {
+    () => {
+        "id, title, body, severity, until, created_at"
+    };
+}
+
+/// The `Silence` columns.
+macro_rules! silence_columns {
+    () => {
+        "id, monitor_id, until, reason, created_at"
+    };
+}
+
+/// The `EventMarker` columns.
+macro_rules! event_columns {
+    () => {
+        "id, title, created_at"
+    };
+}
+
+/// `(available, total)` over `checks` rows: available = up or degraded.
+macro_rules! available_total {
+    () => {
+        "CAST(COALESCE(SUM(CASE WHEN status IN (1, 2) THEN 1 ELSE 0 END), 0) AS INTEGER), \
+         COUNT(*)"
+    };
+}
+
+/// An upsert on a table keyed by `$key`: every listed column is written, and
+/// all but the key are refreshed on conflict. Binds follow the column order.
+macro_rules! upsert_sql {
+    ($table:literal, $key:literal, $first:literal $(, $rest:literal)*) => {
+        concat!(
+            "INSERT INTO ", $table, " (", $key, ", ", $first, $(", ", $rest,)* ") ",
+            "VALUES (?, ?", $(upsert_sql!(@param $rest),)* ") ",
+            "ON CONFLICT(", $key, ") DO UPDATE SET ",
+            $first, " = excluded.", $first,
+            $(", ", $rest, " = excluded.", $rest,)*
+        )
+    };
+    (@param $column:literal) => {
+        ", ?"
+    };
+}
+
 /// Latest stored check for a monitor.
 #[derive(Debug, sqlx::FromRow)]
 pub struct Latest {
@@ -71,7 +138,8 @@ pub async fn connect(database_path: &str) -> anyhow::Result<SqlitePool> {
     // The database holds failure snippets, push payloads and incident detail, so
     // create it private (0600) rather than at the process umask. SQLite then
     // mirrors that mode onto the -wal/-shm sidecars it spawns.
-    precreate_private(database_path)?;
+    let path = database_path.to_owned();
+    tokio::task::spawn_blocking(move || precreate_private(&path)).await??;
     let options = SqliteConnectOptions::new()
         .filename(database_path)
         .create_if_missing(true)
@@ -113,7 +181,6 @@ pub async fn connect(database_path: &str) -> anyhow::Result<SqlitePool> {
 #[cfg(unix)]
 fn precreate_private(database_path: &str) -> anyhow::Result<()> {
     use anyhow::Context as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
 
     // `file:` URIs are skipped wholesale: parsing them (query params, mode=memory)
     // isn't worth it for a spelling Hora never documents. An operator who points a
@@ -121,18 +188,9 @@ fn precreate_private(database_path: &str) -> anyhow::Result<()> {
     if database_path == ":memory:" || database_path.starts_with("file:") {
         return Ok(());
     }
-    let path = std::path::Path::new(database_path);
-    if path.exists() {
-        return Ok(());
-    }
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-    {
-        Ok(_) => Ok(()),
-        // Lost a race to create it: another opener won, the file now exists.
+    match create_private(database_path) {
+        Ok(()) => Ok(()),
+        // Already there (or another opener won the race): keep its mode.
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(err) => Err(err).with_context(|| format!("creating database file {database_path}")),
     }
@@ -142,6 +200,20 @@ fn precreate_private(database_path: &str) -> anyhow::Result<()> {
 #[allow(clippy::unnecessary_wraps)]
 fn precreate_private(_database_path: &str) -> anyhow::Result<()> {
     Ok(())
+}
+
+/// Create `path` as a new, empty file - owner-only (0600) on Unix. Fails with
+/// `AlreadyExists` when anything is already there, atomically (no
+/// check-then-create window).
+fn create_private(path: &str) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path).map(drop)
 }
 
 /// Insert one probe result.
@@ -293,36 +365,14 @@ pub async fn availability(
     monitor_id: &str,
     since: i64,
 ) -> sqlx::Result<(i64, i64)> {
-    sqlx::query_as::<_, (i64, i64)>(
-        "SELECT \
-            CAST(COALESCE(SUM(CASE WHEN status IN (1, 2) THEN 1 ELSE 0 END), 0) AS INTEGER), \
-            COUNT(*) \
-         FROM checks WHERE monitor_id = ? AND time >= ?",
-    )
+    sqlx::query_as::<_, (i64, i64)>(concat!(
+        "SELECT ",
+        available_total!(),
+        " FROM checks WHERE monitor_id = ? AND time >= ?"
+    ))
     .bind(monitor_id)
     .bind(since)
     .fetch_one(pool)
-    .await
-}
-
-/// Daily up/down/degraded aggregates since `since`, oldest day first.
-///
-/// # Errors
-///
-/// Returns an error if the query fails.
-pub async fn daily(pool: &SqlitePool, monitor_id: &str, since: i64) -> sqlx::Result<Vec<DayRow>> {
-    sqlx::query_as::<_, DayRow>(
-        "SELECT \
-            strftime('%Y-%m-%d', time, 'unixepoch') AS day, \
-            CAST(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS INTEGER) AS up, \
-            CAST(SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS INTEGER) AS down, \
-            CAST(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS INTEGER) AS degraded \
-         FROM checks WHERE monitor_id = ? AND time >= ? \
-         GROUP BY day ORDER BY day ASC",
-    )
-    .bind(monitor_id)
-    .bind(since)
-    .fetch_all(pool)
     .await
 }
 
@@ -368,11 +418,12 @@ pub async fn upsert_cert(
     not_after: i64,
     checked_at: i64,
 ) -> sqlx::Result<()> {
-    sqlx::query(
-        "INSERT INTO certs (monitor_id, not_after, checked_at) VALUES (?, ?, ?) \
-         ON CONFLICT(monitor_id) DO UPDATE SET \
-            not_after = excluded.not_after, checked_at = excluded.checked_at",
-    )
+    sqlx::query(upsert_sql!(
+        "certs",
+        "monitor_id",
+        "not_after",
+        "checked_at"
+    ))
     .bind(monitor_id)
     .bind(not_after)
     .bind(checked_at)
@@ -381,12 +432,10 @@ pub async fn upsert_cert(
     Ok(())
 }
 
-/// The stored certificate `not_after` timestamp for a monitor, if known.
-///
-/// # Errors
-///
-/// Returns an error if the query fails.
-pub async fn cert_not_after(pool: &SqlitePool, monitor_id: &str) -> sqlx::Result<Option<i64>> {
+/// The stored certificate `not_after` timestamp for a monitor, if known. Only
+/// the tests read one monitor's expiry; the page batches them ([`cert_all`]).
+#[cfg(test)]
+async fn cert_not_after(pool: &SqlitePool, monitor_id: &str) -> sqlx::Result<Option<i64>> {
     sqlx::query_scalar::<_, i64>("SELECT not_after FROM certs WHERE monitor_id = ?")
         .bind(monitor_id)
         .fetch_optional(pool)
@@ -408,12 +457,11 @@ pub async fn availability_all(
     pool: &SqlitePool,
     since: i64,
 ) -> sqlx::Result<HashMap<String, (i64, i64)>> {
-    let rows = sqlx::query_as::<_, (String, i64, i64)>(
-        "SELECT monitor_id, \
-            CAST(COALESCE(SUM(CASE WHEN status IN (1, 2) THEN 1 ELSE 0 END), 0) AS INTEGER), \
-            COUNT(*) \
-         FROM checks WHERE time >= ? GROUP BY monitor_id",
-    )
+    let rows = sqlx::query_as::<_, (String, i64, i64)>(concat!(
+        "SELECT monitor_id, ",
+        available_total!(),
+        " FROM checks WHERE time >= ? GROUP BY monitor_id"
+    ))
     .bind(since)
     .fetch_all(pool)
     .await?;
@@ -423,8 +471,10 @@ pub async fn availability_all(
         .collect())
 }
 
-/// Daily up/down/degraded aggregates per monitor since `since`, oldest first.
-/// `now` bounds the raw scan (callers pass their current timestamp).
+/// Daily up/down/degraded aggregates per monitor over `[since, until]`, oldest
+/// first. The page passes its current timestamp as `until`; the monthly report
+/// passes the end of the month (or now, for the running month), so later data
+/// is never scanned. Buckets are included when they *start* inside the range.
 ///
 /// Every ended hour is rolled up into `checks_hourly` (see
 /// [`HOURLY_ROLLUP_LAG_SECS`]), so the hourly buckets cover everything below
@@ -442,12 +492,13 @@ pub async fn availability_all(
 pub async fn daily_all(
     pool: &SqlitePool,
     since: i64,
-    now: i64,
+    until: i64,
 ) -> sqlx::Result<HashMap<String, Vec<DayRow>>> {
     let newest_hour: Option<i64> = sqlx::query_scalar("SELECT MAX(hour) FROM checks_hourly")
         .fetch_one(pool)
         .await?;
-    let frontier = newest_hour.map_or(since, |hour| since.max(hour + 3600));
+    // Past `until` nothing is read, so the frontier never needs to exceed it.
+    let frontier = newest_hour.map_or(since, |hour| since.max(hour + 3600).min(until + 1));
     // Days are grouped as integer UTC day numbers (`time / 86400`) and only
     // formatted once per bucket below: a per-row `strftime` string, and the
     // string-keyed GROUP BY it forces, was half of this scan's cost.
@@ -457,7 +508,7 @@ pub async fn daily_all(
          FROM checks WHERE time >= ? AND time <= ? GROUP BY monitor_id, day",
     )
     .bind(frontier)
-    .bind(now)
+    .bind(until)
     .fetch_all(pool)
     .await?;
     let hourly = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
@@ -472,9 +523,10 @@ pub async fn daily_all(
     let daily = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
         "SELECT monitor_id, day / 86400 AS day, \
             up_count, down_count, degraded_count \
-         FROM checks_daily WHERE day >= ?",
+         FROM checks_daily WHERE day >= ? AND day <= ?",
     )
     .bind(since)
+    .bind(until)
     .fetch_all(pool)
     .await?;
 
@@ -511,32 +563,7 @@ pub async fn daily_all(
 /// A UTC day number (`unix_secs / 86400`) as `YYYY-MM-DD`, the format SQLite's
 /// `strftime('%Y-%m-%d', …, 'unixepoch')` produced.
 fn iso_day(day: i64) -> String {
-    chrono::DateTime::from_timestamp(day * SECONDS_PER_DAY, 0)
-        .map_or_else(String::new, |at| at.format("%Y-%m-%d").to_string())
-}
-
-/// Latency samples per monitor since `since`, oldest first (NULLs skipped).
-///
-/// # Errors
-///
-/// Returns an error if the query fails.
-pub async fn latency_all(
-    pool: &SqlitePool,
-    since: i64,
-) -> sqlx::Result<HashMap<String, Vec<Point>>> {
-    let rows = sqlx::query_as::<_, (String, i64, i64)>(
-        "SELECT monitor_id, time, latency_ms FROM checks \
-         WHERE time >= ? AND latency_ms IS NOT NULL ORDER BY monitor_id, time ASC",
-    )
-    .bind(since)
-    .fetch_all(pool)
-    .await?;
-
-    let mut map: HashMap<String, Vec<Point>> = HashMap::new();
-    for (id, t, latency_ms) in rows {
-        map.entry(id).or_default().push(Point { t, latency_ms });
-    }
-    Ok(map)
+    crate::fmt::date(day * SECONDS_PER_DAY)
 }
 
 /// 24h latency percentiles (p50/p95/p99) per monitor, computed in SQL so the raw
@@ -580,6 +607,8 @@ pub async fn latency_percentiles_all(
 /// `bucket_secs` (must be `>= 1`) so the series stays small however dense the
 /// checks are: one query, at most `window / bucket_secs` points per monitor,
 /// oldest first. This caps both the memory held and the size of the rendered SVG.
+/// Buckets are anchored to the epoch, like [`latency_series`], so consecutive
+/// rebuilds group the same rows and the sparkline doesn't jitter.
 ///
 /// # Errors
 ///
@@ -593,7 +622,7 @@ pub async fn latency_sparkline_all(
         "SELECT monitor_id, MIN(time) AS t, CAST(AVG(latency_ms) AS INTEGER) AS latency_ms \
          FROM checks \
          WHERE time >= ?1 AND latency_ms IS NOT NULL \
-         GROUP BY monitor_id, (time - ?1) / ?2 \
+         GROUP BY monitor_id, time / ?2 \
          ORDER BY monitor_id, t ASC",
     )
     .bind(since)
@@ -668,13 +697,13 @@ pub async fn upsert_domain_expiry(
     expires_at: i64,
     checked_at: i64,
 ) -> sqlx::Result<()> {
-    sqlx::query(
-        "INSERT INTO domain_expiry (monitor_id, domain, expires_at, checked_at) \
-         VALUES (?, ?, ?, ?) \
-         ON CONFLICT(monitor_id) DO UPDATE SET \
-            domain = excluded.domain, expires_at = excluded.expires_at, \
-            checked_at = excluded.checked_at",
-    )
+    sqlx::query(upsert_sql!(
+        "domain_expiry",
+        "monitor_id",
+        "domain",
+        "expires_at",
+        "checked_at"
+    ))
     .bind(monitor_id)
     .bind(domain)
     .bind(expires_at)
@@ -730,7 +759,12 @@ pub async fn upsert_release_watch(
     checked_at: i64,
 ) -> sqlx::Result<()> {
     sqlx::query(
-        "INSERT INTO release_watch (monitor_id, project, latest, url, checked_at)          VALUES (?, ?, ?, ?, ?)          ON CONFLICT(monitor_id) DO UPDATE SET             notified = CASE WHEN project = excluded.project THEN notified END,             project = excluded.project, latest = excluded.latest,             url = excluded.url, checked_at = excluded.checked_at",
+        "INSERT INTO release_watch (monitor_id, project, latest, url, checked_at) \
+         VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT(monitor_id) DO UPDATE SET \
+            notified = CASE WHEN project = excluded.project THEN notified END, \
+            project = excluded.project, latest = excluded.latest, \
+            url = excluded.url, checked_at = excluded.checked_at",
     )
     .bind(monitor_id)
     .bind(project)
@@ -789,11 +823,12 @@ pub async fn upsert_cert_pin(
     fingerprint: &str,
     checked_at: i64,
 ) -> sqlx::Result<()> {
-    sqlx::query(
-        "INSERT INTO cert_pins (monitor_id, fingerprint, checked_at) VALUES (?, ?, ?) \
-         ON CONFLICT(monitor_id) DO UPDATE SET \
-            fingerprint = excluded.fingerprint, checked_at = excluded.checked_at",
-    )
+    sqlx::query(upsert_sql!(
+        "cert_pins",
+        "monitor_id",
+        "fingerprint",
+        "checked_at"
+    ))
     .bind(monitor_id)
     .bind(fingerprint)
     .bind(checked_at)
@@ -936,12 +971,36 @@ pub async fn recent_incidents(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec
     // The id tie-break keeps the order deterministic when incidents share a
     // start second (a cascade), and matches what [`latest_incident_id`] calls
     // "last" - so `hora annotate last` annotates the incident listed first.
-    sqlx::query_as::<_, Incident>(
-        "SELECT id, monitor_id, started_at, ended_at, duration_s, cause, impacted, error, note, \
-            snapshot, event, vantage, created_at \
-         FROM incidents ORDER BY started_at DESC, id DESC LIMIT ?",
-    )
+    sqlx::query_as::<_, Incident>(concat!(
+        "SELECT ",
+        incident_columns!(),
+        " FROM incidents ORDER BY started_at DESC, id DESC LIMIT ?"
+    ))
     .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Every incident overlapping `[since, until)`: started before `until` and
+/// still open or ended after `since`. Newest first, unbounded - the monthly
+/// report and the digest must count them all, not the latest N.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn incidents_between(
+    pool: &SqlitePool,
+    since: i64,
+    until: i64,
+) -> sqlx::Result<Vec<Incident>> {
+    sqlx::query_as::<_, Incident>(concat!(
+        "SELECT ",
+        incident_columns!(),
+        " FROM incidents WHERE started_at < ? AND (ended_at IS NULL OR ended_at > ?) \
+         ORDER BY started_at DESC, id DESC"
+    ))
+    .bind(until)
+    .bind(since)
     .fetch_all(pool)
     .await
 }
@@ -952,11 +1011,11 @@ pub async fn recent_incidents(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec
 ///
 /// Returns an error if the query fails.
 pub async fn incident_by_id(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<Incident>> {
-    sqlx::query_as::<_, Incident>(
-        "SELECT id, monitor_id, started_at, ended_at, duration_s, cause, impacted, error, note, \
-            snapshot, event, vantage, created_at \
-         FROM incidents WHERE id = ?",
-    )
+    sqlx::query_as::<_, Incident>(concat!(
+        "SELECT ",
+        incident_columns!(),
+        " FROM incidents WHERE id = ?"
+    ))
     .bind(id)
     .fetch_optional(pool)
     .await
@@ -1009,14 +1068,20 @@ pub async fn meta_get(pool: &SqlitePool, key: &str) -> sqlx::Result<Option<Strin
 ///
 /// Returns an error if the upsert fails.
 pub async fn meta_set(pool: &SqlitePool, key: &str, value: &str) -> sqlx::Result<()> {
-    sqlx::query(
-        "INSERT INTO meta (key, value) VALUES (?, ?) \
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    )
-    .bind(key)
-    .bind(value)
-    .execute(pool)
-    .await?;
+    sqlx::query(upsert_sql!("meta", "key", "value"))
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Remove a key from the `meta` key-value store (a no-op when absent).
+async fn meta_delete(pool: &SqlitePool, key: &str) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM meta WHERE key = ?")
+        .bind(key)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1065,10 +1130,11 @@ pub async fn insert_announcement(
 ///
 /// Returns an error if the query fails.
 pub async fn active_announcements(pool: &SqlitePool, now: i64) -> sqlx::Result<Vec<Announcement>> {
-    sqlx::query_as::<_, Announcement>(
-        "SELECT id, title, body, severity, until, created_at FROM announcements \
-         WHERE until IS NULL OR until > ? ORDER BY created_at DESC, id DESC",
-    )
+    sqlx::query_as::<_, Announcement>(concat!(
+        "SELECT ",
+        announcement_columns!(),
+        " FROM announcements WHERE until IS NULL OR until > ? ORDER BY created_at DESC, id DESC"
+    ))
     .bind(now)
     .fetch_all(pool)
     .await
@@ -1081,16 +1147,19 @@ pub async fn active_announcements(pool: &SqlitePool, now: i64) -> sqlx::Result<V
 ///
 /// Returns an error if the deletion fails.
 pub async fn clear_announcements(pool: &SqlitePool, now: i64) -> sqlx::Result<u64> {
-    let active = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM announcements WHERE until IS NULL OR until > ?",
-    )
-    .bind(now)
-    .fetch_one(pool)
-    .await?;
-    sqlx::query("DELETE FROM announcements")
-        .execute(pool)
+    // One statement: the count describes exactly the rows deleted, even when
+    // an announcement is pinned concurrently.
+    let deleted: Vec<Option<i64>> = sqlx::query_scalar("DELETE FROM announcements RETURNING until")
+        .fetch_all(pool)
         .await?;
-    Ok(u64::try_from(active).unwrap_or(0))
+    Ok(count_active(deleted.into_iter(), now))
+}
+
+/// How many of the deleted rows' expiries were still in force at `now`
+/// (`None` = no expiry).
+fn count_active(untils: impl Iterator<Item = Option<i64>>, now: i64) -> u64 {
+    let active = untils.filter(|until| until.is_none_or(|until| until > now));
+    u64::try_from(active.count()).unwrap_or(u64::MAX)
 }
 
 /// Drop announcements whose expiry passed before `cutoff`.
@@ -1131,9 +1200,11 @@ pub async fn insert_event(pool: &SqlitePool, title: &str) -> sqlx::Result<i64> {
 ///
 /// Returns an error if the query fails.
 pub async fn recent_events(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<EventMarker>> {
-    sqlx::query_as::<_, EventMarker>(
-        "SELECT id, title, created_at FROM events ORDER BY created_at DESC, id DESC LIMIT ?",
-    )
+    sqlx::query_as::<_, EventMarker>(concat!(
+        "SELECT ",
+        event_columns!(),
+        " FROM events ORDER BY created_at DESC, id DESC LIMIT ?"
+    ))
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -1145,10 +1216,11 @@ pub async fn recent_events(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<Ev
 ///
 /// Returns an error if the query fails.
 pub async fn events_since(pool: &SqlitePool, since: i64) -> sqlx::Result<Vec<EventMarker>> {
-    sqlx::query_as::<_, EventMarker>(
-        "SELECT id, title, created_at FROM events WHERE created_at >= ? \
-         ORDER BY created_at ASC, id ASC",
-    )
+    sqlx::query_as::<_, EventMarker>(concat!(
+        "SELECT ",
+        event_columns!(),
+        " FROM events WHERE created_at >= ? ORDER BY created_at ASC, id ASC"
+    ))
     .bind(since)
     .fetch_all(pool)
     .await
@@ -1165,11 +1237,12 @@ pub async fn latest_event_before(
     now: i64,
     window_secs: i64,
 ) -> sqlx::Result<Option<EventMarker>> {
-    sqlx::query_as::<_, EventMarker>(
-        "SELECT id, title, created_at FROM events \
-         WHERE created_at <= ? AND created_at >= ? \
-         ORDER BY created_at DESC, id DESC LIMIT 1",
-    )
+    sqlx::query_as::<_, EventMarker>(concat!(
+        "SELECT ",
+        event_columns!(),
+        " FROM events WHERE created_at <= ? AND created_at >= ? \
+         ORDER BY created_at DESC, id DESC LIMIT 1"
+    ))
     .bind(now)
     .bind(now - window_secs.max(0))
     .fetch_optional(pool)
@@ -1183,10 +1256,11 @@ pub async fn latest_event_before(
 ///
 /// Returns an error if the query fails.
 pub async fn announcements_since(pool: &SqlitePool, since: i64) -> sqlx::Result<Vec<Announcement>> {
-    sqlx::query_as::<_, Announcement>(
-        "SELECT id, title, body, severity, until, created_at FROM announcements \
-         WHERE created_at >= ? ORDER BY created_at DESC, id DESC",
-    )
+    sqlx::query_as::<_, Announcement>(concat!(
+        "SELECT ",
+        announcement_columns!(),
+        " FROM announcements WHERE created_at >= ? ORDER BY created_at DESC, id DESC"
+    ))
     .bind(since)
     .fetch_all(pool)
     .await
@@ -1198,10 +1272,11 @@ pub async fn announcements_since(pool: &SqlitePool, since: i64) -> sqlx::Result<
 ///
 /// Returns an error if the query fails.
 pub async fn silences_since(pool: &SqlitePool, since: i64) -> sqlx::Result<Vec<Silence>> {
-    sqlx::query_as::<_, Silence>(
-        "SELECT id, monitor_id, until, reason, created_at FROM silences \
-         WHERE created_at >= ? ORDER BY created_at DESC, id DESC",
-    )
+    sqlx::query_as::<_, Silence>(concat!(
+        "SELECT ",
+        silence_columns!(),
+        " FROM silences WHERE created_at >= ? ORDER BY created_at DESC, id DESC"
+    ))
     .bind(since)
     .fetch_all(pool)
     .await
@@ -1341,10 +1416,11 @@ pub async fn is_silenced(pool: &SqlitePool, monitor_id: &str, now: i64) -> sqlx:
 ///
 /// Returns an error if the query fails.
 pub async fn active_silences(pool: &SqlitePool, now: i64) -> sqlx::Result<Vec<Silence>> {
-    sqlx::query_as::<_, Silence>(
-        "SELECT id, monitor_id, until, reason, created_at FROM silences \
-         WHERE until > ? ORDER BY until ASC",
-    )
+    sqlx::query_as::<_, Silence>(concat!(
+        "SELECT ",
+        silence_columns!(),
+        " FROM silences WHERE until > ? ORDER BY until ASC"
+    ))
     .bind(now)
     .fetch_all(pool)
     .await
@@ -1356,12 +1432,11 @@ pub async fn active_silences(pool: &SqlitePool, now: i64) -> sqlx::Result<Vec<Si
 ///
 /// Returns an error if the deletion fails.
 pub async fn clear_silences(pool: &SqlitePool, now: i64) -> sqlx::Result<u64> {
-    let active = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM silences WHERE until > ?")
-        .bind(now)
-        .fetch_one(pool)
+    // One statement, so the count matches the rows actually deleted.
+    let deleted: Vec<i64> = sqlx::query_scalar("DELETE FROM silences RETURNING until")
+        .fetch_all(pool)
         .await?;
-    sqlx::query("DELETE FROM silences").execute(pool).await?;
-    Ok(u64::try_from(active).unwrap_or(0))
+    Ok(count_active(deleted.into_iter().map(Some), now))
 }
 
 /// Drop silences that have expired before `cutoff`.
@@ -1385,12 +1460,31 @@ async fn prune_silences(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
 pub async fn backup_into(database_path: &str, dest: &str) -> anyhow::Result<()> {
     use anyhow::Context as _;
 
-    // VACUUM INTO requires a fresh file; checking first gives a clearer error
-    // than SQLite's "output file already exists".
-    anyhow::ensure!(
-        !std::path::Path::new(dest).exists(),
-        "destination {dest} already exists; refusing to overwrite a backup"
-    );
+    // Claim the destination first, empty and owner-only (0600) like the live
+    // database: VACUUM INTO accepts an empty file and keeps its mode, so the
+    // snapshot is never readable at the process umask, not even briefly.
+    // `create_new` also makes the "never overwrite a backup" check atomic.
+    let target = dest.to_owned();
+    match tokio::task::spawn_blocking(move || create_private(&target)).await? {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            anyhow::bail!("destination {dest} already exists; refusing to overwrite a backup")
+        }
+        Err(err) => return Err(err).with_context(|| format!("creating {dest}")),
+    }
+
+    let copied = vacuum_into(database_path, dest).await;
+    if copied.is_err() {
+        // Don't leave the empty placeholder behind: it would block a retry.
+        let target = dest.to_owned();
+        let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(target)).await;
+    }
+    copied
+}
+
+async fn vacuum_into(database_path: &str, dest: &str) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
     let options = SqliteConnectOptions::new()
         .filename(database_path)
         .read_only(true)
@@ -1400,23 +1494,13 @@ pub async fn backup_into(database_path: &str, dest: &str) -> anyhow::Result<()> 
         .connect_with(options)
         .await
         .with_context(|| format!("opening {database_path} read-only"))?;
-    sqlx::query("VACUUM INTO ?")
+    let copied = sqlx::query("VACUUM INTO ?")
         .bind(dest)
         .execute(&pool)
         .await
-        .with_context(|| format!("copying into {dest}"))?;
+        .with_context(|| format!("copying into {dest}"));
     pool.close().await;
-
-    // The live database is created 0600 (it holds failure snippets and incident
-    // detail); the snapshot deserves the same, but SQLite creates it at the
-    // process umask - tighten it after the fact.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("setting permissions on {dest}"))?;
-    }
-    Ok(())
+    copied.map(|_| ())
 }
 
 /// Aggregate raw checks into hourly buckets for long-term storage.
@@ -1554,7 +1638,8 @@ pub fn derive_status(recent: &[Latest], threshold: i64) -> &'static str {
 }
 
 /// Background task: periodically prune each monitor's history to its retention,
-/// and drop any data left behind by monitors removed from the config. A shutdown
+/// and drop any data left behind by monitors removed from the config (after a
+/// grace period, see [`delete_orphans`]). A shutdown
 /// signal lets it stop between ticks instead of being aborted.
 #[must_use]
 pub fn spawn_pruner(
@@ -1669,7 +1754,7 @@ async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
         .await?;
     }
 
-    delete_orphans(pool, config).await?;
+    delete_orphans(pool, config, now).await?;
 
     // Keep the planner statistics current as the tables grow and the prunes
     // reshape them - same rationale as the call in [`connect`]; cheap unless
@@ -1692,9 +1777,16 @@ const ORPHAN_TABLES: [&str; 9] = [
     "checks_daily",
 ];
 
-/// Drop everything left behind by monitors removed from the config. Both
-/// monitor ids and watched peers' listen ids are kept, so the sweep never
-/// deletes a peer's heartbeat history.
+/// Drop everything left behind by monitors removed from the config - once they
+/// have been gone for [`ORPHAN_GRACE_SECS`]. Both monitor ids and watched
+/// peers' listen ids are kept, so the sweep never deletes a peer's heartbeat
+/// history.
+///
+/// The first sweep that finds an id missing records when (`orphan_since:<id>`
+/// in `meta`) and logs a warning naming the ids and the deletion date; an id
+/// that comes back before then simply loses its mark. Only a mark older than
+/// the grace period deletes anything, so a rename or a monitor commented out
+/// for a while keeps its year of history.
 ///
 /// The sweep first *reads* which ids each table actually holds and only then
 /// deletes the orphaned ones, one targeted `DELETE` per id. The previous
@@ -1702,8 +1794,8 @@ const ORPHAN_TABLES: [&str; 9] = [
 /// inside a write transaction - on `checks` that held the write lock for
 /// seconds every prune tick, timing out the scheduler's inserts, all to
 /// usually delete nothing. Reads don't block writers under WAL, and the
-/// targeted deletes only run on a config change that removed a monitor.
-async fn delete_orphans(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
+/// targeted deletes only run once a removed monitor's grace has run out.
+async fn delete_orphans(pool: &SqlitePool, config: &Config, now: i64) -> anyhow::Result<()> {
     let keep: std::collections::HashSet<&str> = config
         .monitors
         .iter()
@@ -1716,6 +1808,9 @@ async fn delete_orphans(pool: &SqlitePool, config: &Config) -> anyhow::Result<()
                 .map(Peer::listen_id),
         )
         .collect();
+
+    // Orphaned id -> the tables still holding its rows.
+    let mut orphans: BTreeMap<String, Vec<&'static str>> = BTreeMap::new();
     for table in ORPHAN_TABLES {
         // A plain DISTINCT read: on `checks` it walks the covering index
         // (fractions of a second even at millions of rows) and, being a read,
@@ -1731,14 +1826,64 @@ async fn delete_orphans(pool: &SqlitePool, config: &Config) -> anyhow::Result<()
         .await?;
         for id in present {
             if !keep.contains(id.as_str()) {
-                sqlx::query(sqlx::AssertSqlSafe(format!(
-                    "DELETE FROM {table} WHERE monitor_id = ?"
-                )))
-                .bind(&id)
-                .execute(pool)
-                .await?;
+                orphans.entry(id).or_default().push(table);
             }
         }
+    }
+
+    // When each orphan was first seen missing. Marks of ids that came back
+    // (or whose rows are gone anyway) are dropped, so a later removal starts
+    // a fresh grace period.
+    let marks: Vec<(String, String)> =
+        sqlx::query_as("SELECT key, value FROM meta WHERE substr(key, 1, length(?1)) = ?1")
+            .bind(ORPHAN_META_PREFIX)
+            .fetch_all(pool)
+            .await?;
+    let mut missing_since: HashMap<String, i64> = HashMap::new();
+    for (key, value) in marks {
+        let id = &key[ORPHAN_META_PREFIX.len()..];
+        match value.parse::<i64>() {
+            Ok(since) if orphans.contains_key(id) => {
+                missing_since.insert(id.to_owned(), since);
+            }
+            _ => meta_delete(pool, &key).await?,
+        }
+    }
+
+    let mut scheduled = Vec::new();
+    for (id, tables) in &orphans {
+        let key = format!("{ORPHAN_META_PREFIX}{id}");
+        match missing_since.get(id) {
+            None => {
+                meta_set(pool, &key, &now.to_string()).await?;
+                scheduled.push(id.as_str());
+            }
+            Some(&since) if now - since >= ORPHAN_GRACE_SECS => {
+                for table in tables {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "DELETE FROM {table} WHERE monitor_id = ?"
+                    )))
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                }
+                meta_delete(pool, &key).await?;
+                tracing::warn!(
+                    monitor = %id,
+                    "deleted the history of a monitor missing from the config since {}",
+                    crate::fmt::utc(since)
+                );
+            }
+            Some(_) => {}
+        }
+    }
+    if !scheduled.is_empty() {
+        tracing::warn!(
+            "monitors no longer in the config: {}; their history will be deleted after {} \
+             unless they are restored",
+            scheduled.join(", "),
+            crate::fmt::utc(now + ORPHAN_GRACE_SECS)
+        );
     }
     Ok(())
 }
@@ -1892,6 +2037,15 @@ mod tests {
         assert_eq!(points.len(), 2);
         assert_eq!(points[0].latency_ms, 20); // (10 + 30) / 2
         assert_eq!(points[1].latency_ms, 80);
+
+        // Buckets are anchored to the epoch, not to `since`: moving the window
+        // start must not regroup the rows (t=90 and t=110 straddle an epoch
+        // boundary, but would share a bucket anchored at t=50).
+        insert(&pool, "n", 90, 1, Some(10)).await;
+        insert(&pool, "n", 110, 1, Some(30)).await;
+        let shifted = latency_sparkline_all(&pool, 50, 100).await.unwrap();
+        let points: Vec<i64> = shifted["n"].iter().map(|p| p.latency_ms).collect();
+        assert_eq!(points, vec![10, 30]);
     }
 
     #[tokio::test]
@@ -1915,7 +2069,9 @@ mod tests {
         insert(&pool, "m", day0 + 10, 0, None).await;
         insert(&pool, "m", day0 + SECONDS_PER_DAY, 1, Some(7)).await;
 
-        let rows = daily(&pool, "m", 0).await.unwrap();
+        let rows = &daily_all(&pool, 0, day0 + 2 * SECONDS_PER_DAY)
+            .await
+            .unwrap()["m"];
         assert_eq!(rows.len(), 2);
         assert_eq!(
             (rows[0].day.as_str(), rows[0].up, rows[0].down),
@@ -1976,10 +2132,6 @@ mod tests {
         assert_eq!(availability.get("a"), Some(&(1, 2))); // 1 up of 2
         assert_eq!(availability.get("b"), Some(&(1, 1)));
 
-        let latency = latency_all(&pool, 0).await.unwrap();
-        assert_eq!(latency["a"].len(), 1); // the down check has no latency
-        assert_eq!(latency["b"][0].latency_ms, 20);
-
         let daily = daily_all(&pool, 0, 300).await.unwrap();
         assert!(daily.contains_key("a") && daily.contains_key("b"));
 
@@ -2013,12 +2165,135 @@ mod tests {
 
         prune(&pool, &config).await.unwrap();
 
-        // The orphan monitor's data is gone entirely.
-        assert!(recent_checks(&pool, "gone", 10).await.unwrap().is_empty());
-        assert_eq!(cert_not_after(&pool, "gone").await.unwrap(), None);
-
         // The retained monitor keeps only its recent row.
         assert_eq!(latency_series(&pool, "keep", 0, 1).await.unwrap().len(), 1);
+
+        // The orphan is only scheduled for deletion: its data survives the
+        // grace period, and the first sighting is recorded.
+        assert_eq!(recent_checks(&pool, "gone", 10).await.unwrap().len(), 1);
+        let mark = meta_get(&pool, "orphan_since:gone").await.unwrap();
+        assert!(mark.is_some_and(|at| at.parse::<i64>().unwrap() >= now));
+
+        // A week later the sweep deletes it entirely, mark included.
+        delete_orphans(&pool, &config, now + ORPHAN_GRACE_SECS + 60)
+            .await
+            .unwrap();
+        assert!(recent_checks(&pool, "gone", 10).await.unwrap().is_empty());
+        assert_eq!(cert_not_after(&pool, "gone").await.unwrap(), None);
+        assert_eq!(meta_get(&pool, "orphan_since:gone").await.unwrap(), None);
+        assert_eq!(recent_checks(&pool, "keep", 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_orphan_that_comes_back_keeps_its_history() {
+        let pool = memory_pool().await;
+        let now = 1_000_000;
+        insert(&pool, "api", now - 10, 1, Some(5)).await;
+        let config_with = |ids: &[&str]| -> Config {
+            let [id] = ids else { unreachable!() };
+            toml::from_str(&format!(
+                "[page]\n[server]\n[[monitors]]\nid = \"{id}\"\nname = \"{id}\"\n\
+                 target = \"https://example.com\"\ninterval_secs = 60\n"
+            ))
+            .unwrap()
+        };
+
+        // Renamed away: marked, not deleted.
+        delete_orphans(&pool, &config_with(&["other"]), now)
+            .await
+            .unwrap();
+        assert!(meta_get(&pool, "orphan_since:api").await.unwrap().is_some());
+
+        // Back before the grace ran out: the mark is cleared, the data kept.
+        delete_orphans(&pool, &config_with(&["api"]), now + 3600)
+            .await
+            .unwrap();
+        assert_eq!(meta_get(&pool, "orphan_since:api").await.unwrap(), None);
+
+        // Removed again much later: a fresh grace period starts then, so the
+        // old (cleared) sighting can never shortcut it.
+        let later = now + 30 * SECONDS_PER_DAY;
+        delete_orphans(&pool, &config_with(&["other"]), later)
+            .await
+            .unwrap();
+        delete_orphans(&pool, &config_with(&["other"]), later + 3600)
+            .await
+            .unwrap();
+        assert_eq!(recent_checks(&pool, "api", 10).await.unwrap().len(), 1);
+        assert_eq!(
+            meta_get(&pool, "orphan_since:api").await.unwrap(),
+            Some(later.to_string())
+        );
+    }
+
+    #[test]
+    fn upsert_sql_spells_out_every_column() {
+        assert_eq!(
+            upsert_sql!("certs", "monitor_id", "not_after", "checked_at"),
+            "INSERT INTO certs (monitor_id, not_after, checked_at) VALUES (?, ?, ?) \
+             ON CONFLICT(monitor_id) DO UPDATE SET \
+             not_after = excluded.not_after, checked_at = excluded.checked_at"
+        );
+        assert_eq!(
+            upsert_sql!("meta", "key", "value"),
+            "INSERT INTO meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        );
+    }
+
+    #[tokio::test]
+    async fn incidents_between_selects_every_overlap() {
+        let pool = memory_pool().await;
+        let span = |monitor: &str, started: i64, ended: Option<i64>| {
+            sqlx::query(
+                "INSERT INTO incidents (monitor_id, started_at, ended_at, created_at) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(monitor.to_owned())
+            .bind(started)
+            .bind(ended)
+            .bind(started)
+        };
+        span("before", 10, Some(90)).execute(&pool).await.unwrap();
+        span("straddles-start", 50, Some(150))
+            .execute(&pool)
+            .await
+            .unwrap();
+        span("inside", 120, Some(130)).execute(&pool).await.unwrap();
+        span("open", 140, None).execute(&pool).await.unwrap();
+        span("straddles-end", 190, Some(260))
+            .execute(&pool)
+            .await
+            .unwrap();
+        span("after", 200, Some(210)).execute(&pool).await.unwrap();
+
+        let ids: Vec<String> = incidents_between(&pool, 100, 200)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|incident| incident.monitor_id)
+            .collect();
+        // Newest first; ended exactly at `since` or started at `until` is out.
+        assert_eq!(ids, ["straddles-end", "open", "inside", "straddles-start"]);
+    }
+
+    #[tokio::test]
+    async fn daily_all_ignores_data_past_until() {
+        let pool = memory_pool().await;
+        let day0 = 10 * SECONDS_PER_DAY;
+        insert(&pool, "m", day0 + 10, 1, Some(5)).await;
+        insert(&pool, "m", day0 + SECONDS_PER_DAY + 10, 0, None).await;
+        downsample_hourly(&pool, day0 + 3 * SECONDS_PER_DAY)
+            .await
+            .unwrap();
+        insert(&pool, "m", day0 + 3 * SECONDS_PER_DAY + 10, 0, None).await;
+
+        // Only the first day: neither the later bucket nor the raw tail.
+        let bars = daily_all(&pool, 0, day0 + SECONDS_PER_DAY - 1)
+            .await
+            .unwrap();
+        assert_eq!(bars["m"].len(), 1);
+        assert_eq!((bars["m"][0].up, bars["m"][0].down), (1, 0));
     }
 
     #[tokio::test]
@@ -2378,6 +2653,25 @@ mod tests {
         let pool = connect(src_s).await.unwrap();
         insert(&pool, "m", 100, 1, Some(10)).await;
         backup_into(src_s, dest_s).await.unwrap();
+
+        // Owner-only, like the live database (created so, never chmod-ed).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        }
+
+        // A failed copy leaves no empty placeholder behind.
+        let missing = dir.join(format!("hora-test-backup-none-{}.db", std::process::id()));
+        let failed = dir.join(format!("hora-test-backup-fail-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&failed);
+        assert!(
+            backup_into(missing.to_str().unwrap(), failed.to_str().unwrap())
+                .await
+                .is_err()
+        );
+        assert!(!failed.exists());
 
         // The snapshot is a self-sufficient database with the data.
         let copy = connect(dest_s).await.unwrap();

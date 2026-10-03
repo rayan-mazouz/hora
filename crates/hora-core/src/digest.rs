@@ -16,7 +16,7 @@ use tracing::{info, warn};
 use crate::SECONDS_PER_DAY;
 use crate::config::Config;
 use crate::notifications::Notifiers;
-use crate::{db, slo};
+use crate::{db, fmt, slo};
 
 /// Where the last-sent timestamp persists, so a restart neither double-sends
 /// nor forgets - and a send missed while the daemon was down catches up.
@@ -154,16 +154,16 @@ pub async fn build_summary(
     now: i64,
 ) -> anyhow::Result<(String, String)> {
     let since = now - DIGEST_DAYS * SECONDS_PER_DAY;
-    let period = format!("{} \u{2192} {}", format_date(since), format_date(now));
+    let period = format!(
+        "{} \u{2192} {}",
+        fmt::short_date(since),
+        fmt::short_date(now)
+    );
 
     let availability = db::availability_all(pool, since).await?;
     // Incidents that overlapped the window: still open, ended inside it, or
-    // started inside it.
-    let incidents: Vec<db::Incident> = db::recent_incidents(pool, 500)
-        .await?
-        .into_iter()
-        .filter(|incident| incident.ended_at.is_none_or(|ended| ended >= since))
-        .collect();
+    // started inside it. Selected in SQL, so a busy week is never truncated.
+    let incidents = db::incidents_between(pool, since, now).await?;
     let ongoing = incidents.iter().filter(|i| i.ended_at.is_none()).count();
 
     let (mut up_sum, mut total_sum) = (0_i64, 0_i64);
@@ -173,7 +173,7 @@ pub async fn build_summary(
         up_sum += up;
         total_sum += total;
 
-        let mut line = format!("- {}: {}", monitor.name, format_pct(up, total));
+        let mut line = format!("- {}: {}", monitor.name, fmt::pct(up, total));
         let count = incidents
             .iter()
             .filter(|incident| incident.monitor_id == monitor.id)
@@ -192,7 +192,7 @@ pub async fn build_summary(
     let plural = if incident_count == 1 { "" } else { "s" };
     let mut summary = format!(
         "{} overall, {incident_count} incident{plural}",
-        format_pct(up_sum, total_sum)
+        fmt::pct(up_sum, total_sum)
     );
     if ongoing > 0 {
         let _ = write!(summary, " ({ongoing} ongoing)");
@@ -225,8 +225,7 @@ async fn budget_phrase(
         return String::new();
     };
     let budget = slo::budget_minutes(window_days, slo_bp);
-    let covered = i64::from(window_days) * 24 * 60;
-    let remaining = budget - slo::consumed_minutes(available, total, covered);
+    let remaining = slo::remaining_minutes(window_days, slo_bp, available, total);
     if remaining >= 0 {
         format!(", budget {remaining}m of {budget}m left ({window_days}d)")
     } else {
@@ -234,34 +233,9 @@ async fn budget_phrase(
     }
 }
 
-/// Uptime percentage with two decimals, in integer math ("99.97%").
-fn format_pct(up: i64, total: i64) -> String {
-    if total == 0 {
-        return "no checks".to_owned();
-    }
-    // Rounded to the nearest basis point.
-    let basis_points = (up * 10_000 + total / 2) / total;
-    format!("{}.{:02}%", basis_points / 100, basis_points % 100)
-}
-
-fn format_date(timestamp: i64) -> String {
-    chrono::DateTime::from_timestamp(timestamp, 0).map_or_else(
-        || timestamp.to_string(),
-        |dt| dt.format("%b %d").to_string(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn percentages_use_integer_math() {
-        assert_eq!(format_pct(0, 0), "no checks");
-        assert_eq!(format_pct(10, 10), "100.00%");
-        assert_eq!(format_pct(9997, 10_000), "99.97%");
-        assert_eq!(format_pct(1, 3), "33.33%");
-    }
 
     #[test]
     fn next_occurrence_is_strictly_after_last_sent() {
