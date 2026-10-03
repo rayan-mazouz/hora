@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn upstreams_empty_for_root() {
         let monitors = vec![monitor("db", None)];
-        assert!(transitive_upstreams(&monitors, "db").is_empty());
+        assert_eq!(transitive_upstreams(&monitors, "db"), Vec::<&str>::new());
     }
 
     #[test]
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn dependents_empty_for_leaf() {
         let monitors = vec![monitor("db", None), monitor("api", Some(vec!["db"]))];
-        assert!(transitive_dependents(&monitors, "api").is_empty());
+        assert_eq!(transitive_dependents(&monitors, "api"), Vec::<&str>::new());
     }
 
     #[test]

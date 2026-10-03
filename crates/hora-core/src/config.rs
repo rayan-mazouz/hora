@@ -2455,7 +2455,7 @@ mod tests {
         "#,
         );
         assert_eq!(config.monitors[0].kind, Kind::Push);
-        assert!(config.monitors[0].target.is_empty());
+        assert_eq!(config.monitors[0].target, "");
         assert_eq!(
             config.monitors[0].push_token.as_ref().map(AsRef::as_ref),
             Some("secret")
