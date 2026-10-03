@@ -9,12 +9,18 @@ FROM --platform=$BUILDPLATFORM ghcr.io/blackdex/rust-musl:aarch64-musl-stable AS
 ENV CARGO_BUILD_TARGET=aarch64-unknown-linux-musl
 
 FROM build-${TARGETARCH} AS builder
+ARG TARGETARCH
 USER root
 WORKDIR /build
 COPY . .
 # Migrations and templates are embedded at compile time; the binary is static.
-# --locked honours the committed Cargo.lock for reproducible builds.
-RUN cargo build --release --locked -p hora \
+# --locked honours the committed Cargo.lock for reproducible builds. The cache
+# mounts keep the crate registry and incremental artifacts across local builds
+# (per architecture for target/); the binary is copied out because a cache
+# mount is not part of the image layer.
+RUN --mount=type=cache,id=hora-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=hora-target-${TARGETARCH},target=/build/target,sharing=locked \
+    cargo build --release --locked -p hora \
     && cp "target/${CARGO_BUILD_TARGET}/release/hora" /hora
 
 # --- Runtime stage: Alpine + CA certs (a few MB) --------------------------
@@ -37,6 +43,8 @@ ENV HORA_CONFIG=/etc/hora/config.toml \
 VOLUME ["/data"]
 EXPOSE 8787
 USER 10001:10001
+# /healthz answers 503 when the node is degraded (stalled scheduler, broken
+# database), which makes wget exit non-zero and the container unhealthy.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
-    CMD wget -qO- http://127.0.0.1:8787/healthz || exit 1
+    CMD wget -qO /dev/null http://127.0.0.1:8787/healthz || exit 1
 ENTRYPOINT ["/usr/local/bin/hora"]
