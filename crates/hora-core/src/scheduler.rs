@@ -444,18 +444,10 @@ async fn correlated_event(pool: &SqlitePool, now: i64) -> Option<String> {
     }
 }
 
-/// `"deploy api v2.3, 3m before"` - the phrase stored on the incident and
+/// `"deploy api v2.3, 3m 10s before"` - the phrase stored on the incident and
 /// appended to the alert (each channel prefixes its own "recent change:").
 fn event_phrase(title: &str, age_secs: i64) -> String {
-    let age = age_secs.max(0);
-    let ago = if age >= 3600 {
-        format!("{}h{:02}m", age / 3600, (age % 3600) / 60)
-    } else if age >= 60 {
-        format!("{}m", age / 60)
-    } else {
-        format!("{age}s")
-    };
-    format!("{title}, {ago} before")
+    format!("{title}, {} before", crate::fmt::duration(age_secs))
 }
 
 /// Live alert settings for this tick, read fresh so a maintenance window or a
@@ -644,9 +636,7 @@ async fn fire_burn_alert(
     // No estimate beats a wrong one: unreadable history drops the ETA only.
     let exhausted_in_secs = match db::availability(pool, &monitor.id, since).await {
         Ok((available, total)) => {
-            let covered = i64::from(window_days) * 24 * 60;
-            let remaining = slo::budget_minutes(window_days, slo_bp)
-                - slo::consumed_minutes(available, total, covered);
+            let remaining = slo::remaining_minutes(window_days, slo_bp, available, total);
             slo::exhausted_in_secs(remaining, burn_x10, slo_bp)
         }
         Err(_) => None,
@@ -991,11 +981,11 @@ mod tests {
         );
         assert_eq!(
             event_phrase("deploy api v2.3", 180),
-            "deploy api v2.3, 3m before"
+            "deploy api v2.3, 3m 0s before"
         );
         assert_eq!(
             event_phrase("deploy api v2.3", 4380),
-            "deploy api v2.3, 1h13m before"
+            "deploy api v2.3, 1h 13m before"
         );
         // A clock skew can't produce a negative age.
         assert_eq!(event_phrase("x", -5), "x, 0s before");
