@@ -157,7 +157,7 @@ pub(crate) async fn build_summary(
         vantage,
     };
 
-    let monitors = cards(&monitors, &ctx, &data, config, &visibility);
+    let monitors = cards(&monitors, &ctx, &data, config, &visibility).await;
 
     let overall = monitors
         .iter()
@@ -207,24 +207,32 @@ pub(crate) async fn build_summary(
     }
 }
 
-/// Every monitor's card, with the maintenance window it is in.
-fn cards(
+/// Cards built between two yields to the runtime in [`cards`].
+const CARDS_PER_YIELD: usize = 64;
+
+/// Every monitor's card, with the maintenance window it is in. Thousands of
+/// cards are a second of CPU: the build yields every [`CARDS_PER_YIELD`] so
+/// that, on a one-CPU box (a one-worker runtime), the scheduler's probes and
+/// inserts are not held behind it.
+async fn cards(
     monitors: &[&Monitor],
     ctx: &SummaryCtx,
     data: &MonitorData<'_>,
     config: &Config,
     visibility: &Visibility<'_>,
 ) -> Vec<Arc<MonitorView>> {
-    monitors
-        .iter()
-        .map(|monitor| {
+    let mut cards = Vec::with_capacity(monitors.len());
+    for chunk in monitors.chunks(CARDS_PER_YIELD) {
+        for monitor in chunk {
             let mut view = build_monitor_view(monitor, ctx, data, &config.monitors, visibility);
             view.maintenance = config
                 .active_maintenance(&monitor.id, ctx.now)
                 .map(|window| window.title.clone());
-            Arc::new(view)
-        })
-        .collect()
+            cards.push(Arc::new(view));
+        }
+        tokio::task::yield_now().await;
+    }
+    cards
 }
 
 /// Fill a summary's "Recent incidents" (the newest ones this audience may
