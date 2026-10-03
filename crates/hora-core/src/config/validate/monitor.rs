@@ -30,7 +30,7 @@ fn validate_exec_io(monitor: &Monitor) -> anyhow::Result<()> {
 }
 
 /// Validate a monitor's target, latency thresholds and headers (split out of
-/// [`validate`] to keep it small).
+/// [`validate`](super::validate) to keep it small).
 pub(super) fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
     // Parse the target now, so a typo fails at load instead of at probe time.
     match monitor.kind {

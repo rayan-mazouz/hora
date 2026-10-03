@@ -12,6 +12,7 @@ mod exec;
 pub mod fmt;
 pub mod http;
 pub mod import;
+pub mod maintenance;
 pub mod notifications;
 pub mod peer;
 pub mod postmortem;

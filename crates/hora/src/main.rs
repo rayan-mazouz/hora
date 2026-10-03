@@ -1496,7 +1496,8 @@ async fn serve() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     );
 
-    let prune_task = hora_core::db::spawn_pruner(&pool, handle.config.clone(), shutdown_rx);
+    let prune_task =
+        hora_core::maintenance::spawn_pruner(&pool, handle.config.clone(), shutdown_rx);
 
     let bind = handle.config.borrow().server.bind.clone();
     let listener = tokio::net::TcpListener::bind(&bind)
