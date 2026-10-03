@@ -180,7 +180,11 @@ pub struct Server {
 
 /// A named notification channel. Several channels may share a `type` (e.g. two
 /// Discord webhooks), and a monitor routes to specific ones by `name`.
-#[derive(Clone, Deserialize)]
+///
+/// `Debug` is derived: every credential field is a [`Secret`], which redacts
+/// itself, so a `{config:?}` in a log line or panic message never leaks a
+/// token or webhook URL (pinned by `channel_debug_redacts_secrets`).
+#[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Channel {
     Telegram {
@@ -295,96 +299,6 @@ impl Channel {
             }
             Self::Gotify { url, token, .. } => !url.is_empty() && !token.is_empty(),
             Self::Pushover { token, user, .. } => !token.is_empty() && !user.is_empty(),
-        }
-    }
-}
-
-// Manual `Debug` so channel secrets (tokens, webhook URLs) never leak through a
-// `{config:?}` in a log line or panic message.
-impl std::fmt::Debug for Channel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Telegram {
-                name,
-                token,
-                chat_id,
-            } => f
-                .debug_struct("Telegram")
-                .field("name", name)
-                .field("token", token)
-                .field("chat_id", chat_id)
-                .finish(),
-            Self::Discord { name, webhook_url } => f
-                .debug_struct("Discord")
-                .field("name", name)
-                .field("webhook_url", webhook_url)
-                .finish(),
-            Self::Slack { name, webhook_url } => f
-                .debug_struct("Slack")
-                .field("name", name)
-                .field("webhook_url", webhook_url)
-                .finish(),
-            Self::Webhook { name, url } => f
-                .debug_struct("Webhook")
-                .field("name", name)
-                .field("url", url)
-                .finish(),
-            Self::Matrix {
-                name,
-                homeserver,
-                token,
-                room_id,
-            } => f
-                .debug_struct("Matrix")
-                .field("name", name)
-                .field("homeserver", homeserver)
-                .field("token", token)
-                .field("room_id", room_id)
-                .finish(),
-            Self::FreeMobile { name, user, pass } => f
-                .debug_struct("FreeMobile")
-                .field("name", name)
-                .field("user", user)
-                .field("pass", pass)
-                .finish(),
-            Self::Email {
-                name,
-                host,
-                port,
-                username,
-                password,
-                from,
-                to,
-                implicit_tls,
-            } => f
-                .debug_struct("Email")
-                .field("name", name)
-                .field("host", host)
-                .field("port", port)
-                .field("username", username)
-                .field("password", password)
-                .field("from", from)
-                .field("to", to)
-                .field("implicit_tls", implicit_tls)
-                .finish(),
-            Self::Ntfy { name, url, token } => f
-                .debug_struct("Ntfy")
-                .field("name", name)
-                .field("url", url)
-                .field("token", token)
-                .finish(),
-            Self::Gotify { name, url, token } => f
-                .debug_struct("Gotify")
-                .field("name", name)
-                .field("url", url)
-                .field("token", token)
-                .finish(),
-            Self::Pushover { name, token, user } => f
-                .debug_struct("Pushover")
-                .field("name", name)
-                .field("token", token)
-                .field("user", user)
-                .finish(),
         }
     }
 }
@@ -563,9 +477,10 @@ pub struct Peer {
     #[serde(default)]
     pub expect_every_secs: Option<u64>,
     /// Where other peers poll this peer's `/healthz` for quorum. Defaults to the
-    /// origin (`scheme://host[:port]`) of `ping_url` plus `/healthz`.
+    /// origin (`scheme://host[:port]`) of `ping_url` plus `/healthz`. A
+    /// [`Secret`] like `ping_url`: it may carry a token in its query string.
     #[serde(default)]
-    pub witness_url: Option<String>,
+    pub witness_url: Option<Secret>,
     /// Restrict this peer's alerts to these channel names. Unset = every channel.
     #[serde(default)]
     pub notify: Option<Vec<String>>,
@@ -595,7 +510,7 @@ impl Peer {
     #[must_use]
     pub fn effective_witness_url(&self) -> Option<String> {
         if let Some(url) = &self.witness_url {
-            return Some(url.clone());
+            return Some(url.as_ref().to_owned());
         }
         self.api_origin().map(|origin| format!("{origin}/healthz"))
     }
@@ -694,6 +609,166 @@ pub struct ReleaseWatch {
     pub current_query: Option<String>,
 }
 
+/// A config string parsed once, at load, into the typed value the probe uses
+/// on every tick (a compiled regex, a `JSONPath`, a socket address) instead of
+/// re-parsing it per probe.
+///
+/// A malformed value does *not* fail deserialization: the error is kept and
+/// reported by validation, which can name the monitor - serde's error path
+/// only says `monitors.number_regex`, not which `[[monitors]]` entry is wrong.
+/// Equality (hot-reload change detection) and `Debug` go by the raw text.
+#[derive(Clone)]
+pub struct Parsed<T> {
+    raw: String,
+    value: Result<T, String>,
+}
+
+/// How a [`Parsed`] field turns its raw text into a value.
+pub trait ParseField: Sized {
+    /// Parse the raw config text.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable reason (validation prefixes the monitor and field)
+    /// when `raw` is not a valid value.
+    fn parse_field(raw: &str) -> Result<Self, String>;
+}
+
+impl<T: ParseField> Parsed<T> {
+    /// Parse `raw` now, keeping the error (if any) for validation.
+    #[must_use]
+    pub fn new(raw: impl Into<String>) -> Self {
+        let raw = raw.into();
+        let value = T::parse_field(&raw);
+        Self { raw, value }
+    }
+}
+
+impl<T> Parsed<T> {
+    /// The text as written in the config.
+    #[must_use]
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    /// The parsed value; `None` only for a malformed value, which validation
+    /// rejects before any probe runs.
+    #[must_use]
+    pub fn get(&self) -> Option<&T> {
+        self.value.as_ref().ok()
+    }
+
+    /// Why the raw text did not parse, if it did not.
+    #[must_use]
+    pub fn error(&self) -> Option<&str> {
+        self.value.as_ref().err().map(String::as_str)
+    }
+}
+
+impl<T> PartialEq for Parsed<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl<T> Eq for Parsed<T> {}
+
+impl<T> std::fmt::Debug for Parsed<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.raw, f)
+    }
+}
+
+impl<'de, T: ParseField> Deserialize<'de> for Parsed<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::new)
+    }
+}
+
+impl ParseField for regex::Regex {
+    fn parse_field(raw: &str) -> Result<Self, String> {
+        Self::new(raw).map_err(|err| err.to_string())
+    }
+}
+
+impl ParseField for serde_json_path::JsonPath {
+    fn parse_field(raw: &str) -> Result<Self, String> {
+        Self::parse(raw).map_err(|err| err.to_string())
+    }
+}
+
+/// A DNS resolver address: an IP and a port, IPv6 bracketed. A hostname is
+/// refused rather than resolved at load: it would be looked up through some
+/// *other* resolver, and silently go stale when its address changes.
+impl ParseField for std::net::SocketAddr {
+    fn parse_field(raw: &str) -> Result<Self, String> {
+        if let Ok(addr) = raw.parse() {
+            return Ok(addr);
+        }
+        Err(if split_host_port(raw).is_some() {
+            "must be an IP address and port such as 9.9.9.9:53 or [2620:fe::fe]:53, not a hostname"
+        } else {
+            "must be host:port, e.g. 9.9.9.9:53 or [2620:fe::fe]:53"
+        }
+        .to_owned())
+    }
+}
+
+/// The DNS record types a dns monitor can query: the one list shared by the
+/// config, the probe and the public failure reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsRecord {
+    A,
+    Aaaa,
+    Cname,
+    Mx,
+    Ns,
+    Txt,
+    Srv,
+    Soa,
+    Ptr,
+}
+
+impl DnsRecord {
+    /// Every supported type.
+    pub const ALL: [Self; 9] = [
+        Self::A,
+        Self::Aaaa,
+        Self::Cname,
+        Self::Mx,
+        Self::Ns,
+        Self::Txt,
+        Self::Srv,
+        Self::Soa,
+        Self::Ptr,
+    ];
+
+    /// Uppercase name, as DNS tools (and the probe's failure reasons) spell it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::Aaaa => "AAAA",
+            Self::Cname => "CNAME",
+            Self::Mx => "MX",
+            Self::Ns => "NS",
+            Self::Txt => "TXT",
+            Self::Srv => "SRV",
+            Self::Soa => "SOA",
+            Self::Ptr => "PTR",
+        }
+    }
+}
+
+impl ParseField for DnsRecord {
+    fn parse_field(raw: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|record| record.as_str().eq_ignore_ascii_case(raw.trim()))
+            .ok_or_else(|| format!("unsupported dns_record type {raw:?}"))
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Monitor {
@@ -736,7 +811,7 @@ pub struct Monitor {
     pub keyword_invert: bool,
     /// HTTP body assertion: a `JSONPath` (RFC 9535) evaluated against a JSON response.
     #[serde(default)]
-    pub json_query: Option<String>,
+    pub json_query: Option<Parsed<serde_json_path::JsonPath>>,
     /// Value the [`json_query`](Self::json_query) result must equal (string compare).
     /// When unset, the query only has to match at least one node.
     #[serde(default)]
@@ -748,7 +823,7 @@ pub struct Monitor {
     /// [`number_max`](Self::number_max). Made for pages that render a gauge
     /// inline ("11 unique ships") with no JSON endpoint behind them.
     #[serde(default)]
-    pub number_regex: Option<String>,
+    pub number_regex: Option<Parsed<regex::Regex>>,
     /// Lowest value (inclusive) the [`number_regex`](Self::number_regex)
     /// extraction may report before the monitor goes down.
     #[serde(default)]
@@ -842,18 +917,21 @@ pub struct Monitor {
     /// the page). Authenticated viewers always see the full reason.
     #[serde(default)]
     pub public_error_detail: bool,
-    /// DNS monitor: the record type to query (e.g. `"A"`, `"AAAA"`, `"CNAME"`).
+    /// DNS monitor: the record type to query (e.g. `"A"`, `"AAAA"`, `"CNAME"`),
+    /// case-insensitive. Unset = `A`.
     #[serde(default)]
-    pub dns_record: Option<String>,
+    pub dns_record: Option<Parsed<DnsRecord>>,
     /// DNS monitor: the expected answer, comma-separated when several records
     /// are pinned, compared order-insensitively (hijack detection). When unset,
     /// any non-empty answer counts as up - no change detection, since answers
     /// rotate freely behind CDNs and round-robin records.
     #[serde(default)]
     pub dns_expected: Option<String>,
-    /// DNS monitor: custom resolver address (`host:port`). Unset = system default.
+    /// DNS monitor: custom resolver address, an IP and a port (`9.9.9.9:53`,
+    /// `[2620:fe::fe]:53`). Unset = system default. A hostname is refused: the
+    /// resolver's own address can't be looked up through itself.
     #[serde(default)]
-    pub dns_resolver: Option<String>,
+    pub dns_resolver: Option<Parsed<std::net::SocketAddr>>,
     /// TLS certificate pinning: hex-encoded SHA-256 of the leaf public key. When
     /// set, an alert fires if the key changes (MITM / unexpected renewal detection).
     #[serde(default)]
@@ -882,16 +960,17 @@ pub struct Monitor {
 }
 
 // Manual `Debug` (rather than derived) so credentials never leak: `target` and
-// `proxy` may embed `user:pass@`, and `headers`/`push_token` are `Secret` (which
-// self-redact). A `{:?}` of a `Monitor` - or of the whole `Config`, which derives
-// `Debug` and holds a `Vec<Monitor>` - is therefore safe to log.
+// `proxy` may embed `user:pass@` or a `?token=` query, and `headers`/`push_token`
+// are `Secret` (which self-redact). A `{:?}` of a `Monitor` - or of the whole
+// `Config`, which derives `Debug` and holds a `Vec<Monitor>` - is therefore safe
+// to log.
 impl std::fmt::Debug for Monitor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Monitor")
             .field("id", &self.id)
             .field("name", &self.name)
             .field("kind", &self.kind)
-            .field("target", &redact_url_credentials(&self.target))
+            .field("target", &redact_url_secrets(&self.target))
             .field("interval_secs", &self.interval_secs)
             .field("timeout_secs", &self.timeout_secs)
             .field("expected_status", &self.expected_status)
@@ -911,7 +990,7 @@ impl std::fmt::Debug for Monitor {
             .field("probe_retries", &self.probe_retries)
             .field("dual_stack", &self.dual_stack)
             .field("notify", &self.notify)
-            .field("proxy", &self.proxy.as_deref().map(redact_url_credentials))
+            .field("proxy", &self.proxy.as_deref().map(redact_url_secrets))
             .field("push_token", &self.push_token)
             .field("schedule", &self.schedule)
             .field("grace_secs", &self.grace_secs)
@@ -936,21 +1015,36 @@ impl std::fmt::Debug for Monitor {
     }
 }
 
-/// Mask any `user:pass@` credentials in a URL-like string for `Debug`, keeping
-/// the host and path so logs stay useful. Inputs that don't parse as a URL (e.g.
-/// a TCP `host:port` target) or carry no credentials are returned unchanged.
-fn redact_url_credentials(raw: &str) -> std::borrow::Cow<'_, str> {
-    match reqwest::Url::parse(raw) {
-        Ok(mut url) if !url.username().is_empty() || url.password().is_some() => {
-            // These setters only fail for cannot-be-a-base URLs, which never
-            // carry credentials, so the guard above already excludes them.
-            let _ = url.set_username("***");
-            if url.password().is_some() {
-                let _ = url.set_password(Some("***"));
-            }
-            std::borrow::Cow::Owned(url.to_string())
+/// Mask the secrets a URL-like string may carry for `Debug` - `user:pass@`
+/// credentials and query-string values (`?api_key=...`) - keeping the host,
+/// path and query *keys* so logs stay useful. Inputs that don't parse as a URL
+/// (e.g. a TCP `host:port` target) or carry neither are returned unchanged.
+fn redact_url_secrets(raw: &str) -> std::borrow::Cow<'_, str> {
+    let Ok(mut url) = reqwest::Url::parse(raw) else {
+        return std::borrow::Cow::Borrowed(raw);
+    };
+    let mut redacted = false;
+    if !url.username().is_empty() || url.password().is_some() {
+        // These setters only fail for cannot-be-a-base URLs, which never
+        // carry credentials, so the guard above already excludes them.
+        let _ = url.set_username("***");
+        if url.password().is_some() {
+            let _ = url.set_password(Some("***"));
         }
-        _ => std::borrow::Cow::Borrowed(raw),
+        redacted = true;
+    }
+    if url.query().is_some_and(|query| !query.is_empty()) {
+        let keys: Vec<String> = url
+            .query_pairs()
+            .map(|(key, _value)| format!("{key}=***"))
+            .collect();
+        url.set_query(Some(&keys.join("&")));
+        redacted = true;
+    }
+    if redacted {
+        std::borrow::Cow::Owned(url.to_string())
+    } else {
+        std::borrow::Cow::Borrowed(raw)
     }
 }
 
@@ -1028,6 +1122,24 @@ impl Monitor {
             name: target.clone(),
             kind,
             target,
+            // A one-shot ad-hoc probe wants the honest first result, not the
+            // anti-flap retry (the peer responder does the same for confirm).
+            probe_retries: Some(0),
+            ..Self::default()
+        }
+    }
+}
+
+/// Every field at the value an omitted TOML key gets (`interval_secs`, which
+/// the file must spell out, at a minute). The base for ad-hoc monitors and
+/// test fixtures, so a new field is added in one place.
+impl Default for Monitor {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            kind: Kind::default(),
+            target: String::new(),
             interval_secs: 60,
             timeout_secs: default_timeout(),
             expected_status: None,
@@ -1044,9 +1156,7 @@ impl Monitor {
             number_min: None,
             number_max: None,
             max_body_kb: None,
-            // A one-shot ad-hoc probe wants the honest first result, not the
-            // anti-flap retry (the peer responder does the same for confirm).
-            probe_retries: Some(0),
+            probe_retries: None,
             dual_stack: None,
             notify: None,
             proxy: None,
@@ -1059,7 +1169,7 @@ impl Monitor {
             retention_days: None,
             group: None,
             depends_on: None,
-            public: true,
+            public: default_true(),
             public_error_detail: false,
             dns_record: None,
             dns_expected: None,
@@ -1093,10 +1203,7 @@ pub fn infer_probe(raw: &str) -> (Kind, String) {
     if raw.parse::<std::net::IpAddr>().is_ok() {
         return (Kind::Icmp, raw.to_owned());
     }
-    if let Some((host, port)) = split_host_port(raw)
-        && !host.is_empty()
-        && port.parse::<u16>().is_ok()
-    {
+    if split_host_port(raw).is_some() {
         return (Kind::Tcp, raw.to_owned());
     }
     (Kind::Http, format!("https://{raw}"))
@@ -1115,19 +1222,31 @@ pub fn probe_target(kind: Kind, raw: &str) -> String {
     }
 }
 
-/// Split `host:port` or `[ipv6]:port` into its parts. An unbracketed address
-/// with more than one colon (a bare IPv6) is not a `host:port` and returns
-/// `None`, leaving [`infer_kind`]'s IP check to classify it.
-fn split_host_port(target: &str) -> Option<(&str, &str)> {
-    if let Some(rest) = target.strip_prefix('[') {
+/// Split `host:port` or `[ipv6]:port` into a non-empty host (brackets
+/// stripped) and a numeric port - the one parser behind every `host:port`
+/// field, so they all agree on IPv6. An unbracketed address with more than
+/// one colon (`::1:80`) is ambiguous - is `80` a port or the last group of the
+/// address? - and returns `None`, as does a bracketed host that is not an IPv6
+/// literal.
+#[must_use]
+pub fn split_host_port(target: &str) -> Option<(&str, u16)> {
+    let (host, port) = if let Some(rest) = target.strip_prefix('[') {
         let (host, after) = rest.split_once(']')?;
-        return Some((host, after.strip_prefix(':')?));
-    }
-    let (host, port) = target.rsplit_once(':')?;
-    if host.contains(':') {
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return None;
+        }
+        (host, after.strip_prefix(':')?)
+    } else {
+        let (host, port) = target.rsplit_once(':')?;
+        if host.contains(':') {
+            return None;
+        }
+        (host, port)
+    };
+    if host.is_empty() {
         return None;
     }
-    Some((host, port))
+    Some((host, port.parse().ok()?))
 }
 
 /// Accept the availability SLO as a percent float (`99.9`) and store basis
@@ -1275,7 +1394,11 @@ pub fn parse_with_exec_dir(
             domain.make_ascii_lowercase();
         }
     }
-    config.exec_dir = exec_dir;
+    // Canonicalized once, here: the exec probe's escape check compares the
+    // resolved plugin path against it, and must not re-resolve the directory
+    // (blocking filesystem calls) on every tick. A directory that does not
+    // resolve is kept as given; `validate_exec` rejects it if a monitor needs it.
+    config.exec_dir = exec_dir.map(|dir| dir.canonicalize().unwrap_or(dir));
     validate(&config)?;
     Ok(config)
 }
@@ -1367,6 +1490,44 @@ fn validate_token(label: &str, token: Option<&Secret>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Upper bound on every configured period (`interval_secs`, `timeout_secs`,
+/// `expect_every_secs`): 30 days. Nothing sensible is slower, and a typo'd
+/// huge value would overflow `Instant` arithmetic in the tick timers - a panic
+/// that silently stops the task instead of a load error.
+const MAX_PERIOD_SECS: u64 = 30 * 24 * 3600;
+
+/// A period in seconds must be positive and at most [`MAX_PERIOD_SECS`].
+fn validate_period(label: &str, secs: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(secs > 0, "{label} must be > 0");
+    anyhow::ensure!(
+        secs <= MAX_PERIOD_SECS,
+        "{label} must be at most {MAX_PERIOD_SECS} (30 days)"
+    );
+    Ok(())
+}
+
+/// Ids that appear in URLs (`/api/badge/{id}`, `/api/push/{id}`) must stay
+/// URL-safe.
+fn is_url_safe_id(id: &str) -> bool {
+    id.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Every `notify` route must name a configured channel.
+fn validate_routes(
+    owner: &str,
+    routes: Option<&[String]>,
+    channel_names: &HashSet<&str>,
+) -> anyhow::Result<()> {
+    for route in routes.unwrap_or_default() {
+        anyhow::ensure!(
+            channel_names.contains(route.as_str()),
+            "{owner}: notify references unknown channel {route:?}"
+        );
+    }
+    Ok(())
+}
+
 fn validate(config: &Config) -> anyhow::Result<()> {
     validate_token("server.auth_token", config.server.auth_token.as_ref())?;
     for (group, token) in &config.server.group_tokens {
@@ -1397,10 +1558,7 @@ fn validate(config: &Config) -> anyhow::Result<()> {
         // The id appears in URLs (`/api/badge/{id}`, `/api/push/{id}`), so keep it
         // URL-safe.
         anyhow::ensure!(
-            monitor
-                .id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            is_url_safe_id(&monitor.id),
             "monitor id {:?} must be alphanumeric, '-' or '_'",
             monitor.id
         );
@@ -1409,21 +1567,31 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             "duplicate monitor id: {}",
             monitor.id
         );
-        anyhow::ensure!(
-            monitor.interval_secs > 0,
-            "monitor {} interval_secs must be > 0",
-            monitor.id
-        );
+        validate_period(
+            &format!("monitor {} interval_secs", monitor.id),
+            monitor.interval_secs,
+        )?;
         anyhow::ensure!(
             matches!(monitor.kind, Kind::Push | Kind::Exec) || !monitor.target.is_empty(),
             "monitor {}: target must not be empty",
             monitor.id
         );
-        anyhow::ensure!(
-            monitor.timeout_secs > 0,
-            "monitor {} timeout_secs must be > 0",
-            monitor.id
-        );
+        validate_period(
+            &format!("monitor {} timeout_secs", monitor.id),
+            monitor.timeout_secs,
+        )?;
+        // A probe outliving its interval delays the next tick (the scheduler
+        // never overlaps probes), so the effective cadence is the timeout,
+        // not the interval. Push monitors probe nothing; their timeout is inert.
+        if monitor.kind != Kind::Push && monitor.timeout_secs > monitor.interval_secs {
+            tracing::warn!(
+                "monitor {}: timeout_secs ({}) exceeds interval_secs ({}) - a hung probe \
+                 delays the next check by up to the timeout",
+                monitor.id,
+                monitor.timeout_secs,
+                monitor.interval_secs
+            );
+        }
         // A private monitor without a configured token would be visible to no
         // one at all - fail fast rather than silently hide it. (Emptiness is
         // already rejected by validate_token above, so presence is enough.)
@@ -1456,15 +1624,11 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             );
         }
         validate_monitor_io(monitor)?;
-        if let Some(routes) = &monitor.notify {
-            for route in routes {
-                anyhow::ensure!(
-                    channel_names.contains(route.as_str()),
-                    "monitor {}: notify references unknown channel {route:?}",
-                    monitor.id
-                );
-            }
-        }
+        validate_routes(
+            &format!("monitor {}", monitor.id),
+            monitor.notify.as_deref(),
+            &channel_names,
+        )?;
     }
 
     crate::topology::validate_dag(&config.monitors)?;
@@ -1558,14 +1722,7 @@ fn validate_digest(
         parse_cron(&digest.schedule).map_err(|err| {
             anyhow::anyhow!("digest: invalid schedule {:?}: {err}", digest.schedule)
         })?;
-        if let Some(routes) = &digest.notify {
-            for route in routes {
-                anyhow::ensure!(
-                    channel_names.contains(route.as_str()),
-                    "digest: notify references unknown channel {route:?}"
-                );
-            }
-        }
+        validate_routes("digest", digest.notify.as_deref(), channel_names)?;
     }
     Ok(())
 }
@@ -1617,7 +1774,7 @@ fn validate_peers(
 ) -> anyhow::Result<()> {
     if let Some(health) = &config.health {
         anyhow::ensure!(!health.id.is_empty(), "health.id must not be empty");
-        anyhow::ensure!(health.interval_secs > 0, "health.interval_secs must be > 0");
+        validate_period("health.interval_secs", health.interval_secs)?;
     }
     anyhow::ensure!(
         config.peers.is_empty() || config.health.is_some(),
@@ -1647,7 +1804,7 @@ fn validate_peers(
             peer.ping_token.as_ref(),
         )?;
         if let Some(every) = peer.expect_every_secs {
-            anyhow::ensure!(every > 0, "peer {}: expect_every_secs must be > 0", peer.id);
+            validate_period(&format!("peer {}: expect_every_secs", peer.id), every)?;
             // Same reasoning as the push-monitor warning: peer ids are exposed
             // on the unauthenticated /healthz (witnesses need them), so an
             // unprotected listen id lets anyone forge the peer's heartbeats.
@@ -1661,9 +1818,7 @@ fn validate_peers(
             // The id appears in `/api/push/{id}`, so keep it URL-safe.
             let listen_id = peer.listen_id();
             anyhow::ensure!(
-                listen_id
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                is_url_safe_id(listen_id),
                 "peer {}: listen_id {listen_id:?} must be alphanumeric, '-' or '_'",
                 peer.id
             );
@@ -1678,15 +1833,11 @@ fn validate_peers(
                 peer.id
             );
         }
-        if let Some(routes) = &peer.notify {
-            for route in routes {
-                anyhow::ensure!(
-                    channel_names.contains(route.as_str()),
-                    "peer {}: notify references unknown channel {route:?}",
-                    peer.id
-                );
-            }
-        }
+        validate_routes(
+            &format!("peer {}", peer.id),
+            peer.notify.as_deref(),
+            channel_names,
+        )?;
         // A push token sent over cleartext http to the peer would leak in transit.
         if let (Some(url), Some(_token)) = (&peer.ping_url, &peer.ping_token)
             && url.as_ref().starts_with("http://")
@@ -1739,21 +1890,15 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
             monitor.id
         ),
         Kind::Tcp => anyhow::ensure!(
-            monitor
-                .target
-                .rsplit_once(':')
-                .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok()),
-            "monitor {}: tcp target must be host:port",
+            split_host_port(&monitor.target).is_some(),
+            "monitor {}: tcp target must be host:port (an IPv6 address in brackets: [::1]:80)",
             monitor.id
         ),
         Kind::Icmp => {
             // A stray `:port` is a common mistake; an IPv6 literal parses as an IP
             // and is exempt, so its colons are fine.
             let has_port = monitor.target.parse::<std::net::IpAddr>().is_err()
-                && monitor
-                    .target
-                    .rsplit_once(':')
-                    .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
+                && split_host_port(&monitor.target).is_some();
             anyhow::ensure!(
                 !monitor.target.contains("://")
                     && !monitor.target.contains('/')
@@ -1793,6 +1938,14 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
         "monitor {}: max_body_kb must be > 0",
         monitor.id
     );
+    // No server answers outside 100-599, so such a monitor could never be up.
+    if let Some(status) = monitor.expected_status {
+        anyhow::ensure!(
+            (100..=599).contains(&status),
+            "monitor {}: expected_status {status} is not an HTTP status (100-599)",
+            monitor.id
+        );
+    }
     // Catch header typos / CR-LF injection at load rather than at send time.
     for (name, value) in &monitor.headers {
         anyhow::ensure!(
@@ -1843,14 +1996,13 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
 /// compile, and the number bounds only make sense with a regex to extract the
 /// number and in min <= max order.
 fn validate_body_assertions(monitor: &Monitor) -> anyhow::Result<()> {
-    if let Some(query) = &monitor.json_query {
-        serde_json_path::JsonPath::parse(query)
-            .map_err(|err| anyhow::anyhow!("monitor {}: invalid json_query: {err}", monitor.id))?;
+    if let Some(err) = monitor.json_query.as_ref().and_then(Parsed::error) {
+        anyhow::bail!("monitor {}: invalid json_query: {err}", monitor.id);
     }
     if let Some(pattern) = &monitor.number_regex {
-        regex::Regex::new(pattern).map_err(|err| {
-            anyhow::anyhow!("monitor {}: invalid number_regex: {err}", monitor.id)
-        })?;
+        if let Some(err) = pattern.error() {
+            anyhow::bail!("monitor {}: invalid number_regex: {err}", monitor.id);
+        }
     } else {
         anyhow::ensure!(
             monitor.number_min.is_none() && monitor.number_max.is_none(),
@@ -2011,13 +2163,10 @@ fn validate_dual_stack(monitor: &Monitor) -> anyhow::Result<()> {
         Kind::Http => reqwest::Url::parse(&monitor.target)
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned)),
-        Kind::Tcp => monitor
-            .target
-            .rsplit_once(':')
-            .map(|(host, _port)| host.to_owned()),
+        Kind::Tcp => split_host_port(&monitor.target).map(|(host, _port)| host.to_owned()),
         _ => Some(monitor.target.clone()),
     };
-    // URL and tcp hosts may carry an IPv6 literal in brackets.
+    // URL hosts carry an IPv6 literal in brackets (split_host_port strips them).
     let host = host.unwrap_or_default();
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     anyhow::ensure!(
@@ -2075,24 +2224,11 @@ fn validate_dns_io(monitor: &Monitor) -> anyhow::Result<()> {
         "monitor {}: dns target must be a hostname (no scheme or whitespace)",
         monitor.id
     );
-    if let Some(record) = &monitor.dns_record {
-        anyhow::ensure!(
-            matches!(
-                record.to_uppercase().as_str(),
-                "A" | "AAAA" | "CNAME" | "MX" | "NS" | "TXT" | "SRV" | "SOA" | "PTR"
-            ),
-            "monitor {}: unsupported dns_record type {record:?}",
-            monitor.id
-        );
+    if let Some(err) = monitor.dns_record.as_ref().and_then(Parsed::error) {
+        anyhow::bail!("monitor {}: {err}", monitor.id);
     }
-    if let Some(resolver) = &monitor.dns_resolver {
-        anyhow::ensure!(
-            resolver
-                .rsplit_once(':')
-                .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok()),
-            "monitor {}: dns_resolver must be host:port",
-            monitor.id
-        );
+    if let Some(err) = monitor.dns_resolver.as_ref().and_then(Parsed::error) {
+        anyhow::bail!("monitor {}: dns_resolver {err}", monitor.id);
     }
     Ok(())
 }
@@ -2339,9 +2475,15 @@ mod tests {
         );
         let monitor = &config.monitors[0];
         assert_eq!(monitor.keyword.as_deref(), Some("operational"));
-        assert_eq!(monitor.json_query.as_deref(), Some("$.status"));
+        assert_eq!(
+            monitor.json_query.as_ref().map(Parsed::raw),
+            Some("$.status")
+        );
         assert_eq!(monitor.json_expected.as_deref(), Some("ok"));
-        assert_eq!(monitor.number_regex.as_deref(), Some(r#"ships">(\d+)<"#));
+        assert_eq!(
+            monitor.number_regex.as_ref().map(Parsed::raw),
+            Some(r#"ships">(\d+)<"#)
+        );
         assert_eq!(monitor.number_min, Some(1));
         assert_eq!(monitor.number_max, Some(500));
         validate(&config).expect("valid assertions");
@@ -2679,6 +2821,49 @@ mod tests {
         assert!(!dump.contains("puser"), "proxy username leaked: {dump}");
         assert!(dump.contains("example.com"), "target host lost: {dump}");
         assert!(dump.contains("proxy.internal"), "proxy host lost: {dump}");
+    }
+
+    #[test]
+    fn monitor_debug_redacts_query_secrets() {
+        let mut monitor = Monitor {
+            name: "API".to_owned(),
+            target: "https://api.example.com/health?api_key=s3cret&verbose=1".to_owned(),
+            ..Monitor::default()
+        };
+        let dump = format!("{monitor:?}");
+        assert!(!dump.contains("s3cret"), "query secret leaked: {dump}");
+        // Keys stay, so the log still says *what* was sent.
+        assert!(dump.contains("api_key=***&verbose=***"), "{dump}");
+        // Strings that are not URLs (a tcp host:port) are untouched.
+        monitor.target = "db.example.com:5432".to_owned();
+        assert!(format!("{monitor:?}").contains("db.example.com:5432"));
+    }
+
+    #[test]
+    fn channel_debug_shows_routing_fields() {
+        // The derived Debug keeps the non-secret fields readable and every
+        // credential redacted, for each variant shape.
+        let email = Channel::Email {
+            name: "mail".to_owned(),
+            host: "smtp.example.com".to_owned(),
+            port: 587,
+            username: "bot".to_owned(),
+            password: Secret("pa55word".to_owned()),
+            from: "a@example.com".to_owned(),
+            to: "b@example.com".to_owned(),
+            implicit_tls: false,
+        };
+        let ntfy = Channel::Ntfy {
+            name: "push".to_owned(),
+            url: Secret("https://ntfy.sh/s3cret-topic".to_owned()),
+            token: Some(Secret("tk_s3cret".to_owned())),
+        };
+        let dump = format!("{email:?} {ntfy:?}");
+        assert!(
+            !dump.contains("pa55word") && !dump.contains("s3cret"),
+            "{dump}"
+        );
+        assert!(dump.contains("smtp.example.com") && dump.contains("b@example.com"));
     }
 
     #[test]
@@ -3249,6 +3434,7 @@ mod tests {
             ping_url = "https://b.example/api/push/hora-a?tok=sup3rsecret"
             ping_token = "tok3n"
             expect_every_secs = 90
+            witness_url = "https://b.example/healthz?key=sup3rsecret"
         "#,
         );
         let dump = format!("{:?}", config.health) + &format!("{:?}", config.peers);
@@ -3386,6 +3572,134 @@ mod tests {
         "#,
         );
         validate(&config).expect("valid dns monitor");
+        let monitor = &config.monitors[0];
+        assert_eq!(
+            monitor.dns_resolver.as_ref().and_then(Parsed::get),
+            Some(&"9.9.9.9:53".parse().unwrap())
+        );
+        assert_eq!(
+            monitor.dns_record.as_ref().and_then(Parsed::get),
+            Some(&DnsRecord::A)
+        );
+    }
+
+    #[test]
+    fn dns_fields_parse_once_at_load() {
+        // Bracketed IPv6 resolvers (what `hora import kuma` emits) and
+        // lowercase record types are accepted and typed.
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "dns"
+            name = "DNS"
+            kind = "dns"
+            target = "example.com"
+            interval_secs = 300
+            dns_record = "aaaa"
+            dns_resolver = "[2620:fe::fe]:53"
+        "#,
+        );
+        validate(&config).expect("valid dns monitor");
+        let monitor = &config.monitors[0];
+        assert_eq!(
+            monitor.dns_resolver.as_ref().and_then(Parsed::get),
+            Some(&"[2620:fe::fe]:53".parse().unwrap())
+        );
+        assert_eq!(
+            monitor.dns_record.as_ref().and_then(Parsed::get),
+            Some(&DnsRecord::Aaaa)
+        );
+    }
+
+    #[test]
+    fn host_port_parsing_is_bracket_aware() {
+        assert_eq!(split_host_port("db:5432"), Some(("db", 5432)));
+        assert_eq!(
+            split_host_port("[2001:db8::1]:443"),
+            Some(("2001:db8::1", 443))
+        );
+        // Unbracketed IPv6 + port is ambiguous; missing or bad parts fail.
+        assert_eq!(split_host_port("::1:80"), None);
+        assert_eq!(split_host_port(":80"), None);
+        assert_eq!(split_host_port("db"), None);
+        assert_eq!(split_host_port("db:http"), None);
+        assert_eq!(split_host_port("[not-v6]:80"), None);
+        assert_eq!(split_host_port("[::1]"), None);
+
+        let tcp = |target: &str| {
+            let mut config = parse(MINIMAL);
+            config.monitors[0].kind = Kind::Tcp;
+            config.monitors[0].target = target.to_owned();
+            validate(&config)
+        };
+        assert!(tcp("[::1]:80").is_ok());
+        let error = tcp("::1:80").unwrap_err().to_string();
+        assert!(error.contains("must be host:port"), "{error}");
+    }
+
+    #[test]
+    fn periods_and_status_are_bounded() {
+        let check = |field: &str| {
+            let config = parse(&format!(
+                r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "web"
+                name = "Web"
+                target = "https://example.com"
+                {field}
+            "#
+            ));
+            validate(&config).map_err(|err| err.to_string())
+        };
+        // A typo'd huge interval fails at load instead of panicking a task.
+        let error = check("interval_secs = 86400000000000").unwrap_err();
+        assert!(error.contains("at most"), "{error}");
+        let error = check("interval_secs = 60\ntimeout_secs = 86400000000000").unwrap_err();
+        assert!(error.contains("timeout_secs must be at most"), "{error}");
+        assert!(check("interval_secs = 2592000").is_ok());
+        // Out-of-range expected statuses could never match a response.
+        for status in [0, 99, 600, 1000] {
+            let error =
+                check(&format!("interval_secs = 60\nexpected_status = {status}")).unwrap_err();
+            assert!(error.contains("not an HTTP status"), "{error}");
+        }
+        assert!(check("interval_secs = 60\nexpected_status = 301").is_ok());
+
+        let peer = |every: u64| {
+            let config = parse(&format!(
+                r#"
+                [page]
+                [server]
+                [health]
+                id = "a"
+                [[peers]]
+                id = "b"
+                name = "B"
+                expect_every_secs = {every}
+                listen_token = "a-long-enough-listen-token"
+            "#
+            ));
+            validate(&config).map_err(|err| err.to_string())
+        };
+        assert!(peer(90).is_ok());
+        let error = peer(86_400_000_000).unwrap_err();
+        assert!(
+            error.contains("expect_every_secs must be at most"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn exec_dir_is_canonicalized_at_load() {
+        let config = parse_with_exec_dir(MINIMAL, Some(std::env::temp_dir())).expect("config");
+        assert_eq!(
+            config.exec_dir,
+            Some(std::env::temp_dir().canonicalize().unwrap())
+        );
     }
 
     #[test]
@@ -3394,6 +3708,9 @@ mod tests {
             ("dns_record = \"WHATEVER\"", "unsupported dns_record"),
             ("dns_resolver = \"no-port\"", "must be host:port"),
             ("dns_resolver = \"host:notaport\"", "must be host:port"),
+            // Unbracketed IPv6 is ambiguous; a hostname can't be the resolver.
+            ("dns_resolver = \"2620:fe::fe:53\"", "must be host:port"),
+            ("dns_resolver = \"dns.google:53\"", "not a hostname"),
         ] {
             let config = parse(&format!(
                 r#"

@@ -1,11 +1,12 @@
 //! Probing logic: turn a monitor into a single [`Outcome`].
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use hickory_resolver::TokioResolver;
-use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig};
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::proto::rr::RecordType;
 use reqwest::{Client, RequestBuilder};
@@ -15,7 +16,7 @@ use surge_ping::{
 };
 use tokio::net::TcpStream;
 
-use crate::config::{Kind, Monitor, Secret};
+use crate::config::{DnsRecord, Kind, Monitor, Parsed, Secret};
 
 /// Maximum length (chars) of the response-body snippet kept on failure.
 const MAX_BODY_SNIPPET: usize = 300;
@@ -164,9 +165,9 @@ async fn dual_stack(monitor: &Monitor) -> Outcome {
 
 async fn probe_family(monitor: &Monitor, family: Family) -> Outcome {
     match monitor.kind {
-        // The per-monitor client cannot be steered per family, so each probe
-        // builds its own family-bound one; negligible at probing cadence.
-        Kind::Http => match crate::http::probe_client_family(family.unspecified()) {
+        // The per-monitor client cannot be steered per family, so dual-stack
+        // probes share one family-bound client per family.
+        Kind::Http => match family_client(family) {
             Ok(client) => http(&client, monitor).await,
             Err(err) => Outcome::down(format!("could not build probe client: {err}")),
         },
@@ -177,6 +178,25 @@ async fn probe_family(monitor: &Monitor, family: Family) -> Outcome {
             Outcome::down("dual_stack unsupported for this monitor kind".to_owned())
         }
     }
+}
+
+/// The process-wide probe client bound to `family`, built on first use. Every
+/// dual-stack monitor shares it: the client carries no per-monitor setting
+/// (headers go per request, dual-stack excludes proxies), and sharing keeps
+/// connection and TLS-session reuse - like the per-monitor client of a
+/// single-stack probe - instead of two fresh clients on every probe.
+fn family_client(family: Family) -> reqwest::Result<Client> {
+    static V4: OnceLock<Client> = OnceLock::new();
+    static V6: OnceLock<Client> = OnceLock::new();
+    let cell = match family {
+        Family::V4 => &V4,
+        Family::V6 => &V6,
+    };
+    if let Some(client) = cell.get() {
+        return Ok(client.clone());
+    }
+    let client = crate::http::probe_client_family(family.unspecified())?;
+    Ok(cell.get_or_init(|| client).clone())
 }
 
 /// Merge the two per-family outcomes of a dual-stack probe. Both up → up, with
@@ -260,7 +280,11 @@ async fn http(client: &Client, monitor: &Monitor) -> Outcome {
             } else {
                 MAX_SNAPSHOT_BODY_CHARS
             };
-            (head, read_body(response, cap).await)
+            // A body cut short by a transport error is reported as such:
+            // running the assertions on the fragment would blame the content
+            // ("keyword missing") for what is a connection problem.
+            let body = read_body(response, cap).await.map_err(HttpError::Request)?;
+            (head, body)
         } else {
             (String::new(), Vec::new())
         };
@@ -334,6 +358,12 @@ async fn send_following_redirects(
             .await
             .map_err(HttpError::Request);
     };
+    // A monitor expecting a 3xx asserts the redirect itself (HTTP -> HTTPS,
+    // apex -> www): following it would judge the destination instead, and the
+    // probe could never pass.
+    let follow = !monitor
+        .expected_status
+        .is_some_and(|status| (300..400).contains(&status));
     let mut url = target.clone();
     for _ in 0..=MAX_REDIRECTS {
         // The per-request timeout overrides the client's 15s notifier backstop,
@@ -344,7 +374,7 @@ async fn send_following_redirects(
             request = with_headers(request, &monitor.headers);
         }
         let response = request.send().await.map_err(HttpError::Request)?;
-        if !response.status().is_redirection() {
+        if !follow || !response.status().is_redirection() {
             return Ok(response);
         }
         // A 3xx without a usable Location (or 304 Not Modified) is the final
@@ -401,11 +431,17 @@ fn check_assertions(monitor: &Monitor, body: &[u8]) -> Option<String> {
     clippy::cast_precision_loss,
     reason = "config bounds are human-scale thresholds, far below 2^52"
 )]
-fn check_number(pattern: &str, min: Option<i64>, max: Option<i64>, body: &str) -> Option<String> {
-    // The pattern is validated at config load, so this should not fail.
-    let Ok(regex) = regex::Regex::new(pattern) else {
-        return Some(format!("invalid number_regex: {pattern}"));
+fn check_number(
+    pattern: &Parsed<regex::Regex>,
+    min: Option<i64>,
+    max: Option<i64>,
+    body: &str,
+) -> Option<String> {
+    // Compiled at config load, where validation rejects a bad pattern.
+    let Some(regex) = pattern.get() else {
+        return Some(format!("invalid number_regex: {}", pattern.raw()));
     };
+    let pattern = pattern.raw();
     let Some(captures) = regex.captures(body) else {
         return Some(format!("number_regex matched nothing: {pattern}"));
     };
@@ -430,14 +466,19 @@ fn check_number(pattern: &str, min: Option<i64>, max: Option<i64>, body: &str) -
 }
 
 /// Evaluate a `JSONPath` against the body. Returns a failure reason or `None`.
-fn check_json(query: &str, expected: Option<&str>, body: &str) -> Option<String> {
+fn check_json(
+    query: &Parsed<serde_json_path::JsonPath>,
+    expected: Option<&str>,
+    body: &str,
+) -> Option<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return Some("response is not valid JSON".to_owned());
     };
-    // The query is validated at config load, so this should not fail.
-    let Ok(path) = serde_json_path::JsonPath::parse(query) else {
-        return Some(format!("invalid JSON query: {query}"));
+    // Parsed at config load, where validation rejects a bad query.
+    let Some(path) = query.get() else {
+        return Some(format!("invalid JSON query: {}", query.raw()));
     };
+    let query = query.raw();
     let nodes = path.query(&value).all();
     match expected {
         None => nodes
@@ -570,25 +611,17 @@ async fn resolve(target: &str, family: Option<Family>) -> Option<IpAddr> {
 /// answers rotate freely behind CDNs and round-robin records, so alerting on
 /// mere change would flap.
 async fn dns(monitor: &Monitor) -> Outcome {
-    let record_type = monitor
-        .dns_record
-        .as_deref()
-        .map_or(RecordType::A, |record| {
-            match record.to_uppercase().as_str() {
-                "AAAA" => RecordType::AAAA,
-                "CNAME" => RecordType::CNAME,
-                "MX" => RecordType::MX,
-                "NS" => RecordType::NS,
-                "TXT" => RecordType::TXT,
-                "SRV" => RecordType::SRV,
-                "SOA" => RecordType::SOA,
-                "PTR" => RecordType::PTR,
-                // "A", plus anything else config validation already rejected.
-                _ => RecordType::A,
-            }
-        });
+    let record_type = record_type(
+        monitor
+            .dns_record
+            .as_ref()
+            .and_then(Parsed::get)
+            .copied()
+            .unwrap_or(DnsRecord::A),
+    );
 
-    let resolver = match resolver_for(monitor.dns_resolver.as_deref()) {
+    let custom = monitor.dns_resolver.as_ref().and_then(Parsed::get).copied();
+    let resolver = match resolver_for(custom) {
         Ok(resolver) => resolver,
         Err(err) => return Outcome::down(format!("resolver setup failed: {err}")),
     };
@@ -660,21 +693,50 @@ async fn dns(monitor: &Monitor) -> Outcome {
     }
 }
 
-/// The system resolver, or a custom `host:port` UDP resolver when configured.
-fn resolver_for(custom: Option<&str>) -> anyhow::Result<TokioResolver> {
+fn record_type(record: DnsRecord) -> RecordType {
+    match record {
+        DnsRecord::A => RecordType::A,
+        DnsRecord::Aaaa => RecordType::AAAA,
+        DnsRecord::Cname => RecordType::CNAME,
+        DnsRecord::Mx => RecordType::MX,
+        DnsRecord::Ns => RecordType::NS,
+        DnsRecord::Txt => RecordType::TXT,
+        DnsRecord::Srv => RecordType::SRV,
+        DnsRecord::Soa => RecordType::SOA,
+        DnsRecord::Ptr => RecordType::PTR,
+    }
+}
+
+/// The system resolver, or a custom UDP resolver when configured (its address
+/// parsed at config load). A fresh resolver per probe on purpose: a shared one
+/// would answer from its cache, and a DNS monitor must ask the server every
+/// time - so only the system configuration is shared (see [`system_conf`]).
+fn resolver_for(custom: Option<SocketAddr>) -> anyhow::Result<TokioResolver> {
+    let provider = TokioRuntimeProvider::default();
     let Some(addr) = custom else {
-        return Ok(TokioResolver::builder_tokio()?.build()?);
+        let (config, options) = system_conf()?;
+        let mut builder = TokioResolver::builder_with_config(config, provider);
+        *builder.options_mut() = options;
+        return Ok(builder.build()?);
     };
-    let (host, port) = addr
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("dns_resolver must be host:port"))?;
-    let port: u16 = port.parse()?;
-    let ip: IpAddr = host.parse()?;
     let mut connection = ConnectionConfig::udp();
-    connection.port = port;
-    let nameserver = NameServerConfig::new(ip, true, vec![connection]);
+    connection.port = addr.port();
+    let nameserver = NameServerConfig::new(addr.ip(), true, vec![connection]);
     let config = ResolverConfig::from_parts(None, vec![], vec![nameserver]);
-    Ok(TokioResolver::builder_with_config(config, TokioRuntimeProvider::default()).build()?)
+    Ok(TokioResolver::builder_with_config(config, provider).build()?)
+}
+
+/// The system resolver configuration (`/etc/resolv.conf` on Unix), read once:
+/// reading it is blocking file I/O that has no business running on the async
+/// runtime at every DNS probe. A failed read is not cached, so it is retried
+/// at the next probe; a change to the file needs a restart to be seen.
+fn system_conf() -> anyhow::Result<(ResolverConfig, ResolverOpts)> {
+    static SYSTEM: OnceLock<(ResolverConfig, ResolverOpts)> = OnceLock::new();
+    if let Some(conf) = SYSTEM.get() {
+        return Ok(conf.clone());
+    }
+    let conf = hickory_resolver::system_conf::read_system_conf()?;
+    Ok(SYSTEM.get_or_init(|| conf).clone())
 }
 
 /// Apply every configured header to the request. reqwest *appends* headers, so
@@ -694,20 +756,19 @@ fn millis(elapsed: Duration) -> i64 {
     i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
 }
 
-/// Read the response body up to `cap` bytes (so a huge body can't exhaust memory).
-async fn read_body(mut response: reqwest::Response, cap: usize) -> Vec<u8> {
+/// Read the response body up to `cap` bytes (so a huge body can't exhaust
+/// memory). A transport error mid-body is an error, not a short body.
+async fn read_body(mut response: reqwest::Response, cap: usize) -> reqwest::Result<Vec<u8>> {
     let mut buf = Vec::new();
     while buf.len() < cap {
-        match response.chunk().await {
-            // Copy at most the remaining budget so one huge chunk can't blow the bound.
-            Ok(Some(chunk)) => {
-                let take = (cap - buf.len()).min(chunk.len());
-                buf.extend_from_slice(&chunk[..take]);
-            }
-            _ => break,
-        }
+        let Some(chunk) = response.chunk().await? else {
+            break;
+        };
+        // Copy at most the remaining budget so one huge chunk can't blow the bound.
+        let take = (cap - buf.len()).min(chunk.len());
+        buf.extend_from_slice(&chunk[..take]);
     }
-    buf
+    Ok(buf)
 }
 
 /// The status line and (bounded) headers of a response, captured before the
@@ -726,7 +787,11 @@ fn render_head(
 ) -> String {
     let mut head = format!("{version:?} {status}");
     for (name, value) in headers.iter().take(MAX_SNAPSHOT_HEADERS) {
-        let value = value.to_str().unwrap_or("<binary>");
+        let value = if is_sensitive_header(name) {
+            "<redacted>"
+        } else {
+            value.to_str().unwrap_or("<binary>")
+        };
         head.push('\n');
         head.extend(
             format!("{name}: {value}")
@@ -739,6 +804,28 @@ fn render_head(
         let _ = std::fmt::Write::write_fmt(&mut head, format_args!("\n({dropped} more headers)"));
     }
     head
+}
+
+/// Response headers whose value is a credential - a session cookie issued by
+/// the monitored app, an auth challenge or token echoed back. The snapshot is
+/// stored on the incident, shown on `/history` and pasted into post-mortems,
+/// so these keep their name (the fact is useful) and lose their value.
+fn is_sensitive_header(name: &reqwest::header::HeaderName) -> bool {
+    const SENSITIVE: &[&str] = &[
+        "set-cookie",
+        "cookie",
+        "authorization",
+        "proxy-authorization",
+        "www-authenticate",
+        "proxy-authenticate",
+        "x-amz-security-token",
+        "x-api-key",
+        "x-auth-token",
+        "x-csrf-token",
+        "x-xsrf-token",
+    ];
+    // `HeaderName` is always lowercase, so a plain comparison suffices.
+    SENSITIVE.contains(&name.as_str())
 }
 
 /// Assemble the stored failure snapshot: status line and headers, a blank
@@ -814,7 +901,7 @@ pub fn public_reason(reason: &str) -> &str {
     if let Some(record) = reason
         .strip_prefix("no ")
         .and_then(|rest| rest.strip_suffix(" records found"))
-        && ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SRV", "SOA", "PTR"].contains(&record)
+        && DnsRecord::ALL.iter().any(|known| known.as_str() == record)
     {
         return reason;
     }
@@ -984,51 +1071,118 @@ mod tests {
         assert_eq!(down.status_value(), 0);
     }
 
+    fn number(pattern: &str, min: Option<i64>, max: Option<i64>, body: &str) -> Option<String> {
+        check_number(&Parsed::new(pattern), min, max, body)
+    }
+
+    fn json(query: &str, expected: Option<&str>, body: &str) -> Option<String> {
+        check_json(&Parsed::new(query), expected, body)
+    }
+
+    #[test]
+    fn snapshot_redacts_credential_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("set-cookie", "session=s3cr3t; HttpOnly".parse().unwrap());
+        headers.insert("www-authenticate", "Bearer realm=x".parse().unwrap());
+        headers.insert("content-type", "text/html".parse().unwrap());
+        let head = render_head(
+            reqwest::Version::HTTP_11,
+            reqwest::StatusCode::UNAUTHORIZED,
+            &headers,
+        );
+        assert!(!head.contains("s3cr3t"), "{head}");
+        assert!(head.contains("set-cookie: <redacted>"), "{head}");
+        assert!(head.contains("www-authenticate: <redacted>"), "{head}");
+        // Harmless headers keep their value.
+        assert!(head.contains("content-type: text/html"), "{head}");
+    }
+
+    #[test]
+    fn dns_record_types_map_and_stay_public() {
+        // Every configurable type maps onto the hickory type of the same
+        // name, so the "no X records found" reason stays recognized.
+        for record in DnsRecord::ALL {
+            assert_eq!(record_type(record).to_string(), record.as_str());
+            let reason = format!("no {} records found", record_type(record));
+            assert_eq!(public_reason(&reason), reason);
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_resolver_takes_a_parsed_address() {
+        // IPv6 resolvers work now that the address is parsed (brackets and
+        // all) at load rather than split on the last colon here.
+        for raw in ["9.9.9.9:53", "[2620:fe::fe]:53"] {
+            let addr: SocketAddr = Parsed::new(raw).get().copied().expect(raw);
+            assert!(resolver_for(Some(addr)).is_ok(), "{raw}");
+        }
+    }
+
+    /// A one-shot HTTP server answering every connection with `response`;
+    /// returns its base URL and the number of requests served so far.
+    async fn serve(
+        response: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    #[tokio::test]
+    async fn expected_redirect_is_not_followed() {
+        let (url, hits) = serve(
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let client = crate::http::probe_client(None).unwrap();
+        let mut monitor = http_monitor();
+        monitor.target = url;
+        monitor.expected_status = Some(301);
+        let outcome = http(&client, &monitor).await;
+        assert!(outcome.up, "{:?}", outcome.error);
+        assert_eq!(outcome.status_code, Some(301));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Without a 3xx expectation the redirect is chased (here into a loop
+        // back to the same server, until the hop budget runs out).
+        monitor.expected_status = None;
+        let outcome = http(&client, &monitor).await;
+        assert_eq!(outcome.error.as_deref(), Some("too many redirects"));
+    }
+
+    #[tokio::test]
+    async fn truncated_body_is_a_body_error_not_an_assertion_failure() {
+        // Announces 100 bytes, sends 7, closes: a transport failure mid-body.
+        let (url, _hits) =
+            serve("HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial")
+                .await;
+        let client = crate::http::probe_client(None).unwrap();
+        let mut monitor = http_monitor();
+        monitor.target = url;
+        monitor.keyword = Some("complete".to_owned());
+        let outcome = http(&client, &monitor).await;
+        assert!(!outcome.up);
+        assert_eq!(outcome.error.as_deref(), Some("invalid response body"));
+    }
+
     fn http_monitor() -> Monitor {
         Monitor {
             id: "m".to_owned(),
             name: "M".to_owned(),
-            kind: Kind::Http,
             target: "https://example.com".to_owned(),
-            interval_secs: 60,
-            timeout_secs: 10,
-            expected_status: None,
-            degraded_over_ms: None,
-            slo_latency_ms: None,
-            headers: HashMap::new(),
-            keyword: None,
-            keyword_invert: false,
-            json_query: None,
-            json_expected: None,
-            number_regex: None,
-            number_min: None,
-            number_max: None,
-            max_body_kb: None,
-            probe_retries: None,
-            notify: None,
-            proxy: None,
-            push_token: None,
-            check_cert: None,
-            starttls: None,
-            ehlo_name: None,
-            retention_days: None,
-            group: None,
-            depends_on: None,
-            public: true,
-            public_error_detail: false,
-            dual_stack: None,
-            dns_record: None,
-            dns_expected: None,
-            dns_resolver: None,
-            cert_pin: None,
-            domain_expiry: None,
-            release: None,
-            confirm_with_peers: None,
-            command: Vec::new(),
-            slo_uptime: None,
-            slo_window_days: None,
-            schedule: None,
-            grace_secs: None,
+            ..Monitor::default()
         }
     }
 
@@ -1049,36 +1203,36 @@ mod tests {
         let body = r#"<div class="stationRealtimeShipUnique">11</div>"#;
         let pattern = r#"stationRealtimeShipUnique">(\d+)<"#;
         // In bounds, at the bound, and out of bounds on both sides.
-        assert!(check_number(pattern, Some(1), None, body).is_none());
-        assert!(check_number(pattern, Some(11), Some(11), body).is_none());
+        assert!(number(pattern, Some(1), None, body).is_none());
+        assert!(number(pattern, Some(11), Some(11), body).is_none());
         assert_eq!(
-            check_number(pattern, Some(12), None, body).as_deref(),
+            number(pattern, Some(12), None, body).as_deref(),
             Some("number 11 below min 12")
         );
         assert_eq!(
-            check_number(pattern, None, Some(10), body).as_deref(),
+            number(pattern, None, Some(10), body).as_deref(),
             Some("number 11 above max 10")
         );
         // No bounds: the extraction itself is the assertion.
-        assert!(check_number(pattern, None, None, body).is_none());
-        assert!(check_number(pattern, None, None, "<html>maintenance</html>").is_some());
+        assert!(number(pattern, None, None, body).is_none());
+        assert!(number(pattern, None, None, "<html>maintenance</html>").is_some());
         // A group-less pattern falls back to the whole match; decimals parse.
-        assert!(check_number(r"[0-9.]+", Some(99), None, "uptime 99.5 %").is_none());
+        assert!(number(r"[0-9.]+", Some(99), None, "uptime 99.5 %").is_none());
         // A match that is not a number fails rather than passes vacuously.
-        assert!(check_number("<(div)>", Some(1), None, "<div>7</div>").is_some());
+        assert!(number("<(div)>", Some(1), None, "<div>7</div>").is_some());
     }
 
     #[test]
     fn json_query_assertion() {
         // Expected value, string and non-string.
-        assert!(check_json("$.status", Some("ok"), r#"{"status":"ok"}"#).is_none());
-        assert!(check_json("$.status", Some("ok"), r#"{"status":"bad"}"#).is_some());
-        assert!(check_json("$.healthy", Some("true"), r#"{"healthy":true}"#).is_none());
+        assert!(json("$.status", Some("ok"), r#"{"status":"ok"}"#).is_none());
+        assert!(json("$.status", Some("ok"), r#"{"status":"bad"}"#).is_some());
+        assert!(json("$.healthy", Some("true"), r#"{"healthy":true}"#).is_none());
         // No expected value: the query just has to match something.
-        assert!(check_json("$.data", None, r#"{"data":[1,2]}"#).is_none());
-        assert!(check_json("$.missing", None, r#"{"data":1}"#).is_some());
+        assert!(json("$.data", None, r#"{"data":[1,2]}"#).is_none());
+        assert!(json("$.missing", None, r#"{"data":1}"#).is_some());
         // Malformed JSON fails the assertion.
-        assert!(check_json("$.x", Some("1"), "not json").is_some());
+        assert!(json("$.x", Some("1"), "not json").is_some());
     }
 
     #[tokio::test]
