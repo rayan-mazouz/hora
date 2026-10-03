@@ -15,6 +15,7 @@ use hora_core::announce::{self, Announcement};
 use hora_core::silence::SilenceError;
 use hora_core::{MAX_EVENT_TITLE_CHARS, config, fmt};
 
+mod probe_target;
 mod top;
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
@@ -849,8 +850,8 @@ async fn probe(args: &[String]) -> Result<(), CliError> {
         found.clone()
     } else {
         let (kind, target) = match parsed.kind_override {
-            Some(kind) => (kind, hora_core::config::probe_target(kind, parsed.target)),
-            None => hora_core::config::infer_probe(parsed.target),
+            Some(kind) => (kind, probe_target::probe_target(kind, parsed.target)),
+            None => probe_target::infer_probe(parsed.target),
         };
         hora_core::config::Monitor::ad_hoc(kind, target)
     };
