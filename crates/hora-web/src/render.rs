@@ -26,12 +26,13 @@ pub(crate) fn coord<T: TryInto<i32>>(value: T) -> f64 {
 /// empty for the public view, where deploy titles must not leak.
 pub(crate) fn sparkline(points: &[Point], status: &str, events: &[EventMarker]) -> String {
     if points.is_empty() {
+        // No viewBox: the stretched (`preserveAspectRatio="none"`) chart
+        // coordinates would squash the text too. Without one, user units are
+        // CSS pixels and the label is centred undistorted at any card width.
         return format!(
-            "<svg viewBox=\"0 0 {CHART_W} {CHART_H}\" class=\"spark {status}\" preserveAspectRatio=\"none\">\
-             <text x=\"{x:.0}\" y=\"{y:.0}\" class=\"spark-empty\" text-anchor=\"middle\">no data yet</text>\
-             </svg>",
-            x = CHART_W / 2.0,
-            y = CHART_H / 2.0,
+            "<svg class=\"spark {status}\">\
+             <text x=\"50%\" y=\"50%\" class=\"spark-empty\" text-anchor=\"middle\" \
+             dominant-baseline=\"middle\">no data yet</text></svg>"
         );
     }
 
@@ -155,7 +156,10 @@ mod tests {
     use super::*;
     #[test]
     fn sparkline_renders_svg_with_status_class() {
-        assert!(sparkline(&[], "up", &[]).contains("no data"));
+        let empty = sparkline(&[], "up", &[]);
+        assert!(empty.contains("no data"));
+        // The placeholder text must not be stretched with the chart.
+        assert!(!empty.contains("preserveAspectRatio") && !empty.contains("viewBox"));
         let points = vec![
             Point {
                 t: 1,

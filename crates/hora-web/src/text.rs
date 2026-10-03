@@ -51,13 +51,15 @@ pub(crate) fn render(summary: &Summary) -> String {
                 let _ = writeln!(out, "{}", "-".repeat(group.name.chars().count()));
             }
 
+            // Pad names to the group's longest so the figures line up
+            // (chars, not bytes: names may be accented).
+            let width = group
+                .monitors
+                .iter()
+                .map(|monitor| monitor.name.chars().count())
+                .max()
+                .unwrap_or(0);
             for monitor in &group.monitors {
-                let status_symbol = match monitor.status {
-                    "up" => "●",
-                    "degraded" => "◐",
-                    "down" => "○",
-                    _ => "?",
-                };
                 let uptime = monitor
                     .uptime_permille
                     .map_or_else(|| "-".to_owned(), crate::summary::format_permille);
@@ -67,8 +69,11 @@ pub(crate) fn render(summary: &Summary) -> String {
 
                 let _ = writeln!(
                     out,
-                    "  {} {}  {:>8}  {:>8}",
-                    status_symbol, monitor.name, uptime, latency
+                    "  {} {:<width$}  {:>8}  {:>8}",
+                    status_symbol(monitor.status),
+                    monitor.name,
+                    uptime,
+                    latency
                 );
 
                 if let Some(cause) = &monitor.cause {
@@ -86,15 +91,19 @@ pub(crate) fn render(summary: &Summary) -> String {
         let _ = writeln!(out, "Peers");
         let _ = writeln!(out, "-----");
         for peer in &summary.peers {
-            let status_symbol = match peer.status {
-                "up" => "●",
-                "degraded" => "◐",
-                "down" => "○",
-                _ => "?",
-            };
-            let _ = writeln!(out, "  {} {}", status_symbol, peer.name);
+            let _ = writeln!(out, "  {} {}", status_symbol(peer.status), peer.name);
         }
     }
 
     out
+}
+
+/// The one-glyph status marker of a monitor or peer line.
+fn status_symbol(status: &str) -> &'static str {
+    match status {
+        "up" => "●",
+        "degraded" => "◐",
+        "down" => "○",
+        _ => "?",
+    }
 }
