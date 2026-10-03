@@ -1427,6 +1427,7 @@ dependencies = [
  "futures-util",
  "hickory-resolver",
  "hora-notify",
+ "nix",
  "notify",
  "regex",
  "reqwest",
