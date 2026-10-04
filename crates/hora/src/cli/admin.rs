@@ -1,6 +1,9 @@
 //! Operating the instance: config check, test alert, backup, digest preview,
 //! doctor and the Uptime Kuma import.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use anyhow::Context as _;
 use hora_core::config;
 
@@ -22,16 +25,70 @@ pub(crate) fn import_kuma(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-/// `hora check`: validate the config and exit non-zero on error - meant for
-/// CI and pre-deploy hooks.
-pub(crate) fn check_config() -> Result<(), CliError> {
+/// `hora check [--strict]`: validate the config, print every warning on
+/// stderr, and exit non-zero on error - or, with `--strict`, on a warning too.
+/// Meant for CI and pre-deploy hooks.
+pub(crate) fn check_config(args: &[String]) -> Result<(), CliError> {
+    let strict = match args {
+        [] => false,
+        [flag] if flag == "--strict" => true,
+        _ => return Err(usage("Usage: hora check [--strict]")),
+    };
     let config_path = config::path();
-    match config::load_from(&config_path) {
-        Ok(_) => {
-            println!("{} is valid.", config_path.display());
-            Ok(())
+    let (loaded, warnings) = count_warnings(|| config::load_from(&config_path));
+    if let Err(err) = loaded {
+        return Err(CliError::Failed(format!("Configuration error: {err:#}")));
+    }
+    let path = config_path.display();
+    let counted = match warnings {
+        1 => "1 warning".to_owned(),
+        n => format!("{n} warnings"),
+    };
+    match warnings {
+        0 => println!("{path} is valid."),
+        _ if strict => {
+            return Err(CliError::Failed(format!(
+                "{path} is valid but has {counted} (--strict)."
+            )));
         }
-        Err(err) => Err(CliError::Failed(format!("Configuration error: {err:#}"))),
+        _ => println!("{path} is valid, with {counted} (above)."),
+    }
+    Ok(())
+}
+
+/// Run `f` with its warnings and errors logged to stderr, and return how many
+/// were logged alongside its result.
+pub(crate) fn count_warnings<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    use std::io::IsTerminal as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let counter = WarningCounter::default();
+    let count = Arc::clone(&counter.0);
+    let print = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .without_time()
+        .with_target(false);
+    let subscriber = tracing_subscriber::registry()
+        .with(print)
+        .with(counter)
+        .with(tracing_subscriber::filter::LevelFilter::WARN);
+    let result = tracing::subscriber::with_default(subscriber, f);
+    (result, count.load(Ordering::Relaxed))
+}
+
+/// Counts the events it sees (the subscriber filters them to warnings and
+/// errors).
+#[derive(Default)]
+struct WarningCounter(Arc<AtomicUsize>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCounter {
+    fn on_event(
+        &self,
+        _event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.0.fetch_add(1, Ordering::Relaxed);
     }
 }
 

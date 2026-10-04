@@ -66,9 +66,12 @@ hora check
 
 validates the configuration and exits non-zero on error - made for CI and
 pre-deploy hooks. Validation is strict: inverted maintenance windows, cyclic
-`depends_on` graphs, private monitors without a viewer token, short or empty
-tokens and malformed cron schedules are all rejected at load, not discovered
-at 3 a.m.
+`depends_on` graphs, private monitors without a viewer token, empty tokens
+and malformed cron schedules are all rejected at load, not discovered at
+3 a.m. What is allowed but probably a mistake (a token under 16 characters,
+a `timeout_secs` longer than `interval_secs`) is a warning: `hora check`
+prints each one and counts them, and `hora check --strict` exits non-zero
+on any.
 
 ### Bounds
 

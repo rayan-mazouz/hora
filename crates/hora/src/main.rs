@@ -39,7 +39,7 @@ async fn run_subcommand(args: &[String]) -> Result<(), CliError> {
     let rest = &args[2..];
     match args[1].as_str() {
         "import" => cli::admin::import_kuma(rest),
-        "check" => cli::admin::check_config(),
+        "check" => cli::admin::check_config(rest),
         "test-alert" => {
             // Tracing first: delivery failures surface as per-channel
             // warnings from the notifiers, and that is the whole point.

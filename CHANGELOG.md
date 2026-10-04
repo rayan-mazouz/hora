@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`hora check` shows the warnings.** They were dropped: a config with a
+  short token printed only "valid". Each
+  warning is now printed on stderr and counted in the verdict
+  (`config.toml is valid, with 2 warnings (above).`), and
+  `hora check --strict` exits non-zero on any, for CI.
+
 ## [0.11.1] - 2026-10-04
 
 Your logo on your status page, and word of new releases. The header can

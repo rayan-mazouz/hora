@@ -151,3 +151,21 @@ async fn incident_ids_resolve_last_or_a_number() {
         other => panic!("expected a failure on an empty database, got {other:?}"),
     }
 }
+
+#[test]
+fn count_warnings_sees_config_warnings() {
+    let (config, warnings) = super::admin::count_warnings(|| {
+        hora_core::config::parse(
+            r#"
+                [page]
+                [server]
+                auth_token = "short"
+            "#,
+        )
+    });
+    config.expect("a short token is a warning, not an error");
+    assert_eq!(warnings, 1);
+
+    let ((), warnings) = super::admin::count_warnings(|| tracing::info!("not counted"));
+    assert_eq!(warnings, 0);
+}

@@ -128,7 +128,8 @@ pub(crate) fn print_help() {
     println!();
     println!("Commands:");
     println!("  import kuma <file>  Convert an Uptime Kuma backup JSON to Hora TOML (stdout)");
-    println!("  check               Validate the configuration and exit");
+    println!("  check [--strict]    Validate the configuration, print its warnings and exit");
+    println!("                      (--strict: exit non-zero on a warning too)");
     println!("  doctor              Diagnose the runtime environment (IPv6, ICMP socket,");
     println!("                      DNS resolver, listen port, database)");
     println!("  tune [id] [--days N]  Replay stored history against other fail_threshold /");

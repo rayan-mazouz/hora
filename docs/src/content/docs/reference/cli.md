@@ -13,7 +13,7 @@ a wrong path fails loudly instead of operating on an empty file.
 
 ```sh
 hora                                   # run the monitor
-hora check                             # validate the config; non-zero exit on error
+hora check [--strict]                  # validate the config; non-zero exit on error
 hora test-alert [monitor-id]           # send a test alert through the real chain
 hora silence <ids|all> <duration> [reason]
 hora silence list
@@ -42,7 +42,10 @@ hora --version
 ## `hora check`
 
 Validates the configuration and exits non-zero on error - made for CI and
-pre-deploy hooks. Validation is strict; see
+pre-deploy hooks. Warnings (a short token, a `timeout_secs` longer than the
+interval, ...) are printed on stderr and counted in the verdict
+(`config.toml is valid, with 2 warnings (above).`); `--strict` exits
+non-zero on a warning too. Validation is strict; see
 [Configuration](../../configuration/#validation).
 
 ## `hora test-alert`
