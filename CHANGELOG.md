@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **An unset `${VAR}` fails the load.** It expanded to an empty string, so
+  a channel whose secret was missing from the environment loaded, passed
+  `hora check`, and was silently left out. The error names the key and the
+  variable; `${VAR:-}` allows an empty value, `${VAR:-fallback}` sets a
+  default.
+- **An empty channel secret fails the load** (`token`, `webhook_url`,
+  `url`, `pass`, `user`, `chat_id`, ...) instead of disabling the channel.
+  `hora doctor` no longer reports disabled channels: there are none.
+
 ### Fixed
 
 - **`hora check` shows the warnings.** They were dropped: a config with a

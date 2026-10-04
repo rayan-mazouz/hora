@@ -58,6 +58,16 @@ docker run --rm -v "$PWD/hora-config:/etc/hora" ghcr.io/uplg/hora:latest check
 As a rule, deploy a new binary before a config that uses its new keys: an
 older binary refuses keys it does not know.
 
+## 0.11 to the next release
+
+No migration, but some configs that loaded no longer do: run `hora check`
+with the new binary first.
+
+- **An unset `${VAR}` fails the load**, naming the key and the variable.
+  Set it, or write `${VAR:-}` where an empty value is meant.
+- **An empty channel secret fails the load** instead of disabling the
+  channel.
+
 ## 0.10 to 0.11
 
 0.11 brings the new status page and a hardening pass. Four

@@ -54,11 +54,11 @@ interval_secs = 60
 timeout_secs = 10
 ```
 
-Any `${VAR}` in the file is replaced from the environment at load, so secrets
-stay out of the config: pass `-e HORA_TELEGRAM_TOKEN=123:abc` to the
-container. Validate with `hora check` (non-zero exit on error, `--strict` on a
-warning too; CI-friendly),
-and verify your notification chain with `hora test-alert` *before* the first
+Any `${VAR}` in the file is replaced from the environment at load (an unset
+one is an error), so secrets stay out of the config: pass
+`-e HORA_TELEGRAM_TOKEN=123:abc` to the container. Validate with `hora check`
+(non-zero exit on error, `--strict` on a warning too; CI-friendly), and
+verify your notification chain with `hora test-alert` *before* the first
 real incident.
 
 ## ICMP monitors in Docker and Kubernetes

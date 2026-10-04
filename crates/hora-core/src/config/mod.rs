@@ -582,11 +582,11 @@ pub fn parse_with_exec_dir(
     // Parse first, expand `${VAR}` afterwards - in string values only - so
     // secrets (channel tokens/URLs) can stay out of the file:
     // `webhook_url = "${OPS_DISCORD}"`. Expanding the raw text instead would
-    // also hydrate comments (warning about unset variables in commented-out
+    // also hydrate comments (failing on unset variables in commented-out
     // examples) and let a syntax error echo an already-expanded secret back,
     // since TOML errors quote the offending line.
     let mut table: toml::Table = toml::from_str(toml_str).context("parsing config TOML")?;
-    expand_env_table(&mut table);
+    expand_env_table(&mut table)?;
     let mut config: Config = table.try_into().map_err(read_error)?;
     apply_env_overrides(&mut config);
     // Canonicalized once, here: the exec probe's escape check compares the

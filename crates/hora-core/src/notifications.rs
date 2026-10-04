@@ -26,9 +26,7 @@ pub use hora_notify::{AlertSeverity, ChannelHealthEntry, Event};
 /// A hot-swappable set of notification channels shared across tasks.
 pub type Notifiers = Arc<ArcSwap<Dispatcher>>;
 
-/// Build the dispatcher for the current configuration. Channels whose secret is
-/// empty (e.g. an unset `${VAR}`) are skipped rather than failing at send time.
-/// When `health` is `Some`, the existing per-channel failure counters are
+/// Build the dispatcher for the current configuration. When `health` is `Some`, the existing per-channel failure counters are
 /// reused — used on config reload so the watchdog's memory survives.
 #[must_use]
 pub fn build(config: &Config, client: &Client, health: Option<HealthMap>) -> Dispatcher {
@@ -52,14 +50,12 @@ pub fn health_snapshot(notifiers: &Notifiers) -> Vec<ChannelHealthEntry> {
     notifiers.load().health_snapshot()
 }
 
-/// Instantiate the configured channels. Channels whose secret is empty (e.g. an
-/// unset `${VAR}`) are skipped rather than failing at send time; a misconfigured
-/// email relay disables just that channel (warned, not fatal).
+/// Instantiate the configured channels. A misconfigured email relay disables
+/// just that channel (warned, not fatal).
 fn build_channels(config: &Config, client: &Client) -> Vec<(String, Box<dyn Notifier>)> {
     config
         .channels
         .iter()
-        .filter(|channel| channel.is_configured())
         .filter_map(|channel| {
             let notifier: Box<dyn Notifier> = match channel {
                 Channel::Telegram { token, chat_id, .. } => Box::new(TelegramNotifier::new(

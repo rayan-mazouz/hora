@@ -39,7 +39,8 @@ type = "discord"
 webhook_url = "${DISCORD_WEBHOOK}"
 ```
 
-An empty secret (an unset `${VAR}`) simply disables that channel. Delivery
+An unset `${VAR}` or an empty secret fails the load (`hora check` names
+it). Delivery
 retries transient failures, and down alerts include a snippet of the failing
 response body.
 

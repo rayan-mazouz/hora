@@ -4,6 +4,16 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
 
+## 0.11.1 → Unreleased
+
+No migration. Some configs that loaded no longer do; run `hora check` with
+the new binary against your config before you roll out:
+
+- **An unset `${VAR}` fails the load**, naming the key and the variable
+  (it expanded to `""`). Set the variable, or write `${VAR:-}` where an
+  empty value is meant.
+- **An empty channel secret fails the load** (it disabled the channel).
+
 ## 0.11.0 → 0.11.1
 
 No migration. Two new optional keys, `[page] logo` / `logo_dark` and the

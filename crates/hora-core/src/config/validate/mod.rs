@@ -8,9 +8,9 @@ use std::collections::HashSet;
 use super::{Channel, Config, Kind, Secret, parse_cron};
 pub(crate) use monitor::monitor_from_raw;
 
-/// A configured access token must be non-empty: an empty one (often the result
-/// of an unset `${VAR}` expanding to "") would authorize a blank `?token=`, since
-/// the constant-time compare treats `"" == ""` as a match. Short-but-set tokens
+/// A configured access token must be non-empty: an empty one would authorize a
+/// blank `?token=`, since the constant-time compare treats `"" == ""` as a
+/// match. Short-but-set tokens
 /// are the operator's call, so they only warn.
 fn validate_token(label: &str, token: Option<&Secret>) -> anyhow::Result<()> {
     if let Some(token) = token {
@@ -256,6 +256,13 @@ fn validate_channels(config: &Config) -> anyhow::Result<HashSet<&str>> {
             "duplicate channel name: {}",
             channel.name()
         );
+        for (field, value) in required_channel_fields(channel) {
+            anyhow::ensure!(
+                !value.is_empty(),
+                "channel {}: {field} must not be empty",
+                channel.name()
+            );
+        }
         // These channels send credentials over the configured URL (in the URL
         // itself, or - for Matrix - in a header); warn on cleartext http.
         let url = match channel {
@@ -279,6 +286,45 @@ fn validate_channels(config: &Config) -> anyhow::Result<HashSet<&str>> {
         }
     }
     Ok(channel_names)
+}
+
+/// The fields a channel cannot send without, by name. An empty one would only
+/// show at the first alert, as a failed delivery.
+fn required_channel_fields(channel: &Channel) -> Vec<(&'static str, &str)> {
+    match channel {
+        Channel::Telegram { token, chat_id, .. } => {
+            vec![("token", token.as_ref()), ("chat_id", chat_id)]
+        }
+        Channel::Discord { webhook_url, .. } | Channel::Slack { webhook_url, .. } => {
+            vec![("webhook_url", webhook_url.as_ref())]
+        }
+        Channel::Webhook { url, .. } => vec![("url", url.as_ref())],
+        Channel::Matrix {
+            homeserver,
+            token,
+            room_id,
+            ..
+        } => vec![
+            ("homeserver", homeserver),
+            ("token", token.as_ref()),
+            ("room_id", room_id),
+        ],
+        Channel::FreeMobile { user, pass, .. } => vec![("user", user), ("pass", pass.as_ref())],
+        Channel::Email { host, from, to, .. } => vec![("host", host), ("from", from), ("to", to)],
+        Channel::Ntfy { url, token, .. } => {
+            let mut fields = vec![("url", url.as_ref())];
+            if let Some(token) = token {
+                fields.push(("token", token.as_ref()));
+            }
+            fields
+        }
+        Channel::Gotify { url, token, .. } => {
+            vec![("url", url.as_ref()), ("token", token.as_ref())]
+        }
+        Channel::Pushover { token, user, .. } => {
+            vec![("token", token.as_ref()), ("user", user.as_ref())]
+        }
+    }
 }
 
 /// Validate the `[health]` section and the `[[peers]]` mesh: peers require a

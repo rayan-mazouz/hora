@@ -627,15 +627,83 @@ fn channel_debug_shows_routing_fields() {
 #[test]
 fn expand_env_dollar_escape() {
     // `$$` is a literal `$`, so `$${id}` is a literal `${id}` (no env lookup).
-    assert_eq!(expand_env("$${id}"), "${id}");
-    assert_eq!(expand_env("a$$b"), "a$b");
+    assert_eq!(expand_env("$${id}").unwrap(), "${id}");
+    assert_eq!(expand_env("a$$b").unwrap(), "a$b");
+}
+
+#[test]
+fn expand_env_fallback() {
+    assert_eq!(expand_env("${HORA_SURELY_UNSET_FALLBACK:-}").unwrap(), "");
+    assert_eq!(
+        expand_env("a${HORA_SURELY_UNSET_FALLBACK:-b}c").unwrap(),
+        "abc"
+    );
+}
+
+#[test]
+fn unset_env_var_is_a_load_error_naming_it() {
+    let error = super::parse(
+        r#"
+            [page]
+            [server]
+            [[channels]]
+            name = "tg"
+            type = "telegram"
+            token = "${HORA_SURELY_UNSET_TELEGRAM_TOKEN}"
+            chat_id = "42"
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("channels[0].token") && error.contains("HORA_SURELY_UNSET_TELEGRAM_TOKEN"),
+        "{error}"
+    );
+}
+
+#[test]
+fn empty_channel_secret_is_a_load_error() {
+    let error = load(
+        r#"
+            [page]
+            [server]
+            [[channels]]
+            name = "tg"
+            type = "telegram"
+            token = "${HORA_SURELY_UNSET_TELEGRAM_TOKEN:-}"
+            chat_id = "42"
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("channel tg: token must not be empty"),
+        "{error}"
+    );
+
+    let error = load(
+        r#"
+            [page]
+            [server]
+            [[channels]]
+            name = "push"
+            type = "ntfy"
+            url = "https://ntfy.sh/topic"
+            token = ""
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("channel push: token must not be empty"),
+        "{error}"
+    );
 }
 
 #[test]
 fn env_expansion_only_touches_string_values() {
     // Expansion runs on the parsed document, so a `${VAR}` inside a comment
-    // is never looked up or hydrated (raw-text expansion used to splice
-    // values - and unset-variable warnings - into commented-out examples).
+    // is never looked up or hydrated.
     let toml = r#"
             [page]
             [server]
@@ -760,7 +828,6 @@ fn parses_matrix_and_freemobile_channels() {
     assert_eq!(config.channels.len(), 2);
     assert_eq!(config.channels[0].name(), "ops-matrix");
     assert_eq!(config.channels[1].name(), "oncall-sms");
-    assert!(config.channels[0].is_configured() && config.channels[1].is_configured());
     validate(&config).expect("valid");
     // Neither secret may surface through Debug.
     let dump = format!("{:?}", config.channels);
@@ -1569,9 +1636,8 @@ fn private_monitor_requires_auth_token() {
     let config = parse(&private.replace("{token}", "auth_token = \"s3cret\""));
     validate(&config).expect("private monitor with token is valid");
 
-    // An interpolated-but-unset token expands to "" - now rejected outright
-    // (an empty token would authorize a blank `?token=`), not silently treated
-    // as "no token".
+    // An empty token is rejected (it would authorize a blank `?token=`), not
+    // treated as "no token".
     let error = load(&private.replace("{token}", "auth_token = \"\""))
         .unwrap_err()
         .to_string();

@@ -102,31 +102,6 @@ impl Channel {
             | Self::Pushover { name, .. } => name,
         }
     }
-
-    /// Whether the channel's required secret is present (an empty one - e.g. an
-    /// unset `${VAR}` - disables the channel rather than erroring at send time).
-    #[must_use]
-    pub fn is_configured(&self) -> bool {
-        match self {
-            Self::Telegram { token, chat_id, .. } => !token.is_empty() && !chat_id.is_empty(),
-            Self::Discord { webhook_url, .. } | Self::Slack { webhook_url, .. } => {
-                !webhook_url.is_empty()
-            }
-            Self::Webhook { url, .. } | Self::Ntfy { url, .. } => !url.is_empty(),
-            Self::Matrix {
-                homeserver,
-                token,
-                room_id,
-                ..
-            } => !homeserver.is_empty() && !token.is_empty() && !room_id.is_empty(),
-            Self::FreeMobile { user, pass, .. } => !user.is_empty() && !pass.is_empty(),
-            Self::Email { host, from, to, .. } => {
-                !host.is_empty() && !from.is_empty() && !to.is_empty()
-            }
-            Self::Gotify { url, token, .. } => !url.is_empty() && !token.is_empty(),
-            Self::Pushover { token, user, .. } => !token.is_empty() && !user.is_empty(),
-        }
-    }
 }
 
 fn default_smtp_port() -> u16 {

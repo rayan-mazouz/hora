@@ -220,62 +220,32 @@ fn icmp_socket(config: &Config) -> Finding {
     }
 }
 
-/// Notification channels: how many are configured, and whether any are
-/// silently disabled by an empty secret (e.g. an unset `${VAR}`). A config
-/// with zero working channels means alerts go nowhere — the one class of
-/// problem the watchdog itself can't warn about (it needs at least one
-/// working channel to reach the operator).
+/// Notification channels: how many are configured. A config with none means
+/// alerts go nowhere - the one class of problem the watchdog itself can't warn
+/// about (it needs at least one working channel to reach the operator).
 fn notification_channels(config: &Config) -> Finding {
-    let active: Vec<&str> = config
+    let names: Vec<&str> = config
         .channels
         .iter()
-        .filter(|ch| ch.is_configured())
         .map(super::config::Channel::name)
         .collect();
-    let disabled: Vec<&str> = config
-        .channels
-        .iter()
-        .filter(|ch| !ch.is_configured())
-        .map(super::config::Channel::name)
-        .collect();
-    if active.is_empty() && disabled.is_empty() {
+    if names.is_empty() {
         return Finding::new(
             "channels",
             Status::Warn,
             "no notification channels configured — alerts go nowhere",
         );
     }
-    if active.is_empty() {
-        return Finding::new(
-            "channels",
-            Status::Warn,
-            format!(
-                "all {} channel{} disabled by empty secret ({}) — alerts go nowhere",
-                disabled.len(),
-                if disabled.len() == 1 { "" } else { "s" },
-                disabled.join(", "),
-            ),
-        );
-    }
-    let detail = if disabled.is_empty() {
+    Finding::new(
+        "channels",
+        Status::Ok,
         format!(
             "{} notification channel{} configured: {}",
-            active.len(),
-            if active.len() == 1 { "" } else { "s" },
-            active.join(", "),
-        )
-    } else {
-        format!(
-            "{} active channel{} ({}); {} disabled by empty secret ({}) — \
-             alerts reach the active ones only",
-            active.len(),
-            if active.len() == 1 { "" } else { "s" },
-            active.join(", "),
-            disabled.len(),
-            disabled.join(", "),
-        )
-    };
-    Finding::new("channels", Status::Ok, detail)
+            names.len(),
+            if names.len() == 1 { "" } else { "s" },
+            names.join(", "),
+        ),
+    )
 }
 
 /// The system resolver, exercised with a real lookup - the probes' DNS path.
