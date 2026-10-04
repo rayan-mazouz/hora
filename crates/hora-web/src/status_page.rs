@@ -76,6 +76,37 @@ pub(crate) struct StatusPage<'a> {
     pub(crate) peers: Vec<PeerRow>,
     /// The latest incidents this audience may see.
     pub(crate) recent: &'a [crate::summary::RecentIncident],
+    /// A newer Hora than this build (operator only).
+    pub(crate) update: Option<UpdateNotice>,
+}
+
+/// The operator's "a new Hora is out" banner.
+pub(crate) struct UpdateNotice {
+    pub(crate) version: String,
+    pub(crate) running: &'static str,
+    pub(crate) summary: String,
+    /// The release's page; GitHub's own, or the list of releases.
+    pub(crate) url: String,
+}
+
+impl UpdateNotice {
+    fn new(update: &hora_core::updates::Update) -> Self {
+        // The page comes from GitHub's answer: link it only where it belongs.
+        let url = if update.url.starts_with("https://github.com/") {
+            update.url.clone()
+        } else {
+            format!(
+                "https://github.com/{}/releases",
+                hora_core::updates::PROJECT
+            )
+        };
+        Self {
+            version: update.version.clone(),
+            running: hora_core::updates::RUNNING,
+            summary: update.summary.clone(),
+            url,
+        }
+    }
 }
 
 /// A watched peer, for the operator's "who keeps watch".
@@ -229,6 +260,8 @@ impl Counts {
 /// How a page is asked for, beside its summary.
 pub(crate) struct Ask {
     pub(crate) operator: bool,
+    /// A newer Hora than this build, if one is out (shown to the operator).
+    pub(crate) update: Option<std::sync::Arc<hora_core::updates::Update>>,
     /// A `?token=` was presented (a wrong one, if nothing is visible).
     pub(crate) token_given: bool,
     pub(crate) group_page: bool,
@@ -361,6 +394,11 @@ pub(crate) fn build<'a>(summary: &'a Summary, config: &Config, ask: &Ask) -> Sta
         empty,
         bad_token: ask.token_given && empty == "private",
         group_page: ask.group_page,
+        update: ask
+            .update
+            .as_deref()
+            .filter(|_| ask.operator)
+            .map(UpdateNotice::new),
         operator: ask.operator,
         peers: if ask.operator {
             summary

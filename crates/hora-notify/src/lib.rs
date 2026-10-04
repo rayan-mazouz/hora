@@ -125,6 +125,9 @@ pub struct Release<'a> {
     pub latest: &'a str,
     /// The release's page: its notes.
     pub url: &'a str,
+    /// What the release brings, in a sentence or two, when known (Hora's
+    /// own releases: the opening of their changelog entry).
+    pub notes: Option<&'a str>,
 }
 
 /// An alertable event. Borrows its data so emitting one is allocation-free.

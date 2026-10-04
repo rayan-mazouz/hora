@@ -71,7 +71,7 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
     let vantage_map = hora_core::mesh::vantage::new_map();
     let vantage_task = hora_core::mesh::vantage::spawn_poller(
         handle.config.clone(),
-        client,
+        client.clone(),
         Arc::clone(&vantage_map),
         shutdown_rx.clone(),
     );
@@ -80,6 +80,18 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
         store.clone(),
         handle.config.clone(),
         handle.notifier.clone(),
+        shutdown_rx.clone(),
+    );
+
+    // Hora's own new releases, for the operator's page and channels.
+    // Self-gating on `[updates] check`, read live.
+    let updates = hora_core::updates::new_slot();
+    let updates_task = hora_core::updates::spawn(
+        store.clone(),
+        handle.config.clone(),
+        handle.notifier.clone(),
+        client,
+        Arc::clone(&updates),
         shutdown_rx.clone(),
     );
 
@@ -101,7 +113,8 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
         Arc::clone(&last_tick),
         handle.notifier.clone(),
     )
-    .with_vantage(vantage_map);
+    .with_vantage(vantage_map)
+    .with_updates(updates);
     // Build the status summary while the server comes up, so the first page
     // view finds it ready instead of waiting for it.
     state.start_refresher();
@@ -124,7 +137,8 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
             prune_task,
             heartbeat_task,
             digest_task,
-            vantage_task
+            vantage_task,
+            updates_task
         );
     })
     .await;

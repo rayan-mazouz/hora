@@ -65,6 +65,10 @@ pub struct Config {
     /// 2 incidents, budget 18m of 43m left"). Absent = no digest.
     #[serde(default)]
     pub digest: Option<Digest>,
+    /// Hora's own new releases, told to the operator (status page banner and
+    /// one message per release). On by default.
+    #[serde(default)]
+    pub updates: Updates,
     /// Where exec-probe executables live, from the `HORA_EXEC_DIR`
     /// environment variable - never from the file. The separation is the
     /// security model: the hot-reloadable config alone must not be able to
@@ -119,6 +123,34 @@ pub struct Digest {
     /// Channels to send through; absent = every configured channel.
     #[serde(default)]
     pub notify: Option<Vec<String>>,
+}
+
+/// Hora's own update check: once a day at most, GitHub is asked for Hora's
+/// latest release; a newer one than this build shows on the operator's status
+/// page and is sent once through the channels, with its changelog's opening.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Updates {
+    /// Ask GitHub for Hora's latest release. `false` sends nothing out.
+    #[serde(default = "default_true")]
+    pub check: bool,
+    /// Channels to tell; absent = every configured channel, `[]` = none (the
+    /// banner alone).
+    #[serde(default)]
+    pub notify: Option<Vec<String>>,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self {
+            check: true,
+            notify: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_digest_schedule() -> String {
@@ -222,6 +254,76 @@ pub struct Page {
     pub title: String,
     #[serde(default = "default_history_days")]
     pub history_days: u16,
+    /// An image shown beside the title in place of its initial tile: an SVG,
+    /// PNG, WebP or JPEG file, relative to the config file. Read with the
+    /// config, into [`Page::logo_image`].
+    #[serde(default)]
+    pub logo: Option<PathBuf>,
+    /// The logo for the dark theme, the same way; without it, [`Page::logo`]
+    /// shows in both themes.
+    #[serde(default)]
+    pub logo_dark: Option<PathBuf>,
+    /// The bytes of [`Page::logo`], once [`load_from`] has read them.
+    #[serde(skip)]
+    pub logo_image: Option<Logo>,
+    /// The bytes of [`Page::logo_dark`], once [`load_from`] has read them.
+    #[serde(skip)]
+    pub logo_dark_image: Option<Logo>,
+}
+
+/// The operator's logo, read from [`Page::logo`] (served at `/logo`) or
+/// [`Page::logo_dark`] (at `/logo-dark`).
+#[derive(Debug, Clone)]
+pub struct Logo {
+    pub bytes: std::sync::Arc<[u8]>,
+    pub content_type: &'static str,
+    /// A digest of the bytes, the cache buster in the page's `?v=`.
+    pub version: String,
+}
+
+/// The largest logo Hora accepts: a header mark, not a photograph.
+const LOGO_MAX_BYTES: u64 = 256 * 1024;
+
+impl Logo {
+    /// Read the logo at `path`, typed by its extension.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file is missing, too large, or not an SVG,
+    /// PNG, WebP or JPEG.
+    pub fn read(path: &Path) -> anyhow::Result<Self> {
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase);
+        let content_type = match extension.as_deref() {
+            Some("svg") => "image/svg+xml",
+            Some("png") => "image/png",
+            Some("webp") => "image/webp",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            _ => anyhow::bail!(
+                "logo {}: expected an .svg, .png, .webp or .jpg file",
+                path.display()
+            ),
+        };
+        let size = std::fs::metadata(path)
+            .with_context(|| format!("reading logo {}", path.display()))?
+            .len();
+        anyhow::ensure!(
+            size <= LOGO_MAX_BYTES,
+            "logo {}: {size} bytes, the limit is {LOGO_MAX_BYTES}",
+            path.display()
+        );
+        let bytes =
+            std::fs::read(path).with_context(|| format!("reading logo {}", path.display()))?;
+        let mut version = crate::cert::sha256_hex(&bytes);
+        version.truncate(12);
+        Ok(Self {
+            bytes: bytes.into(),
+            content_type,
+            version,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -429,16 +531,31 @@ pub fn load() -> anyhow::Result<Config> {
     load_from(&path())
 }
 
-/// Load `path`, apply environment overrides, and validate.
+/// Load `path`, apply environment overrides, validate, and read the
+/// `[page]` logos it names (relative to `path`).
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be read, the TOML is invalid, or a
-/// monitor is misconfigured (empty/duplicate id, zero interval).
+/// Returns an error if the file cannot be read, the TOML is invalid, a
+/// monitor is misconfigured (empty/duplicate id, zero interval), or the logo
+/// cannot be read.
 pub fn load_from(path: &Path) -> anyhow::Result<Config> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
-    parse(&raw)
+    let mut config = parse(&raw)?;
+    let dir = path.parent().unwrap_or(Path::new(""));
+    let page = &mut config.page;
+    anyhow::ensure!(
+        page.logo.is_some() || page.logo_dark.is_none(),
+        "page.logo_dark needs page.logo, the light theme's"
+    );
+    if let Some(logo) = &page.logo {
+        page.logo_image = Some(Logo::read(&dir.join(logo))?);
+    }
+    if let Some(logo) = &page.logo_dark {
+        page.logo_dark_image = Some(Logo::read(&dir.join(logo))?);
+    }
+    Ok(config)
 }
 
 /// Parse, env-override and validate a configuration from TOML text.

@@ -33,11 +33,13 @@ const MAX_VERSION_LEN: usize = 64;
 /// crashing daemon does not spend the anonymous API's 60 requests an hour.
 const RELEASE_CHECK_SECS: i64 = 6 * 3600;
 
-/// A published release: its tag, and the page that carries its notes.
+/// A published release: its tag, the page that carries its notes, and the
+/// notes themselves (Markdown, empty when the release has none).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Release {
     pub tag: String,
     pub url: String,
+    pub notes: String,
 }
 
 /// The latest published release of `project` (`owner/repo`).
@@ -66,13 +68,15 @@ pub(crate) async fn latest(client: &reqwest::Client, project: &str) -> anyhow::R
     release_of(&body).ok_or_else(|| anyhow::anyhow!("no tag_name in GitHub's answer"))
 }
 
-/// The tag and page of a release object of GitHub's API.
+/// The tag, page and notes of a release object of GitHub's API.
 fn release_of(body: &serde_json::Value) -> Option<Release> {
     let tag = body.get("tag_name")?.as_str()?.trim();
     let url = body.get("html_url")?.as_str()?;
+    let notes = body.get("body").and_then(serde_json::Value::as_str);
     (!tag.is_empty()).then(|| Release {
         tag: tag.to_owned(),
         url: url.to_owned(),
+        notes: notes.unwrap_or_default().to_owned(),
     })
 }
 
@@ -231,6 +235,7 @@ pub(crate) async fn check_releases(
                     current: &current,
                     latest: &latest,
                     url: &url,
+                    notes: None,
                 }),
                 monitor.notify.as_deref(),
             )
@@ -283,6 +288,7 @@ mod tests {
             Some(Release {
                 tag: "v1.9.2".to_owned(),
                 url: "https://github.com/matrix-construct/tuwunel/releases/tag/v1.9.2".to_owned(),
+                notes: String::new(),
             })
         );
         assert_eq!(

@@ -198,7 +198,23 @@ Caddy, nginx or Cloudflare. Two settings matter there:
 [page]
 title = "My services"   # shown at the top and in the browser tab
 history_days = 90       # days in the uptime bar
+logo = "logo.svg"       # beside the title, instead of its initial
+logo_dark = "logo-dark.svg"   # optional: the dark theme's
 ```
+
+The header shows the title beside a tile with its initial; `logo` puts
+your own mark there instead, on every page and on the monthly report. It is
+an SVG, PNG, WebP or JPEG file of 256 KiB at most, relative to the config
+file (in Docker, `/etc/hora/logo.svg` next to the config). Hora reads it
+with the config, so after replacing the image alone, save the config to
+reload it.
+
+If your mark needs other colours on a dark page, give that version as
+`logo_dark`: the page shows the one of the theme in force, the visitor's
+system or the one they chose with the theme button (`?theme=`), and prints
+the light one. Use two files rather than an SVG with its own
+`@media (prefers-color-scheme: dark)` rules: an image follows the system,
+never the theme button.
 
 Per monitor: `group`, `public`, `public_error_detail`, `depends_on` (for
 the cause and impact lines), `slo_uptime` (for the budget), and

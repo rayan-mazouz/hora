@@ -99,6 +99,7 @@ mod tests {
             current: "v1",
             latest: "v2",
             url: "https://x/r",
+            notes: None,
         }));
         assert_eq!(release.priority, 3);
 

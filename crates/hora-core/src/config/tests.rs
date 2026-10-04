@@ -2200,3 +2200,71 @@ fn a_monitor_error_reads_as_before() {
         "monitor db: keyword/json_query/number_regex/proxy require an http monitor"
     );
 }
+
+/// `[page] logo` (and `logo_dark`) is read relative to the config file, typed
+/// by extension and versioned by its bytes; a missing, oversized or unknown
+/// file fails the load, and so does a dark logo without a light one.
+#[test]
+fn page_logo_is_read_next_to_the_config() {
+    let dir = std::env::temp_dir().join(format!("hora-logo-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("config.toml");
+    let write_config = |logo: &str| {
+        std::fs::write(
+            &config_path,
+            MINIMAL.replace("[page]", &format!("[page]\nlogo = \"{logo}\"")),
+        )
+        .unwrap();
+    };
+
+    std::fs::write(dir.join("mark.svg"), "<svg/>").unwrap();
+    write_config("mark.svg");
+    let config = super::load_from(&config_path).expect("loads");
+    let logo = config.page.logo_image.expect("logo read");
+    assert_eq!(logo.content_type, "image/svg+xml");
+    assert_eq!(&*logo.bytes, b"<svg/>");
+    assert_eq!(logo.version.len(), 12);
+
+    std::fs::write(dir.join("mark.svg"), "<svg></svg>").unwrap();
+    let again = super::load_from(&config_path).expect("loads");
+    assert_ne!(again.page.logo_image.expect("logo").version, logo.version);
+
+    std::fs::write(dir.join("mark-dark.svg"), "<svg/>").unwrap();
+    std::fs::write(
+        &config_path,
+        MINIMAL.replace(
+            "[page]",
+            "[page]\nlogo = \"mark.svg\"\nlogo_dark = \"mark-dark.svg\"",
+        ),
+    )
+    .unwrap();
+    let both = super::load_from(&config_path).expect("loads");
+    assert_eq!(
+        &*both.page.logo_dark_image.expect("dark logo").bytes,
+        b"<svg/>"
+    );
+
+    std::fs::write(
+        &config_path,
+        MINIMAL.replace("[page]", "[page]\nlogo_dark = \"mark-dark.svg\""),
+    )
+    .unwrap();
+    let err = format!("{:#}", super::load_from(&config_path).unwrap_err());
+    assert!(err.contains("logo_dark needs page.logo"), "{err}");
+
+    write_config("missing.png");
+    let err = format!("{:#}", super::load_from(&config_path).unwrap_err());
+    assert!(err.contains("missing.png"), "{err}");
+
+    std::fs::write(dir.join("mark.gif"), "GIF89a").unwrap();
+    write_config("mark.gif");
+    let err = format!("{:#}", super::load_from(&config_path).unwrap_err());
+    assert!(err.contains(".svg, .png, .webp or .jpg"), "{err}");
+
+    std::fs::write(dir.join("huge.png"), vec![0_u8; 256 * 1024 + 1]).unwrap();
+    write_config("huge.png");
+    let err = format!("{:#}", super::load_from(&config_path).unwrap_err());
+    assert!(err.contains("the limit is"), "{err}");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

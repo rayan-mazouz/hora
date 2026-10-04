@@ -46,6 +46,9 @@ target = "https://example.com"</pre>
   </div>
 </section>
 {%- else %}
+{%- if let Some(update) = page.update %}
+<div class="callout info" role="note" id="update">{% call m::glyph("info") %}{% endcall %}<p class="k">Hora {{ update.version }} is out</p>{% if !update.summary.is_empty() %}<p>{{ update.summary }}</p>{% endif %}<p class="when">You run {{ update.running }} · <a href="{{ update.url }}" rel="noopener">Release notes</a> · <a href="https://github.com/uplg/hora/blob/main/UPGRADES.md" rel="noopener">Before upgrading</a> · Operators only</p></div>
+{%- endif %}
 {%- for note in page.announcements %}
 <div class="callout {{ note.class }}" role="note">{% call m::glyph(note.glyph) %}{% endcall %}<p class="k">{{ note.title }}</p>{% if !note.body.is_empty() %}<p>{{ note.body }}</p>{% endif %}{% if let Some(when) = note.when %}<p class="when">{{ when }}</p>{% endif %}</div>
 {%- endfor %}

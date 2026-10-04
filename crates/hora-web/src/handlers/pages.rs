@@ -103,6 +103,7 @@ async fn status_response(
                 };
                 let ask = status_page::Ask {
                     operator,
+                    update: state.updates.load_full(),
                     token_given: bad_token,
                     group_page: group.is_some(),
                 };

@@ -7,6 +7,25 @@ Hora stores everything in one SQLite file; schema migrations are embedded in
 the binary and applied automatically on startup. Upgrading is: replace the
 binary (or image), restart.
 
+## Knowing a new release is out
+
+Once a day, Hora asks GitHub for its latest release (one anonymous request
+to `api.github.com`; nothing about your instance is sent). When it is newer
+than the one you run:
+
+- the status page tells you, above everything, when you open it with the
+  operator token (`server.auth_token`): the version, the opening of its
+  changelog, and links to the release notes and to the upgrade notes.
+  Visitors never see it, and it goes once you run that version;
+- one message goes through your channels, the same day, once per release
+  (a restart does not repeat it).
+
+```toml
+[updates]
+check = true               # false: never ask, no banner, no message
+notify = ["ops-telegram"]  # default: every channel; [] = the banner alone
+```
+
 ## Docker
 
 ```sh

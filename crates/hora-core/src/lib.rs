@@ -34,6 +34,7 @@ pub mod timeline;
 pub mod topology;
 pub mod tune;
 mod tunnel;
+pub mod updates;
 
 /// Seconds in a day (UTC), shared across the time-bucketing logic.
 pub const SECONDS_PER_DAY: i64 = 86_400;

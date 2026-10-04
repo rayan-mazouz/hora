@@ -14,7 +14,7 @@ services down behind one database send one alert: the cause.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/public/screenshot-dark.webp">
-  <img alt="The Hora status page: the hour and one sentence, then the services by group with their daily bars" src="docs/public/screenshot-light.webp">
+  <img alt="The Hora status page of Pelican, its logo beside the name: the hour and one sentence, then the services by group with their daily bars" src="docs/public/screenshot-light.webp">
 </picture>
 
 ## Install
@@ -24,6 +24,7 @@ services down behind one database send one alert: the cause.
    ```toml
    [page]
    title = "My services"
+   # logo = "logo.svg"         # your mark beside the title, next to this file
 
    [[channels]]
    name = "ops"

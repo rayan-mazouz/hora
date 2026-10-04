@@ -9,6 +9,8 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
+use hora_core::config::Logo;
+
 use crate::AppState;
 
 /// The favicon, also served at the conventional `/favicon.svg`.
@@ -87,6 +89,35 @@ pub(crate) async fn asset(Path(path): Path<String>) -> Response {
         )
             .into_response(),
         None => (StatusCode::NOT_FOUND, "unknown asset").into_response(),
+    }
+}
+
+/// `GET /logo`: the operator's `[page] logo`, or 404 without one. Pages link
+/// it with the digest of its bytes, so it is `immutable` like the rest. An
+/// SVG cannot run anything here: every response carries the `script-src
+/// 'none'` policy.
+pub(crate) async fn logo(State(state): State<AppState>) -> Response {
+    let logo = state.config.borrow().page.logo_image.clone();
+    serve_logo(logo)
+}
+
+/// `GET /logo-dark`: the dark theme's `[page] logo_dark`, as [`logo`].
+pub(crate) async fn logo_dark(State(state): State<AppState>) -> Response {
+    let logo = state.config.borrow().page.logo_dark_image.clone();
+    serve_logo(logo)
+}
+
+fn serve_logo(logo: Option<Logo>) -> Response {
+    match logo {
+        Some(logo) => (
+            [
+                (header::CONTENT_TYPE, logo.content_type),
+                (header::CACHE_CONTROL, IMMUTABLE),
+            ],
+            axum::body::Bytes::from_owner(logo.bytes),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "no logo").into_response(),
     }
 }
 

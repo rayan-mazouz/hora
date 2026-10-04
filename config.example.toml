@@ -9,6 +9,13 @@
 title = "Hora - Status"
 # Number of days rendered in the daily uptime bar.
 history_days = 90
+# Your logo beside the title, in place of its initial tile: an .svg, .png,
+# .webp or .jpg file (256 KiB at most), relative to this file. Read with the
+# config: after changing the image alone, save the config to reload it.
+# logo = "logo.svg"
+# Its dark-theme version, shown when the page is dark, whether the visitor's
+# system or `?theme=dark` chose it. Without it, `logo` shows in both themes.
+# logo_dark = "logo-dark.svg"
 
 [server]
 # Address the HTTP server binds to. Behind a reverse proxy, keep it on loopback.
@@ -167,6 +174,15 @@ default_retention_days = 90
 # [digest]
 # schedule = "0 8 * * 1"   # five-field cron, UTC (default: Monday 08:00)
 # notify = ["ops-telegram"]  # optional; default: every configured channel
+
+# --- Hora's own updates ------------------------------------------------------
+# Once a day Hora asks GitHub (api.github.com, nothing sent but the request)
+# for its latest release. A newer one shows on the status page to whoever
+# holds the operator token, with the opening of its changelog, and is sent
+# once through the channels. On by default; the section is optional.
+# [updates]
+# check = true               # false: never ask, no banner, no message
+# notify = ["ops-telegram"]  # optional; default: every channel; [] = banner only
 
 # --- Scheduled maintenance ------------------------------------------------
 # Alerts are muted for the affected monitors during the window (checks still

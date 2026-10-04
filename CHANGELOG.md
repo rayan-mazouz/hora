@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-04
+
+Your logo on your status page, and word of new releases. The header can
+show your own mark beside the title, one per theme, and Hora now tells
+you when a newer version is out: on your status page, for your eyes only,
+and once through your channels, with what it brings.
+
+### Added
+
+- **Your logo in the header.** `[page] logo = "logo.svg"` shows your own
+  mark beside the title, in place of its initial tile, on every page and
+  on the monthly report. SVG, PNG, WebP or JPEG, read with the config and
+  served at `/logo`; `logo_dark` adds the dark theme's version, which shows
+  whenever the page is dark, chosen by the system or by `?theme=dark`.
+- **Hear of new Hora releases.** Once a day Hora asks GitHub for its latest
+  release; a newer one shows on the status page to the operator (version,
+  the opening of its changelog, links to the release and upgrade notes) and
+  is sent once through the channels. `[updates] check = false` turns it
+  off, `notify` picks the channels (`[]`: the banner alone). Release-watch
+  messages carry the notes' opening too (`message` in the webhook payload).
+
 ## [0.11.0] - 2026-10-03
 
 A new face and a hardening release. Hora gets its brand (the night watch,
@@ -1298,7 +1319,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/uplg/hora/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/uplg/hora/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/uplg/hora/compare/v0.9.6...v0.10.0
 [0.9.6]: https://github.com/uplg/hora/compare/v0.9.5...v0.9.6

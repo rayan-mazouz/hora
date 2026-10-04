@@ -4,6 +4,20 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
 
+## 0.11.0 → 0.11.1
+
+No migration. Two new optional keys, `[page] logo` / `logo_dark` and the
+`[updates]` section: deploy the binary before a config that sets them
+(`deny_unknown_fields`). One change to know:
+
+- **Hora now asks GitHub for its latest release, once a day.** One
+  anonymous request to `api.github.com`; a newer release shows on the
+  operator's status page and is sent once through every channel. To route
+  it, set `[updates] notify = ["<channel>"]` (`[]`: the banner alone); to
+  turn it off, `[updates] check = false`. Webhook receivers get one more
+  `release_available` payload, with `monitor = "Hora"` and the release's
+  opening in `message`.
+
 ## 0.10.0 → 0.11.0
 
 Four schema migrations apply automatically, in seconds even on hundreds of

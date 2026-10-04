@@ -328,7 +328,7 @@ pub async fn inspect_monitor(monitor: &crate::config::Monitor) -> anyhow::Result
 
 /// Compute the SHA-256 hex digest of a byte slice. Byte-by-byte formatting:
 /// digest 0.11 dropped the `LowerHex` impl on the output array.
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use std::fmt::Write as _;
 
     use sha2::{Digest, Sha256};

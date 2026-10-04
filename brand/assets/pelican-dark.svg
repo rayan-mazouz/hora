@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Pelican: the dark theme: a dusk pelican on a sand tile, the pouch in amber. -->
+  <rect width="64" height="64" rx="14" fill="#F2E6D0"/>
+  <path d="M14 58 C10 46 11 36 15 28 C11 20 15 10 24 10 C31 10 34 15 33 21 L30 28 C24 38 23 48 30 58 Z" fill="#1F3A5F"/>
+  <path d="M29 16 L56 23 C57 23.5 57 25 56 25.2 L30 23 Z" fill="#F2A541"/>
+  <path d="M30 23 L56 25.2 C49 36 38 39 30 31 Z" fill="#E07B39"/>
+  <circle cx="23.5" cy="17.5" r="2" fill="#F2E6D0"/>
+</svg>
