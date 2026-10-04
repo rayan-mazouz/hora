@@ -851,6 +851,63 @@ async fn the_operator_logo_replaces_the_initial() {
     assert!(body_text(res).await.starts_with("<svg"));
 }
 
+/// A newer Hora shows on the operator's status page, release notes and all;
+/// visitors never see it.
+#[tokio::test]
+async fn a_new_hora_release_shows_to_the_operator_only() {
+    let toml = r#"
+        [page]
+        [server]
+        auth_token = "0123456789abcdef"
+        [[monitors]]
+        id = "web"
+        name = "Web"
+        target = "https://example.com"
+        interval_secs = 60
+    "#;
+    let config = Arc::new(hora_core::config::parse(toml).expect("config"));
+    let client = hora_core::http::client(None).expect("client");
+    let notifier = hora_core::notifications::shared(&config, &client);
+    let (_tx, rx) = watch::channel(config);
+    let updates = hora_core::updates::new_slot();
+    updates.store(Some(Arc::new(hora_core::updates::Update {
+        version: "v9.0.0".to_owned(),
+        url: "https://github.com/uplg/hora/releases/tag/v9.0.0".to_owned(),
+        summary: "Your logo in the header.".to_owned(),
+        checked_at: 0,
+    })));
+    let app = router(
+        AppState::new(
+            hora_core::db::Store::in_memory().await,
+            rx,
+            Arc::new(AtomicU64::new(fresh_tick())),
+            notifier,
+        )
+        .with_updates(updates),
+    );
+
+    let operator = Request::builder()
+        .uri("/")
+        .header("authorization", "Bearer 0123456789abcdef")
+        .extension(fake_peer())
+        .body(Body::empty())
+        .unwrap();
+    let page = body_text(app.clone().oneshot(operator).await.unwrap()).await;
+    assert!(page.contains("Hora v9.0.0 is out"), "{page}");
+    assert!(page.contains("<p>Your logo in the header.</p>"), "{page}");
+    assert!(
+        page.contains(r#"<a href="https://github.com/uplg/hora/releases/tag/v9.0.0" rel="noopener">Release notes</a>"#),
+        "{page}"
+    );
+    assert!(
+        page.contains(&format!("You run {}", hora_core::updates::RUNNING)),
+        "{page}"
+    );
+
+    let page = body_text(app.oneshot(get("/")).await.unwrap()).await;
+    assert!(!page.contains("v9.0.0"), "{page}");
+}
+
 #[tokio::test]
 async fn monitor_page_never_shows_target_credentials() {
     let (app, _store) = app_with_pool(

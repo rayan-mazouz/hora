@@ -99,6 +99,9 @@ pub struct AppState {
     /// daemon's poller and read by the summary builder. Empty when the node
     /// has no askable peers.
     vantage: hora_core::mesh::vantage::VantageMap,
+    /// A newer Hora than this build, written by the daemon's update task and
+    /// shown on the operator's status page. Empty when there is none.
+    updates: hora_core::updates::UpdateSlot,
 }
 
 impl AppState {
@@ -121,6 +124,7 @@ impl AppState {
             notifier,
             flood: Arc::new(flood::Flood::default()),
             vantage: hora_core::mesh::vantage::new_map(),
+            updates: hora_core::updates::new_slot(),
         }
     }
 
@@ -129,6 +133,14 @@ impl AppState {
     #[must_use]
     pub fn with_vantage(mut self, vantage: hora_core::mesh::vantage::VantageMap) -> Self {
         self.vantage = vantage;
+        self
+    }
+
+    /// Attach the daemon's update slot (the update task's output). Without
+    /// it the operator's page never shows a new release.
+    #[must_use]
+    pub fn with_updates(mut self, updates: hora_core::updates::UpdateSlot) -> Self {
+        self.updates = updates;
         self
     }
 

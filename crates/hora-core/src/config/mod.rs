@@ -65,6 +65,10 @@ pub struct Config {
     /// 2 incidents, budget 18m of 43m left"). Absent = no digest.
     #[serde(default)]
     pub digest: Option<Digest>,
+    /// Hora's own new releases, told to the operator (status page banner and
+    /// one message per release). On by default.
+    #[serde(default)]
+    pub updates: Updates,
     /// Where exec-probe executables live, from the `HORA_EXEC_DIR`
     /// environment variable - never from the file. The separation is the
     /// security model: the hot-reloadable config alone must not be able to
@@ -119,6 +123,34 @@ pub struct Digest {
     /// Channels to send through; absent = every configured channel.
     #[serde(default)]
     pub notify: Option<Vec<String>>,
+}
+
+/// Hora's own update check: once a day at most, GitHub is asked for Hora's
+/// latest release; a newer one than this build shows on the operator's status
+/// page and is sent once through the channels, with its changelog's opening.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Updates {
+    /// Ask GitHub for Hora's latest release. `false` sends nothing out.
+    #[serde(default = "default_true")]
+    pub check: bool,
+    /// Channels to tell; absent = every configured channel, `[]` = none (the
+    /// banner alone).
+    #[serde(default)]
+    pub notify: Option<Vec<String>>,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self {
+            check: true,
+            notify: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_digest_schedule() -> String {

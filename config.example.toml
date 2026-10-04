@@ -175,6 +175,15 @@ default_retention_days = 90
 # schedule = "0 8 * * 1"   # five-field cron, UTC (default: Monday 08:00)
 # notify = ["ops-telegram"]  # optional; default: every configured channel
 
+# --- Hora's own updates ------------------------------------------------------
+# Once a day Hora asks GitHub (api.github.com, nothing sent but the request)
+# for its latest release. A newer one shows on the status page to whoever
+# holds the operator token, with the opening of its changelog, and is sent
+# once through the channels. On by default; the section is optional.
+# [updates]
+# check = true               # false: never ask, no banner, no message
+# notify = ["ops-telegram"]  # optional; default: every channel; [] = banner only
+
 # --- Scheduled maintenance ------------------------------------------------
 # Alerts are muted for the affected monitors during the window (checks still
 # recorded; the card shows a "maintenance" badge). `monitors` empty = all.

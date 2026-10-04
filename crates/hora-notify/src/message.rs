@@ -436,7 +436,15 @@ fn details(event: Event<'_>) -> (Option<String>, Vec<Line>) {
             }
             (Some(error.unwrap_or("no response").to_owned()), lines)
         }
-        Event::ReleaseAvailable(release) => (None, vec![Line::Text(release.url.to_owned())]),
+        Event::ReleaseAvailable(release) => (
+            None,
+            release
+                .notes
+                .into_iter()
+                .chain([release.url])
+                .map(|line| Line::Text(line.to_owned()))
+                .collect(),
+        ),
         Event::Digest { summary, .. } => (None, vec![Line::Text(summary.to_owned())]),
         Event::PeerLinkDegraded { witness, .. } => (
             None,
@@ -615,8 +623,20 @@ mod tests {
                     current: "v1",
                     latest: "v2",
                     url: "https://x/r",
+                    notes: None,
                 }),
                 "Chat: o/r v2 is out (running v1)\nhttps://x/r",
+            ),
+            (
+                Event::ReleaseAvailable(Release {
+                    monitor: "Hora",
+                    project: "uplg/hora",
+                    current: "0.11.0",
+                    latest: "v0.12.0",
+                    url: "https://x/r",
+                    notes: Some("Your logo in the header."),
+                }),
+                "Hora: uplg/hora v0.12.0 is out (running 0.11.0)\nYour logo in the header.\nhttps://x/r",
             ),
             (
                 Event::Digest {

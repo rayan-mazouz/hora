@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the monthly report. SVG, PNG, WebP or JPEG, read with the config and
   served at `/logo`; `logo_dark` adds the dark theme's version, which shows
   whenever the page is dark, chosen by the system or by `?theme=dark`.
+- **Hear of new Hora releases.** Once a day Hora asks GitHub for its latest
+  release; a newer one shows on the status page to the operator (version,
+  the opening of its changelog, links to the release and upgrade notes) and
+  is sent once through the channels. `[updates] check = false` turns it
+  off, `notify` picks the channels (`[]`: the banner alone). Release-watch
+  messages carry the notes' opening too (`message` in the webhook payload).
 
 ## [0.11.0] - 2026-10-03
 

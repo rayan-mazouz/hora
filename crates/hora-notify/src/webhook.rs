@@ -80,6 +80,7 @@ impl WebhookNotifier {
                 current: Some(release.current),
                 latest: Some(release.latest),
                 url: Some(release.url),
+                message: release.notes,
                 ..Payload::new("release_available", release.monitor)
             },
             Event::Digest { period, summary } => Payload {
@@ -259,6 +260,7 @@ mod tests {
             current: "1.9.1",
             latest: "v1.9.2",
             url: "https://github.com/matrix-construct/tuwunel/releases/tag/v1.9.2",
+            notes: None,
         }));
         assert_eq!(
             serde_json::to_value(&payload).unwrap(),
