@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-04
+
+Your logo on your status page, and word of new releases. The header can
+show your own mark beside the title, one per theme, and Hora now tells
+you when a newer version is out: on your status page, for your eyes only,
+and once through your channels, with what it brings.
+
 ### Added
 
 - **Your logo in the header.** `[page] logo = "logo.svg"` shows your own
@@ -1312,7 +1319,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/uplg/hora/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/uplg/hora/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/uplg/hora/compare/v0.9.6...v0.10.0
 [0.9.6]: https://github.com/uplg/hora/compare/v0.9.5...v0.9.6
