@@ -39,6 +39,11 @@ pub(crate) struct Chrome {
     pub(crate) site: String,
     /// The sign's initial tile ("P" for Pelican).
     pub(crate) initial: String,
+    /// The operator's logo (`[page].logo`), shown in place of the initial
+    /// tile: its versioned URL, `/logo?v=...`.
+    pub(crate) logo: Option<String>,
+    /// The dark theme's logo (`[page].logo_dark`), `/logo-dark?v=...`.
+    pub(crate) logo_dark: Option<String>,
     /// Which navigation entry is the current page (`status`, `history`, ...).
     pub(crate) current: &'static str,
     /// Whether the viewer holds the operator token (shows the operator pill
@@ -267,14 +272,22 @@ fn every(secs: u16) -> String {
 }
 
 impl Chrome {
-    /// Build the chrome from the request URI and the operator's page title.
-    pub(crate) fn from_uri(uri: &axum::http::Uri, site: &str) -> Self {
+    /// Build the chrome from the request URI, the operator's page title and
+    /// the versions of their logos (light, dark), if they set them.
+    pub(crate) fn from_uri(
+        uri: &axum::http::Uri,
+        site: &str,
+        logos: (Option<&str>, Option<&str>),
+    ) -> Self {
+        let (logo, logo_dark) = logos;
         Self {
             site: site.to_owned(),
             initial: site
                 .chars()
                 .find(|c| c.is_alphanumeric())
                 .map_or_else(|| "H".to_owned(), |c| c.to_uppercase().collect()),
+            logo: logo.map(|version| format!("/logo?v={version}")),
+            logo_dark: logo_dark.map(|version| format!("/logo-dark?v={version}")),
             current: "",
             operator: false,
             v: ASSET_VERSION.as_str(),
@@ -442,8 +455,18 @@ impl FromRequestParts<AppState> for Chrome {
         parts: &mut Parts,
         state: &AppState,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        let title = state.config.borrow().page.title.clone();
-        std::future::ready(Ok(Self::from_uri(&parts.uri, &title)))
+        let chrome = {
+            let config = state.config.borrow();
+            let page = &config.page;
+            let logos = (
+                page.logo_image.as_ref().map(|logo| logo.version.as_str()),
+                page.logo_dark_image
+                    .as_ref()
+                    .map(|logo| logo.version.as_str()),
+            );
+            Self::from_uri(&parts.uri, &page.title, logos)
+        };
+        std::future::ready(Ok(chrome))
     }
 }
 
@@ -545,7 +568,7 @@ mod tests {
     use super::*;
 
     fn chrome(uri: &str) -> Chrome {
-        Chrome::from_uri(&uri.parse().unwrap(), "pelican")
+        Chrome::from_uri(&uri.parse().unwrap(), "pelican", (None, None))
     }
 
     #[test]

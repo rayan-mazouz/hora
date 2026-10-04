@@ -120,6 +120,15 @@ b { font-weight: 500; }
 .sign { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; margin-right: auto; min-width: 0; }
 .op-logo { width: 32px; height: 32px; border-radius: var(--radius-m); display: grid; place-items: center; flex: none;
   background: var(--ink); color: var(--ground); font: 600 1rem/1 var(--font-display); }
+img.op-logo { background: none; object-fit: contain; }
+/* the operator's two logos: the theme forced by `?theme=` wins over the system's */
+.op-logo.for-dark { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .op-logo.for-light { display: none; }
+  :root:not([data-theme='light']) .op-logo.for-dark { display: grid; }
+}
+:root[data-theme='dark'] .op-logo.for-light { display: none; }
+:root[data-theme='dark'] .op-logo.for-dark { display: grid; }
 .sign b { font: 500 1.15rem/1.2 var(--font-display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .sign span:not(.op-logo) { font: var(--t-secondary); color: var(--ink-muted); white-space: nowrap; }
 .top nav { display: flex; gap: var(--s-1); flex-wrap: wrap; }
@@ -642,6 +651,8 @@ body.report { background: var(--ground-raised); }
 @media (max-width: 599px) { .bar.strip svg { width: 100%; margin: 0; } }
 @media print {
   :root { color-scheme: light !important; }
+  .op-logo.for-light { display: grid !important; }
+  .op-logo.for-dark { display: none !important; }
   body, body.report { background: #fff; }
   .toolbar, .skip, .foot, .top { display: none; }
   .sheet { box-shadow: none; padding: 0; max-width: none; border-radius: 0; background: #fff; }

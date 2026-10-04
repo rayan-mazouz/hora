@@ -9,6 +9,13 @@
 title = "Hora - Status"
 # Number of days rendered in the daily uptime bar.
 history_days = 90
+# Your logo beside the title, in place of its initial tile: an .svg, .png,
+# .webp or .jpg file (256 KiB at most), relative to this file. Read with the
+# config: after changing the image alone, save the config to reload it.
+# logo = "logo.svg"
+# Its dark-theme version, shown when the page is dark, whether the visitor's
+# system or `?theme=dark` chose it. Without it, `logo` shows in both themes.
+# logo_dark = "logo-dark.svg"
 
 [server]
 # Address the HTTP server binds to. Behind a reverse proxy, keep it on loopback.

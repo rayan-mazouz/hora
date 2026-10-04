@@ -769,6 +769,88 @@ async fn the_page_can_go_on_a_home_screen() {
     assert_eq!(res.status(), StatusCode::OK);
 }
 
+/// `[page] logo` takes the initial tile's place in the header and the
+/// report, served at `/logo` under its digest; without one, `/logo` is 404.
+/// `logo_dark` adds the dark theme's, at `/logo-dark`.
+#[tokio::test]
+async fn the_operator_logo_replaces_the_initial() {
+    let (app, _store, tx) = app_with_reload(
+        r#"
+        [page]
+        title = "Synthese"
+        [server]
+        "#,
+    )
+    .await;
+    let page = body_text(app.clone().oneshot(get("/")).await.unwrap()).await;
+    assert!(
+        page.contains(r#"<span class="op-logo" aria-hidden="true">S</span>"#),
+        "{page}"
+    );
+    let res = app.clone().oneshot(get("/logo")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    let mut config = (**tx.borrow()).clone();
+    config.page.logo_image = Some(hora_core::config::Logo {
+        bytes: b"<svg xmlns='http://www.w3.org/2000/svg'/>"
+            .as_slice()
+            .into(),
+        content_type: "image/svg+xml",
+        version: "abc123".to_owned(),
+    });
+    tx.send_replace(Arc::new(config));
+    for path in ["/", "/report/2026-09"] {
+        let page = body_text(app.clone().oneshot(get(path)).await.unwrap()).await;
+        assert!(
+            page.contains(r#"<img class="op-logo" src="/logo?v=abc123" alt="">"#),
+            "{path}: {page}"
+        );
+        assert!(!page.contains(r#"<span class="op-logo""#), "{path}");
+    }
+    let res = app.clone().oneshot(get("/logo-dark")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // With a dark logo, both are in the page; the stylesheet shows the one
+    // of the theme in force, `?theme=` before the system's.
+    let mut config = (**tx.borrow()).clone();
+    config.page.logo_dark_image = Some(hora_core::config::Logo {
+        bytes: b"<svg/>".as_slice().into(),
+        content_type: "image/svg+xml",
+        version: "def456".to_owned(),
+    });
+    tx.send_replace(Arc::new(config));
+    let page = body_text(app.clone().oneshot(get("/?theme=dark")).await.unwrap()).await;
+    assert!(
+        page.contains(concat!(
+            r#"<img class="op-logo for-light" src="/logo?v=abc123" alt="">"#,
+            r#"<img class="op-logo for-dark" src="/logo-dark?v=def456" alt="">"#
+        )),
+        "{page}"
+    );
+    assert!(
+        page.contains(r#"<html lang="en" data-theme="dark""#),
+        "{page}"
+    );
+    let res = app
+        .clone()
+        .oneshot(get("/logo-dark?v=def456"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_text(res).await, "<svg/>");
+
+    let res = app.oneshot(get("/logo?v=abc123")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["content-type"], "image/svg+xml");
+    assert!(
+        res.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("script-src 'none'")
+    );
+    assert!(body_text(res).await.starts_with("<svg"));
+}
+
 #[tokio::test]
 async fn monitor_page_never_shows_target_credentials() {
     let (app, _store) = app_with_pool(

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Your logo in the header.** `[page] logo = "logo.svg"` shows your own
+  mark beside the title, in place of its initial tile, on every page and
+  on the monthly report. SVG, PNG, WebP or JPEG, read with the config and
+  served at `/logo`; `logo_dark` adds the dark theme's version, which shows
+  whenever the page is dark, chosen by the system or by `?theme=dark`.
+
 ## [0.11.0] - 2026-10-03
 
 A new face and a hardening release. Hora gets its brand (the night watch,

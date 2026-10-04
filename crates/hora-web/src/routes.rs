@@ -21,7 +21,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth::deprecate_query_token;
 use crate::handlers::annotations::{announce, announce_clear, post_event, silence};
 use crate::handlers::api::{latency_json, metrics_prometheus, summary_json};
-use crate::handlers::assets::{apple_touch_icon, asset, favicon, manifest};
+use crate::handlers::assets::{apple_touch_icon, asset, favicon, logo, logo_dark, manifest};
 use crate::handlers::badges::{heatmap_svg, status_badge, uptime_badge};
 use crate::handlers::pages::{
     group_page, history_atom, history_page, incident_page, monitor_page, page, report_page,
@@ -97,6 +97,8 @@ pub fn router(state: AppState) -> Router {
         .route("/favicon.svg", get(favicon))
         .route("/apple-touch-icon.png", get(apple_touch_icon))
         .route("/manifest.webmanifest", get(manifest))
+        .route("/logo", get(logo))
+        .route("/logo-dark", get(logo_dark))
         .route("/assets/{*path}", get(asset))
         .route("/api/openapi.json", get(openapi))
         .merge(pages)
