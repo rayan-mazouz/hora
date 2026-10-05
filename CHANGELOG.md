@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A rejected notification's body is read up to 4 KiB**, for the reason
+  in the log. It was read whole, the one remote read without a cap.
+
 - **Peers no longer see credentials in targets.** `/api/peer/monitors`
   listed every target as written, `https://user:pass@...` and
   `?api_key=...` included, and a confirmation probe sent the requester's

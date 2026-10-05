@@ -139,7 +139,7 @@ where
                     backoff(attempt).await;
                     continue;
                 }
-                let body = response.text().await.unwrap_or_default();
+                let body = error_body(response).await;
                 let detail = redact(&snippet(&body), secrets);
                 warn!("{channel} rejected the notification (HTTP {status}): {detail}");
                 let message = format!("rejected (HTTP {status}): {detail}");
@@ -235,6 +235,25 @@ fn percent_encode(value: &str, form: bool) -> String {
 }
 
 /// A bounded, single-line snippet of a response body for log output.
+/// The most of a rejected notification's body read for its snippet: the
+/// reason is in the first few lines, and a hostile or broken endpoint could
+/// otherwise stream megabytes into memory.
+const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
+
+/// The start of a rejection's body, at most [`MAX_ERROR_BODY_BYTES`]; a read
+/// error ends it where it stopped.
+async fn error_body(mut response: reqwest::Response) -> String {
+    let mut bytes = Vec::new();
+    while bytes.len() < MAX_ERROR_BODY_BYTES {
+        let Ok(Some(chunk)) = response.chunk().await else {
+            break;
+        };
+        let take = (MAX_ERROR_BODY_BYTES - bytes.len()).min(chunk.len());
+        bytes.extend_from_slice(&chunk[..take]);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 fn snippet(body: &str) -> String {
     // Fold straight into one string: no intermediate `Vec<&str>` just to `join`.
     body.split_whitespace()
@@ -330,5 +349,27 @@ mod tests {
         );
         // And as %20 in strict RFC 3986 contexts (URL paths).
         assert_eq!(redact("at /my%20pass/x", &["my pass"]), "at /<redacted>/x");
+    }
+
+    #[tokio::test]
+    async fn a_rejection_body_is_read_up_to_the_cap() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let body = "x".repeat(1 << 20);
+            let head = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+        });
+        let response = Client::new().post(&url).send().await.unwrap();
+        assert_eq!(error_body(response).await.len(), MAX_ERROR_BODY_BYTES);
     }
 }
