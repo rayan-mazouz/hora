@@ -1,6 +1,7 @@
 //! The monitor itself (plain `hora`): the supervisor, the background tasks and
 //! the HTTP server, until a shutdown signal.
 
+use std::io::IsTerminal as _;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -155,7 +156,12 @@ pub(crate) fn init_tracing() {
         }),
         Err(_) => EnvFilter::new("info"),
     };
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // Colours only on a terminal: in a pipe, Docker or journald they are
+    // escape sequences that break grepping the logs.
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(std::io::stdout().is_terminal())
+        .init();
 }
 
 /// Resolve when the process receives a shutdown signal. Listens for Ctrl-C on

@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Logs carry colour codes only on a terminal.** Docker and journald logs
+  were full of ANSI escape sequences, so grepping them for a warning failed.
+
 - **A rejected notification's body is read up to 4 KiB**, for the reason
   in the log. It was read whole, the one remote read without a cap.
 
