@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Discord shows pushed text as typed.** A pushed alert's message went
+  into the embed as Markdown, so anyone with a push token could post
+  `[Reset your password](https://...)` as a disguised link in the ops
+  channel. Markdown characters are now escaped, as Slack and Telegram
+  already did with their own markup.
+
 - **Logs carry colour codes only on a terminal.** Docker and journald logs
   were full of ANSI escape sequences, so grepping them for a warning failed.
 

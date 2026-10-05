@@ -15,24 +15,42 @@ const COLOR_CERT: u32 = 0x00FE_7D37;
 const COLOR_DEGRADED: u32 = 0x00DF_B317;
 const COLOR_INFO: u32 = 0x0035_82F6;
 
-/// Discord markdown for the embed description. Text is passed as is (an embed
-/// never pings); a backtick inside code would close the fence early.
+/// Discord markdown for the embed description. Text is escaped, so a pushed
+/// alert's `[Reset your password](https://...)` shows as typed instead of as
+/// a disguised link (an embed never pings); a backtick inside code would close
+/// the fence early.
 const MARKDOWN: Markup = Markup {
-    text: str::to_owned,
+    text: escape_markdown,
     code: neutralise_backticks,
     bold: ("", ""),
     block: ("```", "```"),
     inline: ("`", "`"),
 };
 
+/// Backslash every character Discord markdown gives a meaning to.
+fn escape_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(
+            c,
+            '\\' | '*' | '_' | '~' | '`' | '|' | '[' | ']' | '(' | ')' | '<' | '>' | '#' | '-'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn neutralise_backticks(code: &str) -> String {
     code.replace('`', "'")
 }
 
-/// Embed limits: title 256 characters, description 4096. The margins cover
-/// the icon in the title and the fences in the description.
+/// Embed limits: title 256 characters, description 4096. The margin covers
+/// the icon in the title; the description is capped below half its limit,
+/// since escaping can double it, with room for the fences.
 const TITLE_MAX: usize = 250;
-const DESCRIPTION_MAX: usize = 4000;
+const DESCRIPTION_MAX: usize = 2000;
 
 /// Posts alerts to a Discord channel through an incoming webhook.
 pub struct DiscordNotifier {
@@ -199,6 +217,20 @@ mod tests {
     }
 
     #[test]
+    fn pushed_text_cannot_hide_a_link() {
+        let alert = DiscordNotifier::embed(Event::Alert {
+            monitor: "API",
+            severity: AlertSeverity::Warning,
+            title: "deploy",
+            message: "[Reset your password](https://evil.example) **now**",
+        });
+        assert_eq!(
+            alert.description.as_deref(),
+            Some(r"\[Reset your password\]\(https://evil.example\) \*\*now\*\*")
+        );
+    }
+
+    #[test]
     fn long_alerts_fit_the_embed_limits() {
         let name = "n".repeat(100);
         let title = "t".repeat(200);
@@ -218,5 +250,15 @@ mod tests {
             summary: &summary,
         });
         assert!(digest.description.expect("has a body").chars().count() <= 4096);
+
+        // Every character escaped: still within the limit.
+        let brackets = "[".repeat(10_000);
+        let alert = DiscordNotifier::embed(Event::Alert {
+            monitor: "API",
+            severity: AlertSeverity::Critical,
+            title: "t",
+            message: &brackets,
+        });
+        assert!(alert.description.expect("has a body").chars().count() <= 4096);
     }
 }
