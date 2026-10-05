@@ -48,7 +48,8 @@ base images) without changing anything.
 ## These docs
 
 The site is [Starlight](https://starlight.astro.build/), in `docs/`, built
-with Bun and deployed to GitHub Pages by the Docs workflow:
+with Bun (the version pinned in `.github/workflows/docs.yml`, which
+`just deps` checks) and deployed to GitHub Pages by the Docs workflow:
 
 ```sh
 cd docs

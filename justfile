@@ -34,6 +34,9 @@ deps:
     cargo upgrade --dry-run --incompatible allow --recursive false 2>&1 | grep -v "aborting upgrade due to dry run"
     echo; echo "== Docs (bun)"
     (cd docs && bun outdated)
+    ours=$(sed -n 's/^ *bun-version: *//p' .github/workflows/docs.yml)
+    theirs=$(gh api repos/oven-sh/bun/releases/latest --jq .tag_name 2>/dev/null | sed 's/^bun-v//' || echo "?")
+    printf '  %-36s %-10s %s\n' "bun (docs.yml)" "$ours" "$([ "$ours" = "$theirs" ] && echo ok || echo "behind -> $theirs")"
     echo; echo "== Actions (pinned SHA, version in the trailing comment)"
     grep -ho 'uses: [^ ]*@[0-9a-f]\{40\} # .*' .github/workflows/*.yml | sort -u \
     | while read -r _ ref _ ours; do
