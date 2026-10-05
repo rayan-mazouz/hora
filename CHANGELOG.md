@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Push monitors and watched peers need a token.** Without one, the id
+  alone (shown on the status page, the API and `/healthz`) let anyone keep
+  a dead job or a dead node green. A push monitor without `push_token`, or
+  a peer with `expect_every_secs` but no `listen_token`, now fails the
+  load; `allow_unauthenticated_push = true` on the item accepts the id
+  alone on an isolated network, with a warning at every load.
+- **Write endpoints take their token from a header only.** `?token=` on
+  `/api/push`, `/api/monitors/{id}/alert`, `/api/silence`, `/api/announce`
+  and `/api/event` answers 401; send `X-Push-Token` or
+  `Authorization: Bearer`. The `Deprecation` and `Link` headers are gone
+  with it. Read-only views still accept `?token=`.
+
 - **An unset `${VAR}` fails the load.** It expanded to an empty string, so
   a channel whose secret was missing from the environment loaded, passed
   `hora check`, and was silently left out. The error names the key and the

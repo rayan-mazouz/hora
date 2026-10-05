@@ -11,7 +11,7 @@ use hora_core::db::{self};
 use hora_core::notifications::{AlertSeverity, Event};
 use hora_core::status::CheckStatus;
 
-use crate::auth::{QueryTokenAuth, Viewer, ct_eq, push_token};
+use crate::auth::{bearer_is_operator, ct_eq, push_token};
 use crate::error::AppError;
 use crate::flood;
 use crate::{AppState, MAX_ALERT_DEDUP_CHARS, MAX_ALERT_TAG_CHARS, MAX_ALERT_TAGS};
@@ -19,8 +19,6 @@ use hora_core::{MAX_ALERT_TITLE_CHARS, MAX_PUSH_MSG_CHARS};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PushQuery {
-    #[serde(default)]
-    token: Option<String>,
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
@@ -34,7 +32,6 @@ pub(crate) struct PushQuery {
     path = "/api/push/{id}",
     params(
         ("id" = String, Path, description = "Push monitor id"),
-        ("token" = Option<String>, Query, deprecated, description = "Push token, if the monitor sets one; deprecated (answered with a Deprecation header): use X-Push-Token"),
         ("status" = Option<String>, Query, description = "up (default), down or degraded"),
         ("msg" = Option<String>, Query, description = "Optional detail recorded with the heartbeat"),
         ("ping" = Option<i64>, Query, description = "Optional round-trip latency in ms (>= 0)")
@@ -49,7 +46,6 @@ pub(crate) struct PushQuery {
 pub(crate) async fn push(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    query_auth: QueryTokenAuth,
     Query(query): Query<PushQuery>,
     headers: HeaderMap,
 ) -> Result<&'static str, AppError> {
@@ -76,17 +72,13 @@ pub(crate) async fn push(
         return Err(AppError::Unauthorized("invalid push token"));
     };
 
-    // A configured token is required; without one, the id alone authorizes. Prefer
-    // the `X-Push-Token` header (kept out of access logs) over the `?token=` query.
-    if let Some(expected) = expected_token {
-        let header = push_token(&headers);
-        let provided = header.or(query.token.as_deref());
-        if !provided.is_some_and(|token| ct_eq(token, expected.as_ref())) {
-            return Err(AppError::Unauthorized("invalid push token"));
-        }
-        if header.is_none() {
-            query_auth.mark();
-        }
+    // The token comes in the `X-Push-Token` header. Config validation only
+    // lets an item without one load when it sets `allow_unauthenticated_push`;
+    // then the id alone authorizes.
+    if let Some(expected) = expected_token
+        && !push_token(&headers).is_some_and(|token| ct_eq(token, expected.as_ref()))
+    {
+        return Err(AppError::Unauthorized("invalid push token"));
     }
 
     // A typo'd status must fail loudly: recording `status=dwon` as "up" would
@@ -157,8 +149,7 @@ pub(crate) struct AlertResponse {
     post,
     path = "/api/monitors/{id}/alert",
     params(
-        ("id" = String, Path, description = "Monitor id the alert is attached to"),
-        ("token" = Option<String>, Query, deprecated, description = "server.auth_token; deprecated (answered with a Deprecation header): use Authorization: Bearer or X-Push-Token")
+        ("id" = String, Path, description = "Monitor id the alert is attached to")
     ),
     request_body = AlertRequest,
     security(("push_token" = []), ("bearer" = [])),
@@ -172,15 +163,14 @@ pub(crate) struct AlertResponse {
 pub(crate) async fn post_alert(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    viewer: Viewer,
     headers: HeaderMap,
     Json(request): Json<AlertRequest>,
 ) -> Result<(StatusCode, Json<AlertResponse>), AppError> {
-    let config = &viewer.config;
+    let config = &state.config.borrow().clone();
     let monitor = config.find_monitor(&id);
 
-    // Authenticate with the monitor's own push_token (preferred, via the
-    // X-Push-Token header kept out of access logs) or the global viewer token.
+    // Authenticate with the monitor's own push_token (X-Push-Token) or the
+    // global token (Authorization: Bearer).
     // Dispatching to channels can flood, so - unlike a read-only view - the
     // endpoint stays closed unless a credential is configured and matches.
     // Without the operator token an unknown id answers the same 401 as a
@@ -190,13 +180,10 @@ pub(crate) async fn post_alert(
         .is_some_and(|expected| {
             push_token(&headers).is_some_and(|token| ct_eq(token, expected.as_ref()))
         });
-    if !item_token_ok && !viewer.is_operator() {
+    if !item_token_ok && !bearer_is_operator(config, &headers) {
         return Err(AppError::Unauthorized(
             "alerting requires the monitor's push_token (X-Push-Token) or server.auth_token",
         ));
-    }
-    if !item_token_ok {
-        viewer.note_operator_write();
     }
     let monitor = monitor.ok_or(AppError::NotFound("unknown monitor"))?;
 

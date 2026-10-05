@@ -18,7 +18,6 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::auth::deprecate_query_token;
 use crate::handlers::annotations::{announce, announce_clear, post_event, silence};
 use crate::handlers::api::{latency_json, metrics_prometheus, summary_json};
 use crate::handlers::assets::{apple_touch_icon, asset, favicon, logo, logo_dark, manifest};
@@ -51,15 +50,13 @@ pub fn router(state: AppState) -> Router {
     let refill = Duration::from_secs(config.server.rate_limit_refill_secs.max(1));
     let burst = config.server.rate_limit_burst.max(1);
 
-    // Writes still take `?token=` but flag it as deprecated (see
-    // `deprecate_query_token`); the read-only views keep it first-class.
+    // Writes take their credential from a header only (see `auth`).
     let writes = Router::new()
         .route("/api/monitors/{id}/alert", post(post_alert))
         .route("/api/push/{id}", post(push))
         .route("/api/silence", post(silence))
         .route("/api/announce", post(announce).delete(announce_clear))
-        .route("/api/event", post(post_event))
-        .route_layer(middleware::from_fn(deprecate_query_token));
+        .route("/api/event", post(post_event));
     let api = Router::new()
         .route("/api/summary", get(summary_json))
         .route("/api/monitors/{id}/latency", get(latency_json))

@@ -212,7 +212,11 @@ opts in - plugin output names devices and container ids.
 ### `push` (heartbeat)
 
 No target: the job calls Hora. Down when no ping arrives within
-`interval_secs`:
+`interval_secs`. The monitor needs a `push_token`, sent as `X-Push-Token`:
+its id is shown on the status page and API, so without a token anyone could
+keep a dead job green. On an isolated network,
+`allow_unauthenticated_push = true` accepts pushes on the id alone (warned
+at every load).
 
 ```sh
 curl -fsS -X POST -H "X-Push-Token: ${BACKUP_TOKEN}" \

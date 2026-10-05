@@ -1,4 +1,4 @@
-//! Producer writes: push heartbeats, pushed alerts and the deprecated `?token=`.
+//! Producer writes: push heartbeats and pushed alerts.
 
 use super::*;
 
@@ -6,7 +6,7 @@ use super::*;
 async fn push_records_heartbeat_with_token() {
     let res = test_app()
         .await
-        .oneshot(push("/api/push/beat?token=s3cret&status=up"))
+        .oneshot(with_push_token(push("/api/push/beat?status=up"), "s3cret"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -16,11 +16,15 @@ async fn push_records_heartbeat_with_token() {
 async fn push_rejects_unknown_status_and_negative_ping() {
     let (app, store) = test_app_with_pool().await;
     for bad in [
-        "/api/push/beat?token=s3cret&status=dwon",
-        "/api/push/beat?token=s3cret&status=0",
-        "/api/push/beat?token=s3cret&ping=-5",
+        "/api/push/beat?status=dwon",
+        "/api/push/beat?status=0",
+        "/api/push/beat?ping=-5",
     ] {
-        let res = app.clone().oneshot(push(bad)).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(with_push_token(push(bad), "s3cret"))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
     }
     // Nothing was recorded by the rejected pushes.
@@ -30,11 +34,15 @@ async fn push_rejects_unknown_status_and_negative_ping() {
     assert!(recorded.is_empty());
 
     for good in [
-        "/api/push/beat?token=s3cret",
-        "/api/push/beat?token=s3cret&status=down&ping=0",
-        "/api/push/beat?token=s3cret&status=degraded",
+        "/api/push/beat",
+        "/api/push/beat?status=down&ping=0",
+        "/api/push/beat?status=degraded",
     ] {
-        let res = app.clone().oneshot(push(good)).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(with_push_token(push(good), "s3cret"))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "{good}");
     }
 }
@@ -43,7 +51,7 @@ async fn push_rejects_unknown_status_and_negative_ping() {
 async fn push_rejects_wrong_token() {
     let res = test_app()
         .await
-        .oneshot(push("/api/push/beat?token=wrong"))
+        .oneshot(with_push_token(push("/api/push/beat"), "wrong"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -54,12 +62,16 @@ async fn push_to_an_unknown_id_answers_like_a_wrong_token() {
     // "web" exists but is an HTTP monitor, not a push target; "nope" does
     // not exist at all. Both read like a wrong token: no id oracle.
     let app = test_app().await;
-    for uri in [
-        "/api/push/web?token=x",
-        "/api/push/nope",
-        "/api/push/beat?token=wrong",
+    for (uri, token) in [
+        ("/api/push/web", Some("x")),
+        ("/api/push/nope", None),
+        ("/api/push/beat", Some("wrong")),
     ] {
-        let res = app.clone().oneshot(push(uri)).await.unwrap();
+        let request = match token {
+            Some(token) => with_push_token(push(uri), token),
+            None => push(uri),
+        };
+        let res = app.clone().oneshot(request).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri}");
         assert_eq!(body_text(res).await, "invalid push token", "{uri}");
     }
@@ -70,7 +82,7 @@ async fn push_records_peer_heartbeat() {
     // A watched peer's listen id accepts heartbeats, like a push monitor.
     let res = test_app()
         .await
-        .oneshot(push("/api/push/peer-x?token=peertok"))
+        .oneshot(with_push_token(push("/api/push/peer-x"), "peertok"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -80,7 +92,7 @@ async fn push_records_peer_heartbeat() {
 async fn push_rejects_wrong_peer_token() {
     let res = test_app()
         .await
-        .oneshot(push("/api/push/peer-x?token=nope"))
+        .oneshot(with_push_token(push("/api/push/peer-x"), "nope"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -103,98 +115,35 @@ fn alert(uri: &str, body: &str, push_token: Option<&str>, bearer: Option<&str>) 
     builder.body(Body::from(body.to_owned())).expect("request")
 }
 
-fn deprecated(res: &axum::response::Response) -> bool {
-    let deprecation = res.headers().get("deprecation");
-    let link = res.headers().get(header::LINK);
-    match (deprecation, link) {
-        (Some(deprecation), Some(link)) => {
-            assert_eq!(deprecation, "true");
-            assert_eq!(
-                link,
-                "<https://uplg.github.io/hora/reference/api/#authentication>; \
-                     rel=\"deprecation\""
-            );
-            true
-        }
-        (None, None) => false,
-        other => panic!("Deprecation and Link go together: {other:?}"),
-    }
-}
-
 #[tokio::test]
-async fn query_tokens_on_writes_are_flagged_deprecated() {
-    // Writes authenticated by ?token= still work, flagged as deprecated.
-    for (request, expected) in [
-        (push("/api/push/beat?token=s3cret"), StatusCode::OK),
-        (
-            push("/api/event?title=deploy&token=0123456789abcdef"),
-            StatusCode::OK,
-        ),
-        (
-            push("/api/silence?monitors=web&duration=10m&token=0123456789abcdef"),
-            StatusCode::OK,
-        ),
-        (
-            alert(
-                "/api/monitors/web/alert?token=0123456789abcdef",
-                r#"{"title":"deploy started"}"#,
-                None,
-                None,
-            ),
-            StatusCode::ACCEPTED,
-        ),
-        // A bad body after a query-token auth is still told to move it.
-        (
-            push("/api/announce?title=x&severity=panic&token=0123456789abcdef"),
-            StatusCode::BAD_REQUEST,
-        ),
-    ] {
-        let uri = request.uri().to_string();
-        let res = test_app().await.oneshot(request).await.unwrap();
-        assert_eq!(res.status(), expected, "{uri}");
-        assert!(deprecated(&res), "{uri}");
-    }
-
-    // The same writes through headers: no deprecation.
-    let mut header_push = push("/api/push/beat");
-    header_push
-        .headers_mut()
-        .insert("x-push-token", HeaderValue::from_static("s3cret"));
-    let mut bearer_event = push("/api/event?title=deploy");
-    bearer_event.headers_mut().insert(
-        header::AUTHORIZATION,
-        HeaderValue::from_static("Bearer 0123456789abcdef"),
-    );
+async fn writes_refuse_a_query_token() {
+    // A write takes its credential from a header only: the right token in
+    // `?token=` is refused like a missing one.
     for request in [
-        header_push,
-        bearer_event,
+        push("/api/push/beat?token=s3cret"),
+        push("/api/push/peer-x?token=peertok"),
+        push("/api/event?title=deploy&token=0123456789abcdef"),
+        push("/api/silence?monitors=web&duration=10m&token=0123456789abcdef"),
+        push("/api/announce?title=x&token=0123456789abcdef"),
         alert(
-            "/api/monitors/beat/alert",
-            r#"{"title":"t"}"#,
-            Some("s3cret"),
+            "/api/monitors/web/alert?token=0123456789abcdef",
+            r#"{"title":"deploy started"}"#,
+            None,
             None,
         ),
     ] {
         let uri = request.uri().to_string();
         let res = test_app().await.oneshot(request).await.unwrap();
-        assert!(!deprecated(&res), "{uri}");
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri}");
     }
 
-    // A refused write is not flagged, and read-only views keep ?token=.
-    let res = test_app()
-        .await
-        .oneshot(push("/api/event?title=x&token=wrong"))
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-    assert!(!deprecated(&res));
+    // Read-only views keep ?token=.
     let res = test_app()
         .await
         .oneshot(get("/api/summary?token=0123456789abcdef"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    assert!(!deprecated(&res));
 }
 
 #[tokio::test]
@@ -228,8 +177,8 @@ async fn alert_dispatches_with_item_token_and_records_it() {
 
 #[tokio::test]
 async fn alert_accepts_global_auth_token_for_a_non_push_monitor() {
-    // "web" is an HTTP monitor with no push_token: the global viewer token
-    // authorizes, via either the Bearer header or the ?token= query.
+    // "web" is an HTTP monitor with no push_token: the global token
+    // authorizes, as a Bearer header.
     let res = test_app()
         .await
         .oneshot(alert(
@@ -237,18 +186,6 @@ async fn alert_accepts_global_auth_token_for_a_non_push_monitor() {
             r#"{"title":"deploy started"}"#,
             None,
             Some("0123456789abcdef"),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::ACCEPTED);
-
-    let res = test_app()
-        .await
-        .oneshot(alert(
-            "/api/monitors/web/alert?token=0123456789abcdef",
-            r#"{"title":"deploy started"}"#,
-            None,
-            None,
         ))
         .await
         .unwrap();

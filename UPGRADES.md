@@ -13,6 +13,13 @@ the new binary against your config before you roll out:
   (it expanded to `""`). Set the variable, or write `${VAR:-}` where an
   empty value is meant.
 - **An empty channel secret fails the load** (it disabled the channel).
+- **A push monitor needs a `push_token`, a watched peer a `listen_token`.**
+  Add one, or set `allow_unauthenticated_push = true` on the item if it
+  lives on an isolated network.
+- **Writes no longer accept `?token=`.** Jobs calling
+  `/api/push/{id}?token=...` get 401: send `-H "X-Push-Token: ..."`.
+  Scripts calling silence, announce, event or alert with `?token=` send
+  `-H "Authorization: Bearer ..."` instead.
 
 ## 0.11.0 → 0.11.1
 

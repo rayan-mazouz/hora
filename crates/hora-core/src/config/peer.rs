@@ -33,6 +33,10 @@ pub struct Peer {
     /// `ping_token` for me).
     #[serde(default)]
     pub listen_token: Option<Secret>,
+    /// Watch the peer without a `listen_token`: its heartbeats are accepted on
+    /// the id alone. For isolated networks; warned at every load.
+    #[serde(default)]
+    pub allow_unauthenticated_push: bool,
     /// Watch the peer: mark it down if no inbound heartbeat arrives within this
     /// window. Setting it enables the IN side; leaving it unset makes this an
     /// OUT-only peer (a plain dead-man to an external receiver).

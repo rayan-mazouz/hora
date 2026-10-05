@@ -44,8 +44,7 @@ pub(crate) struct AnnounceResponse {
         ("title" = String, Query, description = "Banner title"),
         ("body" = Option<String>, Query, description = "Banner body"),
         ("severity" = Option<String>, Query, description = "info (default), warning, critical or resolved"),
-        ("until" = Option<String>, Query, description = "Auto-expiry: a duration (e.g. 4h) or the next occurrence of a UTC time (HH:MM, e.g. 18:00)"),
-        ("token" = Option<String>, Query, deprecated, description = "Viewer token; deprecated on this endpoint (answered with a Deprecation header): use Authorization: Bearer")
+        ("until" = Option<String>, Query, description = "Auto-expiry: a duration (e.g. 4h) or the next occurrence of a UTC time (HH:MM, e.g. 18:00)")
     ),
     security(("bearer" = [])),
     responses(
@@ -99,7 +98,6 @@ pub(crate) struct AnnounceClearResponse {
 #[utoipa::path(
     delete,
     path = "/api/announce",
-    params(("token" = Option<String>, Query, deprecated, description = "Viewer token; deprecated on this endpoint (answered with a Deprecation header): use Authorization: Bearer")),
     security(("bearer" = [])),
     responses(
         (status = 200, description = "Every ad-hoc announcement removed", body = AnnounceClearResponse),
@@ -131,8 +129,7 @@ pub(crate) struct EventResponse {
     post,
     path = "/api/event",
     params(
-        ("title" = String, Query, description = "Event title, e.g. `deploy api v2.3`"),
-        ("token" = Option<String>, Query, deprecated, description = "Viewer token; deprecated on this endpoint (answered with a Deprecation header): use Authorization: Bearer")
+        ("title" = String, Query, description = "Event title, e.g. `deploy api v2.3`")
     ),
     security(("bearer" = [])),
     responses(
@@ -184,8 +181,7 @@ pub(crate) struct SilenceResponse {
     params(
         ("monitors" = String, Query, description = "Comma-separated monitor ids, or `all`"),
         ("duration" = String, Query, description = "How long to mute (e.g. 10m, 1h30m; max 7d)"),
-        ("reason" = Option<String>, Query, description = "Optional note recorded with the silence"),
-        ("token" = Option<String>, Query, deprecated, description = "Viewer token; deprecated on this endpoint (answered with a Deprecation header): use Authorization: Bearer")
+        ("reason" = Option<String>, Query, description = "Optional note recorded with the silence")
     ),
     security(("bearer" = [])),
     responses(

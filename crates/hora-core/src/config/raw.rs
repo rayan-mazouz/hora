@@ -13,6 +13,8 @@ use super::secret::Secret;
 /// daemon never probes from it. Validation turns it into a [`Monitor`], where
 /// each kind carries only the settings it understands (see
 /// [`MonitorKind`]).
+// The booleans are independent switches of the file format.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawMonitor {
@@ -103,10 +105,15 @@ pub(crate) struct RawMonitor {
     /// `socks5://…`). HTTP monitors only.
     #[serde(default)]
     pub(crate) proxy: Option<String>,
-    /// Push monitor only: secret required as `?token=` on `/api/push/{id}`.
-    /// Unset = no token check (anyone who knows the id can heartbeat).
+    /// The monitor's own credential, sent as `X-Push-Token`: required on
+    /// `/api/push/{id}` (push monitors) and accepted on
+    /// `/api/monitors/{id}/alert` (every kind).
     #[serde(default)]
     pub(crate) push_token: Option<Secret>,
+    /// Push monitor only: accept heartbeats without a `push_token`, on the id
+    /// alone. For isolated networks; warned at every load.
+    #[serde(default)]
+    pub(crate) allow_unauthenticated_push: bool,
     /// Push monitor only: a five-field cron expression (UTC) for when heartbeats
     /// are expected (e.g. `"0 3 * * *"` for a nightly job). The monitor goes
     /// down only when a scheduled run misses its `grace_secs`
@@ -234,6 +241,7 @@ impl Default for RawMonitor {
             notify: None,
             proxy: None,
             push_token: None,
+            allow_unauthenticated_push: false,
             schedule: None,
             grace_secs: None,
             check_cert: None,

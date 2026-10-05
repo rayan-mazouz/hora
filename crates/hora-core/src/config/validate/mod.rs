@@ -139,17 +139,6 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
             &format!("monitor {}: push_token", monitor.id),
             monitor.push_token.as_ref(),
         )?;
-        // Without a token the id alone authorizes /api/push/{id}, and ids are
-        // not secrets (a public monitor's id is served on the page and API):
-        // anyone could forge heartbeats to mask an outage. Warn, don't fail -
-        // a bare id may be acceptable on a private network.
-        if monitor.kind() == Kind::Push && monitor.push_token.is_none() {
-            tracing::warn!(
-                "monitor {}: push monitor has no push_token - its id appears on the \
-                 status page/API, so anyone who can reach /api/push can forge heartbeats",
-                monitor.id
-            );
-        }
         validate_routes(
             &format!("monitor {}", monitor.id),
             monitor.notify.as_deref(),
@@ -367,15 +356,26 @@ fn validate_peers(
             &format!("peer {}: ping_token", peer.id),
             peer.ping_token.as_ref(),
         )?;
+        anyhow::ensure!(
+            !peer.allow_unauthenticated_push || (peer.is_watched() && peer.listen_token.is_none()),
+            "peer {}: allow_unauthenticated_push only applies to a watched peer without listen_token",
+            peer.id
+        );
         if let Some(every) = peer.expect_every_secs {
             validate_period(&format!("peer {}: expect_every_secs", peer.id), every)?;
-            // Same reasoning as the push-monitor warning: peer ids are exposed
-            // on the unauthenticated /healthz (witnesses need them), so an
-            // unprotected listen id lets anyone forge the peer's heartbeats.
+            // Peer ids are exposed on the unauthenticated /healthz (witnesses
+            // need them), so an unprotected listen id lets anyone forge the
+            // peer's heartbeats and keep a dead node looking alive.
             if peer.listen_token.is_none() {
+                anyhow::ensure!(
+                    peer.allow_unauthenticated_push,
+                    "peer {}: a watched peer needs a listen_token \
+                     (or allow_unauthenticated_push = true on an isolated network)",
+                    peer.id
+                );
                 tracing::warn!(
-                    "peer {}: watched without a listen_token - its id appears in /healthz, \
-                     so anyone who can reach /api/push can forge its heartbeats",
+                    "peer {}: accepts unauthenticated heartbeats (allow_unauthenticated_push) - \
+                     anyone who can reach /api/push can forge them",
                     peer.id
                 );
             }

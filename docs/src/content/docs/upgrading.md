@@ -67,6 +67,11 @@ with the new binary first.
   Set it, or write `${VAR:-}` where an empty value is meant.
 - **An empty channel secret fails the load** instead of disabling the
   channel.
+- **A push monitor needs a `push_token`, a watched peer a `listen_token`**,
+  or `allow_unauthenticated_push = true` on an isolated network.
+- **Writes no longer accept `?token=`**: send `X-Push-Token` (push, alert)
+  or `Authorization: Bearer` (silence, announce, event, alert). See
+  [Authentication](../reference/api/#authentication).
 
 ## 0.10 to 0.11
 

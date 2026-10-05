@@ -107,6 +107,27 @@ fn push(uri: &str) -> Request<Body> {
         .expect("request")
 }
 
+/// The test app's `server.auth_token`.
+const OPERATOR_TOKEN: &str = "0123456789abcdef";
+
+/// `request`, carrying the operator token as `Authorization: Bearer`.
+fn as_operator(mut request: Request<Body>) -> Request<Body> {
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        header::HeaderValue::from_str(&format!("Bearer {OPERATOR_TOKEN}")).expect("header"),
+    );
+    request
+}
+
+/// `request`, carrying `token` as `X-Push-Token`.
+fn with_push_token(mut request: Request<Body>, token: &str) -> Request<Body> {
+    request.headers_mut().insert(
+        "x-push-token",
+        header::HeaderValue::from_str(token).expect("header"),
+    );
+    request
+}
+
 /// Node B's config for the peer-probe tests: it knows the tcp target and
 /// expects requests from peer `hora-a` with this token.
 fn vantage_config(target_port: u16) -> String {
@@ -413,18 +434,18 @@ async fn openapi_and_page_render() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    // ?token= is marked deprecated on the writes, not on the reads.
+    // Writes document no ?token= parameter: they take a header only.
     let doc: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
-    let token_param = |path: &str, method: &str| {
-        doc["paths"][path][method]["parameters"]
-            .as_array()
-            .and_then(|params| params.iter().find(|p| p["name"] == "token"))
-            .cloned()
-    };
-    let push = token_param("/api/push/{id}", "post").expect("push token param");
-    assert_eq!(push["deprecated"], true, "{push}");
-    let silence = token_param("/api/silence", "post").expect("silence token param");
-    assert_eq!(silence["deprecated"], true, "{silence}");
+    for (path, method) in [("/api/push/{id}", "post"), ("/api/silence", "post")] {
+        let params = doc["paths"][path][method]["parameters"].as_array().cloned();
+        assert!(
+            !params
+                .unwrap_or_default()
+                .iter()
+                .any(|p| p["name"] == "token"),
+            "{path}"
+        );
+    }
     assert_eq!(
         test_app().await.oneshot(get("/")).await.unwrap().status(),
         StatusCode::OK

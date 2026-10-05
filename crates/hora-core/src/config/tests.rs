@@ -994,6 +994,7 @@ fn confirm_with_peers_requires_health_and_a_probeable_peer() {
             id = "hora-b"
             name = "B"
             expect_every_secs = 60
+            listen_token = "test-listen-token"
         "#,
     )
     .unwrap_err()
@@ -1015,6 +1016,7 @@ fn confirm_with_peers_requires_health_and_a_probeable_peer() {
             id = "beat"
             name = "Beat"
             kind = "push"
+            push_token = "test-push-token"
             interval_secs = 60
             confirm_with_peers = true
         "#,
@@ -1232,6 +1234,7 @@ fn rejects_peer_listen_id_clashing_with_monitor() {
             name = "Hora B"
             listen_id = "shared"
             expect_every_secs = 90
+            listen_token = "test-listen-token"
         "#,
     )
     .unwrap_err()
@@ -1271,6 +1274,7 @@ fn explicit_witness_url_overrides_derivation() {
             ping_url = "https://b.example:9000/api/push/hora-a"
             witness_url = "https://b.internal/healthz"
             expect_every_secs = 90
+            listen_token = "test-listen-token"
         "#,
     );
     assert_eq!(
@@ -1294,6 +1298,7 @@ fn peer_debug_redacts_secrets() {
             ping_url = "https://b.example/api/push/hora-a?tok=sup3rsecret"
             ping_token = "tok3n"
             expect_every_secs = 90
+            listen_token = "test-listen-token"
             witness_url = "https://b.example/healthz?key=sup3rsecret"
         "#,
     );
@@ -1936,6 +1941,7 @@ fn accepts_scheduled_push_monitor() {
             id = "backup"
             name = "Backup"
             kind = "push"
+            push_token = "test-push-token"
             interval_secs = 60
             schedule = "0 3 * * *"
             grace_secs = 1800
@@ -2073,6 +2079,12 @@ fn rejects_slo_window_without_target() {
 /// The shipped example, as `hora check` reads it.
 const EXAMPLE: &str = include_str!("../../../../config.example.toml");
 
+/// The example with its uncommented `${BACKUP_TOKEN}` given a value (tests
+/// must not mutate the process environment).
+fn example() -> String {
+    EXAMPLE.replace("${BACKUP_TOKEN}", "a-long-enough-backup-token")
+}
+
 /// Uncomment the lines of `text` from the one starting with `from` to the
 /// next blank line (`# key = value  # note` becomes `key = value  # note`).
 fn uncomment_block(text: &str, from: &str) -> String {
@@ -2103,8 +2115,9 @@ fn raw_monitors(text: &str) -> Vec<toml::Table> {
 
 #[test]
 fn the_example_config_round_trips_into_typed_monitors() {
-    let config = super::parse_with_exec_dir(EXAMPLE, None).expect("the example loads");
-    let raw = raw_monitors(EXAMPLE);
+    let example = example();
+    let config = super::parse_with_exec_dir(&example, None).expect("the example loads");
+    let raw = raw_monitors(&example);
     assert_eq!(config.monitors.len(), raw.len());
     for (monitor, table) in config.monitors.iter().zip(&raw) {
         // Kind and target survive as written: the target is the identity
@@ -2140,18 +2153,16 @@ fn the_example_config_round_trips_into_typed_monitors() {
 fn the_example_config_optional_settings_land_in_their_kind() {
     // The commented-out settings of the example, switched on: each lands in
     // its kind's typed settings, parsed.
-    let mut text = EXAMPLE.to_owned();
+    let mut text = example();
     for from in [
         "# keyword = \"operational\"",
         "# ehlo_name = ",
-        "# push_token = ",
+        "# schedule = \"0 3",
         "# [[monitors]]\n# id = \"raid\"",
         "# [[monitors]]\n# id = \"dns-check\"",
     ] {
         text = uncomment_block(&text, from);
     }
-    // `${BACKUP_TOKEN}` is unset here: give the token a value of its own.
-    let text = text.replace("${BACKUP_TOKEN}", "a-long-enough-backup-token");
     let exec_dir = std::env::temp_dir();
     let config = super::parse_with_exec_dir(&text, Some(exec_dir)).expect("the example loads");
     assert_eq!(config.monitors.len(), raw_monitors(&text).len());
@@ -2333,4 +2344,71 @@ fn page_logo_is_read_next_to_the_config() {
     assert!(err.contains("the limit is"), "{err}");
 
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn push_monitor_needs_a_token_unless_opted_out() {
+    let push = |extra: &str| {
+        format!(
+            r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "backup"
+                name = "Backup"
+                kind = "push"
+                interval_secs = 60
+                {extra}
+            "#
+        )
+    };
+    let error = load(&push("")).unwrap_err().to_string();
+    assert!(
+        error.contains("monitor backup: a push monitor needs a push_token"),
+        "{error}"
+    );
+    load(&push("allow_unauthenticated_push = true")).expect("explicit opt-out loads");
+    let error = load(&push(
+        "push_token = \"a-long-push-token\"\nallow_unauthenticated_push = true",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("only applies to a push monitor without push_token"),
+        "{error}"
+    );
+}
+
+#[test]
+fn watched_peer_needs_a_listen_token_unless_opted_out() {
+    let peer = |extra: &str| {
+        format!(
+            r#"
+                [page]
+                [server]
+                [health]
+                id = "hora-a"
+                [[peers]]
+                id = "hora-b"
+                name = "B"
+                expect_every_secs = 90
+                {extra}
+            "#
+        )
+    };
+    let error = load(&peer("")).unwrap_err().to_string();
+    assert!(
+        error.contains("peer hora-b: a watched peer needs a listen_token"),
+        "{error}"
+    );
+    load(&peer("allow_unauthenticated_push = true")).expect("explicit opt-out loads");
+    let error = load(&peer(
+        "listen_token = \"a-long-listen-token\"\nallow_unauthenticated_push = true",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("only applies to a watched peer without listen_token"),
+        "{error}"
+    );
 }

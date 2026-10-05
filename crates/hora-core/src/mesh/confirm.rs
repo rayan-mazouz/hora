@@ -436,6 +436,7 @@ mod tests {
             id = "beat"
             name = "Beat"
             kind = "push"
+            push_token = "test-push-token"
             interval_secs = 60
             "#,
         )

@@ -514,7 +514,7 @@ mod tests {
     async fn peer_seen_reflects_freshness_and_status() {
         let store = Store::in_memory().await;
         let base = cfg("[page]\n[server]\n[health]\nid=\"a\"\n\
-             [[peers]]\nid=\"x\"\nname=\"X\"\nexpect_every_secs=100\n");
+             [[peers]]\nid=\"x\"\nname=\"X\"\nexpect_every_secs=100\nlisten_token=\"test-listen-token\"\n");
         let mut peer = base.peers[0].clone();
         let now = 1_000_000;
 
@@ -554,7 +554,7 @@ mod tests {
     async fn report_includes_watched_peers_and_status() {
         let store = Store::in_memory().await;
         let config = cfg("[page]\n[server]\n[health]\nid=\"hora-a\"\n\
-             [[peers]]\nid=\"hora-b\"\nname=\"B\"\nexpect_every_secs=100\n\
+             [[peers]]\nid=\"hora-b\"\nname=\"B\"\nexpect_every_secs=100\nlisten_token=\"test-listen-token\"\n\
              [[peers]]\nid=\"hc\"\nname=\"HC\"\nping_url=\"https://hc-ping.com/x\"\n");
         let report = report(&store, &config, &AtomicU64::new(0)).await;
         assert_eq!(report.id.as_deref(), Some("hora-a"));

@@ -34,6 +34,7 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
         raw.id
     );
     validate_monitor_io(&raw)?;
+    validate_push_auth(&raw)?;
     warn_ignored(&raw);
     let spec = spec_of(&mut raw)?;
     Ok(Monitor {
@@ -502,6 +503,33 @@ fn validate_dual_stack(monitor: &RawMonitor) -> anyhow::Result<()> {
     anyhow::ensure!(
         bare.parse::<std::net::IpAddr>().is_err(),
         "monitor {}: dual_stack requires a hostname target (an IP literal has a single address family)",
+        monitor.id
+    );
+    Ok(())
+}
+
+/// A push monitor needs a `push_token`: its id is not a secret (a public
+/// monitor's id is on the status page and API), so the id alone would let
+/// anyone forge heartbeats and keep a dead job green. Only an explicit
+/// `allow_unauthenticated_push` loads without one.
+fn validate_push_auth(monitor: &RawMonitor) -> anyhow::Result<()> {
+    if !monitor.allow_unauthenticated_push {
+        anyhow::ensure!(
+            monitor.kind != Kind::Push || monitor.push_token.is_some(),
+            "monitor {}: a push monitor needs a push_token \
+             (or allow_unauthenticated_push = true on an isolated network)",
+            monitor.id
+        );
+        return Ok(());
+    }
+    anyhow::ensure!(
+        monitor.kind == Kind::Push && monitor.push_token.is_none(),
+        "monitor {}: allow_unauthenticated_push only applies to a push monitor without push_token",
+        monitor.id
+    );
+    tracing::warn!(
+        "monitor {}: accepts unauthenticated pushes (allow_unauthenticated_push) - anyone who \
+         can reach /api/push can forge its heartbeats",
         monitor.id
     );
     Ok(())

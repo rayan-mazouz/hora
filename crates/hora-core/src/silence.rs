@@ -135,6 +135,7 @@ mod tests {
             name = "Paris"
             listen_id = "paris-in"
             expect_every_secs = 60
+            listen_token = "test-listen-token"
             "#,
         )
         .expect("config")

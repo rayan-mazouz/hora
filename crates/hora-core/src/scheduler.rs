@@ -1074,6 +1074,7 @@ mod tests {
             id = "job"
             name = "Job"
             kind = "push"
+            push_token = "test-push-token"
             interval_secs = 2
             "#,
         )

@@ -333,7 +333,7 @@ group = "infra"
 # Heartbeat / push monitor: down if no ping arrives within `interval_secs`.
 # The job calls: curl -fsS -X POST -H "X-Push-Token: ${BACKUP_TOKEN}" \
 #   "https://status.example.com/api/push/nightly-backup"
-# The header keeps the token out of proxy/access logs (`?token=` also works).
+# The token goes in the header only, which keeps it out of proxy/access logs.
 # Optional query: ?status=down&msg=...&ping=<ms>
 #
 # Cron-aware variant: declare WHEN the job runs and Hora alerts only if a
@@ -345,7 +345,10 @@ id = "nightly-backup"
 name = "Nightly backup"
 kind = "push"
 interval_secs = 90000        # max gap before "down" (~25h for a daily job)
-# push_token = "${BACKUP_TOKEN}"   # optional but recommended
+push_token = "${BACKUP_TOKEN}"   # required; without it the id alone would let
+                                 # anyone keep a dead job green
+# allow_unauthenticated_push = true   # isolated networks only: accept pushes
+#                                     # on the id alone (warned at every load)
 # schedule = "0 3 * * *"     # five-field cron, UTC (not local time: DST moves a
 #                            # local crontab by an hour); replaces the fixed-gap rule
 # grace_secs = 1800          # how late a scheduled ping may be (default 30m)
@@ -427,6 +430,8 @@ interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # ping_token = "${PEER_B_TOKEN}"                   # sent as the X-Push-Token header
 # expect_every_secs = 90   # IN: mark the peer down if it goes silent this long
 # listen_token = "${PEER_B_IN}"   # token the peer must present when it pings me
+#                           # (required with expect_every_secs, unless
+#                           # allow_unauthenticated_push = true)
 #                           # (peer pings POST /api/push/hora-b; listen_id defaults to id)
 # witness_url = "https://b.example/healthz"   # optional; default = origin(ping_url)/healthz
 # notify = ["ops-telegram"]                   # optional; route this peer's alerts

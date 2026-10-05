@@ -39,7 +39,7 @@ ping_url = "https://b.example/api/push/hora-a"
 ping_token = "${PEER_B_TOKEN}"                   # sent as X-Push-Token
 # IN - I watch the peer and alert if it goes silent:
 expect_every_secs = 90
-listen_token = "${PEER_B_IN}"                    # required from the peer's pings
+listen_token = "${PEER_B_IN}"                    # required with expect_every_secs
 # listen_id = "hora-b"                           # the push id it pings: /api/push/{listen_id} (default: id)
 # witness_url = "https://b.example/healthz"      # default: origin(ping_url)/healthz
 # notify = ["ops-telegram"]                      # route this peer's alerts

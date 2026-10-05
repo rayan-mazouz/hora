@@ -52,17 +52,14 @@ revealed.
 **Query-string tokens.** Read-only views (the page, `/history`,
 `/history.atom`, `/timeline`, `/metrics`, `/api/summary`, latency) also
 accept `?token=`, which is handy for a kiosk screen or a feed reader that
-cannot set headers. On **write** endpoints `?token=` is **deprecated**: it
-still works, but the response carries `Deprecation: true` and a `Link` to
-this section, and Hora logs one warning per endpoint. A token in a URL ends
-up in proxy access logs, browser history and shell history - send the
-header instead.
+cannot set headers. **Write** endpoints take a header only: a `?token=` is
+ignored there, and the write answers 401. A token in a URL ends up in proxy
+access logs, browser history and shell history.
 
 ## `POST /api/push/{id}`
 
 Record a heartbeat for a push monitor (or a watched peer). Send the token as
-an `X-Push-Token` header (`?token=` still works but is
-[deprecated](#authentication)):
+an `X-Push-Token` header:
 
 ```sh
 curl -fsS -X POST -H "X-Push-Token: ${TOKEN}" \
@@ -70,7 +67,8 @@ curl -fsS -X POST -H "X-Push-Token: ${TOKEN}" \
 ```
 
 Optional query: `status=up|down|degraded` (default up), `msg=...` (recorded
-with the heartbeat, bounded), `ping=<ms>`. Answers 401 on a wrong token -
+with the heartbeat, bounded), `ping=<ms>`. Answers 401 on a missing or
+wrong token -
 and on an id that is not a push target, so push ids cannot be probed from
 outside - and 400 on an unknown `status` or a negative `ping`.
 
@@ -89,9 +87,7 @@ timeline (shown on `/history`), and **never** marks the monitor down: status
 stays driven by probes/heartbeats alone.
 
 Authenticate with the monitor's own `push_token` as an `X-Push-Token` header,
-or with `server.auth_token` as `Authorization: Bearer` (`?token=` is
-[deprecated](#authentication)).
-The endpoint is closed unless one of those is configured and matches.
+or with `server.auth_token` as `Authorization: Bearer`. The endpoint is closed unless one of those is configured and matches.
 
 ```sh
 curl -fsS -X POST \
