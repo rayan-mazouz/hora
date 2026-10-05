@@ -343,6 +343,11 @@ pub struct Server {
     /// bucket; the daemon logs a warning when it sees one).
     #[serde(default)]
     pub client_ip_header: Option<String>,
+    /// How many proxies you control append to `client_ip_header`: the client
+    /// is the Nth address from the right (default 1). Entries further left
+    /// were written by whoever sent the request, and are never trusted.
+    #[serde(default = "default_client_ip_trusted_hops")]
+    pub client_ip_trusted_hops: usize,
     /// Per-IP API rate limit: one request slot is replenished every N seconds.
     #[serde(default = "default_rate_limit_refill")]
     pub rate_limit_refill_secs: u64,
@@ -520,6 +525,10 @@ fn default_channel_fail_threshold() -> u32 {
 }
 fn default_rate_limit_burst() -> u32 {
     30
+}
+
+fn default_client_ip_trusted_hops() -> usize {
+    1
 }
 
 /// The configuration file path, from `$HORA_CONFIG` (default `./config.toml`).

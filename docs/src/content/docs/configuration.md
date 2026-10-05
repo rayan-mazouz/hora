@@ -56,7 +56,7 @@ pause, so there is no window where nothing is watching.
 
 A few `[server]` settings are read once at startup and need a restart:
 `bind`, `allowed_origins`, the rate limit (`rate_limit_burst`,
-`rate_limit_refill_secs`) and `client_ip_header`.
+`rate_limit_refill_secs`), `client_ip_header` and `client_ip_trusted_hops`.
 
 A reload that fails validation is refused: Hora logs why and keeps running
 with the previous config.

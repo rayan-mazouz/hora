@@ -172,7 +172,10 @@ impl AppState {
 /// smart extractor would let an attacker mint a fresh rate-limit bucket per
 /// request (and inflate the keyed-bucket map) simply by rotating the header.
 /// Forwarded headers are honored only when an operator behind a trusted proxy
-/// names one via `server.client_ip_header`.
+/// names one via `server.client_ip_header`. The client is then the
+/// `server.client_ip_trusted_hops`-th address from the right: a proxy appends
+/// the address it saw, so everything left of the trusted entries is whatever
+/// the client sent.
 ///
 /// Behind a proxy that nobody named, every client shares the proxy's address,
 /// hence one rate-limit bucket: a busy page then answers 429 to everyone. The
@@ -181,6 +184,8 @@ impl AppState {
 #[derive(Clone)]
 pub(crate) struct ConfiguredIp {
     header: Option<HeaderName>,
+    /// Trusted proxies appending to the header (at least 1).
+    trusted_hops: usize,
     /// Set once the "behind an unnamed proxy" warning was logged.
     proxy_hint: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -198,8 +203,8 @@ impl KeyExtractor for ConfiguredIp {
                 .headers()
                 .get(header)
                 .and_then(|value| value.to_str().ok())
-                .and_then(|raw| raw.split(',').next())
-                .and_then(|first| first.trim().parse::<IpAddr>().ok())
+                .and_then(|raw| raw.rsplit(',').nth(self.trusted_hops - 1))
+                .and_then(|entry| entry.trim().parse::<IpAddr>().ok())
         {
             return Ok(bucket(ip));
         }
@@ -230,7 +235,7 @@ fn bucket(ip: IpAddr) -> IpAddr {
 impl ConfiguredIp {
     /// Parse the configured header name once; an invalid name is ignored (with a
     /// warning) and the extractor falls back to the peer address.
-    pub(crate) fn from_config(name: Option<&str>) -> Self {
+    pub(crate) fn from_config(name: Option<&str>, trusted_hops: usize) -> Self {
         let header = name.and_then(|name| {
             name.parse::<HeaderName>()
                 .inspect_err(|_| {
@@ -240,6 +245,7 @@ impl ConfiguredIp {
         });
         Self {
             header,
+            trusted_hops: trusted_hops.max(1),
             proxy_hint: Arc::default(),
         }
     }
@@ -270,13 +276,15 @@ impl ConfiguredIp {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
+    use axum::extract::ConnectInfo;
+
     use super::*;
+
     #[test]
     fn configured_ip_prefers_header_then_falls_back_to_peer() {
-        use axum::extract::ConnectInfo;
-        use std::net::SocketAddr;
-
-        let extractor = ConfiguredIp::from_config(Some("cf-connecting-ip"));
+        let extractor = ConfiguredIp::from_config(Some("cf-connecting-ip"), 1);
         let peer = SocketAddr::from(([198, 51, 100, 9], 4444));
 
         // Header present: it wins over the peer address.
@@ -302,7 +310,7 @@ mod tests {
 
     #[test]
     fn ipv6_clients_share_their_slash_64() {
-        let extractor = ConfiguredIp::from_config(Some("x-real-ip"));
+        let extractor = ConfiguredIp::from_config(Some("x-real-ip"), 1);
         let key = |ip: &str| {
             let request = Request::builder()
                 .header("x-real-ip", ip)
@@ -324,11 +332,36 @@ mod tests {
                 .body(())
                 .expect("request")
         };
-        let unset = ConfiguredIp::from_config(None);
+        let unset = ConfiguredIp::from_config(None, 1);
         assert!(!unset.note_unnamed_proxy(&request("accept")));
         assert!(unset.note_unnamed_proxy(&request("x-real-ip")));
         // Once: the clones the router holds share the flag.
         assert!(!unset.clone().note_unnamed_proxy(&request("forwarded")));
         assert!(!unset.note_unnamed_proxy(&request("x-forwarded-for")));
+    }
+
+    #[test]
+    fn an_appended_header_is_read_from_the_right() {
+        let key = |hops: usize, value: &str| {
+            let request = Request::builder()
+                .header("x-forwarded-for", value)
+                .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 9))))
+                .body(())
+                .expect("request");
+            ConfiguredIp::from_config(Some("x-forwarded-for"), hops)
+                .extract(&request)
+                .unwrap()
+        };
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        // One appending proxy: the client cannot choose its key.
+        assert_eq!(key(1, "6.6.6.6, 203.0.113.7"), ip("203.0.113.7"));
+        assert_eq!(key(1, "203.0.113.7"), ip("203.0.113.7"));
+        // Two: a CDN then a local proxy.
+        assert_eq!(
+            key(2, "6.6.6.6, 203.0.113.7, 198.51.100.1"),
+            ip("203.0.113.7")
+        );
+        // Fewer entries than trusted hops: the peer address.
+        assert_eq!(key(2, "203.0.113.7"), ip("127.0.0.1"));
     }
 }

@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The rate limit reads a forwarded header from the right.** Hora took
+  the first address of `client_ip_header`, which behind a proxy that
+  appends (nginx's `$proxy_add_x_forwarded_for`, Traefik, most load
+  balancers) is whatever the client sent: every request could claim a new
+  address and a fresh bucket. The client is now the last entry, or the
+  `client_ip_trusted_hops`-th from the right (default 1) behind several
+  proxies.
+
 - **A peer checking a target differently no longer quiets a down.** A
   confirmation probe matched on kind and target only, and the peer probed
   with its own assertions: with `keyword = "OK"` here and none there, an

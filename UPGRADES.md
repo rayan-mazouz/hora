@@ -14,6 +14,10 @@ the new binary against your config before you roll out:
   monitor checked the same way. Across versions, peers do not confirm each
   other's downs (the alert goes out as unconfirmed) until both run the new
   release. `hora peers diff` lists monitors checked differently.
+- **`client_ip_header` is read from the right.** Behind one proxy, no
+  config change is needed. Behind several that append to it (a CDN, then
+  nginx), set `client_ip_trusted_hops` to their number, or every client of
+  a CDN edge shares its bucket.
 - **An unset `${VAR}` fails the load**, naming the key and the variable
   (it expanded to `""`). Set the variable, or write `${VAR:-}` where an
   empty value is meant.

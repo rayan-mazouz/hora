@@ -61,6 +61,10 @@ fn validate_routes(
 }
 
 pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        config.server.client_ip_trusted_hops >= 1,
+        "server.client_ip_trusted_hops must be at least 1"
+    );
     validate_token("server.auth_token", config.server.auth_token.as_ref())?;
     validate_token("server.admin_token", config.server.admin_token.as_ref())?;
     // The admin token must not double as a read token: those travel in URLs.

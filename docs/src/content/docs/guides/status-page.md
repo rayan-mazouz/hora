@@ -190,7 +190,8 @@ Caddy, nginx or Cloudflare. Two settings matter there:
 - **`server.client_ip_header`**: every page is rate-limited per client IP.
   Without this setting, every visitor shares the proxy's address and its
   bucket. Set it to the header your proxy writes (`x-real-ip`, or
-  `cf-connecting-ip` behind Cloudflare). See
+  `cf-connecting-ip` behind Cloudflare), and `client_ip_trusted_hops` to
+  the number of proxies that append to it. See
   [Rate limiting](../../reference/api/#rate-limiting--security-headers).
 - **HSTS** belongs to the proxy that terminates TLS.
 

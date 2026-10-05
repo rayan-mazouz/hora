@@ -30,6 +30,10 @@ allowed_origins = []
 # Unset = the TCP peer address (forwarded headers are never trusted by default).
 # client_ip_header = "x-real-ip"          # nginx: proxy_set_header X-Real-IP $remote_addr;
 # client_ip_header = "cf-connecting-ip"   # behind Cloudflare
+# How many proxies you control append to that header (x-forwarded-for behind
+# nginx's $proxy_add_x_forwarded_for, Traefik, a load balancer): the client is
+# that many entries from the right. Entries further left are client-chosen.
+# client_ip_trusted_hops = 1
 # Per-IP rate limit. One request slot is replenished every
 # `rate_limit_refill_secs` seconds, up to a burst of `rate_limit_burst`, on /api/*;
 # pages, badges, reports and /metrics get four times both. Read once at startup.

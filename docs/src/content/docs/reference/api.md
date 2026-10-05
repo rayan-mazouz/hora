@@ -188,10 +188,21 @@ client_ip_header = "x-real-ip"          # nginx: proxy_set_header X-Real-IP $rem
 # client_ip_header = "cf-connecting-ip" # behind Cloudflare
 ```
 
-Only name a header your proxy overwrites, and block direct access to the
-origin. Hora takes the first address of the header, so `x-forwarded-for`
-is safe only with a proxy that replaces it (Caddy's default) rather than
-appending to what the client sent (nginx's `$proxy_add_x_forwarded_for`).
+Only name a header your proxies write, and block direct access to the
+origin. Hora reads the header **from the right**: a proxy that appends
+(nginx's `$proxy_add_x_forwarded_for`, Traefik, most load balancers) adds
+the address it saw after whatever the client sent, so the client is the
+last entry, and anything left of it was chosen by the client. With several
+proxies you control in a row (a CDN, then nginx), set
+`client_ip_trusted_hops` to their number: the client is that many entries
+from the right. A header with fewer entries than that falls back to the
+TCP peer.
+
+```toml
+[server]
+client_ip_header = "x-forwarded-for"
+client_ip_trusted_hops = 2   # Cloudflare, then nginx on the host (default 1)
+```
 
 `allowed_origins` controls CORS (empty = allow any, since the data is
 read-only and public). Responses carry a strict CSP (no script,

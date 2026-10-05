@@ -41,12 +41,15 @@ const PAGE_LIMIT_FACTOR: u32 = 4;
 /// CORS, security headers and tracing.
 ///
 /// The `[server]` settings read here (`allowed_origins`, `rate_limit_*`,
-/// `client_ip_header`) are fixed for the router's lifetime: changing them
+/// `client_ip_header`, `client_ip_trusted_hops`) are fixed for the router's lifetime: changing them
 /// needs a restart, unlike the rest of the config, which handlers read live.
 pub fn router(state: AppState) -> Router {
     let config = state.config.borrow().clone();
     let cors = build_cors(&config.server.allowed_origins);
-    let key = ConfiguredIp::from_config(config.server.client_ip_header.as_deref());
+    let key = ConfiguredIp::from_config(
+        config.server.client_ip_header.as_deref(),
+        config.server.client_ip_trusted_hops,
+    );
     let refill = Duration::from_secs(config.server.rate_limit_refill_secs.max(1));
     let burst = config.server.rate_limit_burst.max(1);
 
