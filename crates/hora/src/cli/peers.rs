@@ -49,7 +49,7 @@ pub(crate) async fn peers(args: &[String]) -> Result<(), CliError> {
             .map(|monitor| {
                 (
                     monitor.kind().as_str().to_owned(),
-                    monitor.target().to_owned(),
+                    hora_core::mesh::shared_target(monitor),
                     hora_core::mesh::confirm::check_fingerprint(monitor),
                 )
             }),

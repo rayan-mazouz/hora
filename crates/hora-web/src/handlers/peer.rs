@@ -51,7 +51,10 @@ pub(crate) async fn peer_probe(
     let same_target: Vec<&hora_core::config::Monitor> = config
         .monitors
         .iter()
-        .filter(|monitor| monitor.kind() == request.kind && monitor.target() == request.target)
+        .filter(|monitor| {
+            monitor.kind() == request.kind
+                && hora_core::mesh::shared_target(monitor) == request.target
+        })
         .collect();
     if same_target.is_empty() {
         return Err(AppError::NotFound(
@@ -149,7 +152,7 @@ pub(crate) async fn peer_monitors(
             let view = views.get(monitor.id.as_str());
             hora_core::mesh::wire::PeerMonitor {
                 kind: monitor.kind(),
-                target: monitor.target().to_owned(),
+                target: hora_core::mesh::shared_target(monitor),
                 checks: hora_core::mesh::confirm::check_fingerprint(monitor),
                 status: view.map_or(MonitorState::Unknown, |view| view.status),
                 p50_ms: view.and_then(|view| view.p50_ms),

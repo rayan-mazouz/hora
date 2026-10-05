@@ -219,7 +219,7 @@ async fn peer_verdicts(
     let request = ProbeRequest {
         from,
         kind: monitor.kind(),
-        target: monitor.target().to_owned(),
+        target: super::shared_target(monitor),
         checks: check_fingerprint(monitor),
     };
     let probes = peers.iter().map(|(name, url, token)| {

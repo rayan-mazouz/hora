@@ -57,8 +57,9 @@ pub fn new_map() -> VantageMap {
     Arc::new(ArcSwap::from_pointee(HashMap::new()))
 }
 
-/// The map key for a monitor's target. Kind-qualified: the same `host:port`
-/// as a tcp connect and as a dns lookup are different measurements.
+/// The map key for a monitor's [`shared_target`](super::shared_target).
+/// Kind-qualified: the same `host:port` as a tcp connect and as a dns lookup
+/// are different measurements.
 #[must_use]
 pub fn key(kind: Kind, target: &str) -> String {
     format!("{}|{target}", kind.as_str())
@@ -70,7 +71,7 @@ pub fn for_monitor<S: std::hash::BuildHasher>(
     map: &HashMap<String, Vec<PeerVantage>, S>,
     monitor: &Monitor,
 ) -> Vec<PeerVantage> {
-    map.get(&key(monitor.kind(), monitor.target()))
+    map.get(&key(monitor.kind(), &super::shared_target(monitor)))
         .cloned()
         .unwrap_or_default()
 }

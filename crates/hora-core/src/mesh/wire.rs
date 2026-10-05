@@ -90,7 +90,8 @@ pub struct PeerSeen {
 // --- Peer API (/api/peer/*) --------------------------------------------------
 
 /// What one node asks another to probe. The responder matches `kind`,
-/// `target` and `checks` against its own monitors and refuses anything else.
+/// `target` ([`shared_target`](super::shared_target)) and `checks` against its
+/// own monitors and refuses anything else.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProbeRequest {
     /// The requesting node's `[health].id`; the responder authenticates it
@@ -126,6 +127,7 @@ pub struct PeerMonitors {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PeerMonitor {
     pub kind: Kind,
+    /// The [`shared_target`](super::shared_target): no credentials.
     pub target: String,
     /// That node's [`check_fingerprint`](super::confirm::check_fingerprint)
     /// for the monitor.

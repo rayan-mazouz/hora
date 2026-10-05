@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Peers no longer see credentials in targets.** `/api/peer/monitors`
+  listed every target as written, `https://user:pass@...` and
+  `?api_key=...` included, and a confirmation probe sent the requester's
+  target the same way. Both now carry the target with credentials masked,
+  and peers match shared monitors on that form.
+
 - **The rate limit reads a forwarded header from the right.** Hora took
   the first address of `client_ip_header`, which behind a proxy that
   appends (nginx's `$proxy_add_x_forwarded_for`, Traefik, most load

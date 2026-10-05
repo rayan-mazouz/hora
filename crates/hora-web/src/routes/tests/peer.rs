@@ -213,6 +213,74 @@ async fn peer_monitors_authenticates_and_discloses_probeable_targets() {
 }
 
 #[tokio::test]
+async fn peers_never_see_credentials_in_targets() {
+    // A target with credentials in its URL is listed and matched with them
+    // masked: a peer learns the host and path, not the password or api key.
+    let config = r#"
+        [page]
+        [server]
+        [health]
+        id = "hora-b"
+        [[peers]]
+        id = "hora-a"
+        name = "A"
+        expect_every_secs = 60
+        listen_token = "tok-a-to-b-16char"
+        [[monitors]]
+        id = "api"
+        name = "API"
+        target = "https://user:hunter2@api.example.com/health?api_key=s3cr3t"
+        interval_secs = 60
+    "#;
+    let res = app_from(config)
+        .await
+        .oneshot(
+            Request::builder()
+                .uri("/api/peer/monitors?from=hora-a")
+                .header("x-push-token", "tok-a-to-b-16char")
+                .extension(fake_peer())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_text(res).await;
+    assert!(
+        !body.contains("hunter2") && !body.contains("s3cr3t"),
+        "{body}"
+    );
+    let answer: hora_core::mesh::wire::PeerMonitors = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        answer.monitors[0].target,
+        "https://***:***@api.example.com/health?api_key=***"
+    );
+
+    // A probe request names the target in the same masked form, and the
+    // responder matches it.
+    let monitor = hora_core::config::parse(config).expect("config").monitors[0].clone();
+    let request = hora_core::mesh::wire::ProbeRequest {
+        from: "hora-a".to_owned(),
+        kind: monitor.kind(),
+        target: hora_core::mesh::shared_target(&monitor),
+        checks: "not-the-same".to_owned(),
+    };
+    assert!(!request.target.contains("hunter2"));
+    let res = app_from(config)
+        .await
+        .oneshot(probe_request(
+            &serde_json::to_string(&request).unwrap(),
+            Some("tok-a-to-b-16char"),
+        ))
+        .await
+        .unwrap();
+    // Matched by target: only the fingerprint differs.
+    assert_eq!(
+        body_text(res).await,
+        "target checked differently in this node's configuration"
+    );
+}
+
+#[tokio::test]
 async fn peer_monitors_match_the_full_summary() {
     // The peer answer reads the same snapshot as the page: it must report
     // exactly the status and p50 the authenticated summary shows.
