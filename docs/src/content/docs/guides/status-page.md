@@ -93,7 +93,8 @@ on the live status page.
 
 ## What you see
 
-With the operator token (`server.auth_token`), the same page also shows:
+With the operator's read token (`server.auth_token`), the same page also
+shows:
 
 - **Private monitors** (`public = false`). Without the token, a private
   monitor is absent everywhere: page, API, badges, history and feed. Its
@@ -113,7 +114,8 @@ With the operator token (`server.auth_token`), the same page also shows:
 The header says *Operator* while you are signed in. For a browser, the
 simplest way to present the token is a link with `?token=...` (read-only
 views accept it); the links on the page carry it on. Keep that link
-private; it ends up in browser history. Scripts should send
+private; it ends up in browser history. It only reads: silences,
+announcements, events and alerts need the separate `server.admin_token`. Scripts should send
 `Authorization: Bearer` instead (see
 [Authentication](../../reference/api/#authentication)).
 

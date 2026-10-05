@@ -150,7 +150,7 @@ pub(super) fn parse_event_args(args: &[String]) -> Result<EventCommand, CliError
     Ok(EventCommand::Record(title))
 }
 
-/// `hora silence <ids|all> <duration> [reason]` / `list` / `clear`: ad-hoc
+/// `hora silence <ids|all> <duration> [reason] [--force]` / `list` / `clear`: ad-hoc
 /// alert muting (a deploy window) written straight into the daemon's database,
 /// picked up on its next tick. The HTTP counterpart is `POST /api/silence`.
 pub(crate) async fn silence(args: &[String]) -> Result<(), CliError> {
@@ -187,31 +187,46 @@ pub(crate) async fn silence(args: &[String]) -> Result<(), CliError> {
         }
         Some(ids) if args.len() >= 2 => {
             let (config, store) = open_database().await?;
-            let reason = (args.len() > 2).then(|| args[2..].join(" "));
-            let silenced =
-                match hora_core::silence::apply(&store, &config, ids, &args[1], reason.as_deref())
-                    .await
-                {
-                    Ok(silenced) => silenced,
-                    Err(SilenceError::InvalidDuration) => {
-                        return Err(usage(format!(
-                            "Invalid duration {:?} (use e.g. 10m, 1h30m; max 7d).",
-                            args[1]
-                        )));
-                    }
-                    Err(SilenceError::UnknownId(id)) => return Err(unknown_monitor(&config, &id)),
-                    Err(SilenceError::NoIds) => return Err(usage(SILENCE_USAGE)),
-                    Err(err @ SilenceError::Database(_)) => {
-                        return Err(CliError::Other(err.into()));
-                    }
-                };
-            let until = silenced.until;
-            let target = if silenced.ids == ["*"] {
-                "all monitors".to_owned()
-            } else {
-                silenced.ids.join(", ")
+            let force = args[2..].iter().any(|arg| arg == "--force");
+            let reason_words: Vec<&str> = args[2..]
+                .iter()
+                .map(String::as_str)
+                .filter(|arg| *arg != "--force")
+                .collect();
+            let reason = (!reason_words.is_empty()).then(|| reason_words.join(" "));
+            let silenced = match hora_core::silence::apply(
+                &store,
+                &config,
+                ids,
+                &args[1],
+                reason.as_deref(),
+                force,
+            )
+            .await
+            {
+                Ok(silenced) => silenced,
+                Err(SilenceError::InvalidDuration) => {
+                    return Err(usage(format!(
+                        "Invalid duration {:?} (use e.g. 10m, 1h30m; max 7d).",
+                        args[1]
+                    )));
+                }
+                Err(SilenceError::BlanketTooLong) => {
+                    return Err(usage(
+                        "Silencing all monitors is capped at 24h; add --force to go up to 7d.",
+                    ));
+                }
+                Err(SilenceError::UnknownId(id)) => return Err(unknown_monitor(&config, &id)),
+                Err(SilenceError::NoIds) => return Err(usage(SILENCE_USAGE)),
+                Err(err @ SilenceError::Database(_)) => {
+                    return Err(CliError::Other(err.into()));
+                }
             };
-            println!("Silenced {target} until {}.", fmt::utc(until));
+            println!(
+                "Silenced {} until {}.",
+                silenced.target(),
+                fmt::utc(silenced.until)
+            );
         }
         _ => return Err(usage(SILENCE_USAGE)),
     }
@@ -220,7 +235,7 @@ pub(crate) async fn silence(args: &[String]) -> Result<(), CliError> {
 
 /// What `hora silence` answers a malformed invocation with.
 const SILENCE_USAGE: &str = concat!(
-    "Usage: hora silence <ids|all> <duration> [reason]\n",
+    "Usage: hora silence <ids|all> <duration> [reason] [--force]\n",
     "       hora silence list\n",
     "       hora silence clear",
 );

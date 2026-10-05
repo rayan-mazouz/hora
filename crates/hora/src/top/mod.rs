@@ -1,9 +1,10 @@
 //! `hora top`: a live terminal dashboard over the JSON API - statuses,
 //! uptime, latency percentiles, a sparkline for the selected monitor, and
 //! the current trouble, refreshed in place. Self-hosters live in SSH; this
-//! is the status page for them. Read-only: it consumes `/api/summary` and
+//! is the status page for them. It reads `/api/summary` and
 //! `/api/monitors/{id}/latency` exactly like any other API client, local or
-//! remote (`--url https://status.example --token ...`).
+//! remote (`--url https://status.example --token ...`); its silence and
+//! announce actions need `--admin-token`.
 //!
 //! The UI never waits on the network: every request runs as a background
 //! task that reports through a channel, so a slow or unreachable server
@@ -32,9 +33,19 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
         std::io::stdout().is_terminal(),
         "hora top needs an interactive terminal"
     );
-    let (url, token, interval) = parse_args(args)?;
+    let Args {
+        url,
+        token,
+        admin_token,
+        interval,
+    } = parse_args(args)?;
     let client = hora_core::http::client(None).context("building HTTP client")?;
-    let api = Api { client, url, token };
+    let api = Api {
+        client,
+        url,
+        token,
+        admin_token,
+    };
 
     // `ratatui::init` enters the alternate screen, enables raw mode, and
     // installs a panic hook that restores the terminal - a crash never
@@ -111,24 +122,39 @@ async fn event_loop(
     }
 }
 
-/// `hora top [--url URL] [--token TOKEN] [--interval SECS]`. Without `--url`
-/// the local config's `server.bind` is used; the token also falls back to
-/// the `HORA_TOKEN` environment variable (kept out of `ps` output).
-fn parse_args(args: &[String]) -> anyhow::Result<(String, Option<String>, Duration)> {
+/// What `hora top` was asked to connect to, and with which tokens.
+struct Args {
+    url: String,
+    /// `server.auth_token`, for the reads.
+    token: Option<String>,
+    /// `server.admin_token`, for the silence and announce actions.
+    admin_token: Option<String>,
+    interval: Duration,
+}
+
+/// `hora top [--url URL] [--token TOKEN] [--admin-token TOKEN] [--interval
+/// SECS]`. Without `--url` the local config's `server.bind` is used; the
+/// tokens also fall back to the `HORA_TOKEN` and `HORA_ADMIN_TOKEN`
+/// environment variables (kept out of `ps` output).
+fn parse_args(args: &[String]) -> anyhow::Result<Args> {
     let mut url = None;
     let mut token = std::env::var("HORA_TOKEN").ok();
+    let mut admin_token = std::env::var("HORA_ADMIN_TOKEN").ok();
     let mut interval = 5_u64;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--url" => url = Some(required(&mut iter, "--url")?),
             "--token" => token = Some(required(&mut iter, "--token")?),
+            "--admin-token" => admin_token = Some(required(&mut iter, "--admin-token")?),
             "--interval" => {
                 interval = required(&mut iter, "--interval")?
                     .parse()
                     .context("--interval must be seconds")?;
             }
-            other => anyhow::bail!("unknown option {other:?} (try --url, --token, --interval)"),
+            other => anyhow::bail!(
+                "unknown option {other:?} (try --url, --token, --admin-token, --interval)"
+            ),
         }
     }
     let url = if let Some(url) = url {
@@ -145,7 +171,12 @@ fn parse_args(args: &[String]) -> anyhow::Result<(String, Option<String>, Durati
             .replacen("[::]", "[::1]", 1);
         format!("http://{bind}")
     };
-    Ok((url, token, Duration::from_secs(interval.max(1))))
+    Ok(Args {
+        url,
+        token,
+        admin_token,
+        interval: Duration::from_secs(interval.max(1)),
+    })
 }
 
 fn required(iter: &mut std::slice::Iter<'_, String>, flag: &str) -> anyhow::Result<String> {

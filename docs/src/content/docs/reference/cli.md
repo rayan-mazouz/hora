@@ -15,12 +15,12 @@ a wrong path fails loudly instead of operating on an empty file.
 hora                                   # run the monitor
 hora check [--strict]                  # validate the config; non-zero exit on error
 hora test-alert [monitor-id]           # send a test alert through the real chain
-hora silence <ids|all> <duration> [reason]
+hora silence <ids|all> <duration> [reason] [--force]
 hora silence list
 hora silence clear
 hora announce <title> [body] [--severity s] [--until 4h|18:00]
 hora announce list / clear             # pinned status-page banners
-hora top [--url U] [--token T] [--interval S]   # live terminal dashboard
+hora top [--url U] [--token T] [--admin-token A] [--interval S]   # live dashboard
 hora digest                            # print the weekly digest (dry run)
 hora report [YYYY-MM]                  # print the monthly SLA report (default: last month)
 hora tune [monitor-id] [--days N]      # recommend fail_threshold / degraded_over_ms per monitor
@@ -69,7 +69,8 @@ hora silence list                      # active silences, soonest-expiring first
 hora silence clear                     # remove every silence
 ```
 
-Durations look like `90s`, `10m`, `1h30m` (max 7 days). Checks keep being
+Durations look like `90s`, `10m`, `1h30m` (max 7 days; `all` is capped at
+24 hours unless `--force`). Checks keep being
 recorded; only alert transitions are muted, picked up by the daemon on its
 next tick. Ids are monitor ids or a watched peer's `listen_id`; unknown ids
 are rejected with the configured list. The reason is capped at 500
@@ -95,7 +96,8 @@ without `--url` the local config's bind address is used, so `hora top` just
 works on the daemon's host - including inside `docker exec -it hora hora
 top`.
 
-It also *acts*, through the same authenticated API (`--token` required):
+It also *acts*, through the same API, with the admin token
+(`--admin-token`, or `HORA_ADMIN_TOKEN`):
 
 | Key | Action |
 | --- | --- |

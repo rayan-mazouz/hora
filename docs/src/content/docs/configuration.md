@@ -38,8 +38,8 @@ missing `-e` is caught by `hora check` instead of by the first alert. Write
 `${VAR:-}` for a value that may be empty, or `${VAR:-fallback}` for a
 default. An empty channel secret (`token`, `webhook_url`, `url`, `pass`, ...)
 fails the load too, and so does an empty *access token* (`auth_token`,
-`push_token`, `listen_token`, `ping_token`) instead of silently meaning "no
-token required".
+`admin_token`, `push_token`, `listen_token`, `ping_token`) instead of
+silently meaning "no token required".
 
 ## Live reload - no blind window
 

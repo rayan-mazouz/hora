@@ -183,19 +183,21 @@ hora silence clear
 or from CI over HTTP:
 
 ```sh
-curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
+curl -fsS -X POST -H "Authorization: Bearer $HORA_ADMIN_TOKEN" \
   "https://status.example.com/api/silence?monitors=api,web&duration=10m&reason=deploy"
 ```
 
 Durations look like `10m`, `90s`, `1h30m` (max 7 days: anything longer
-belongs in a visible maintenance window). Checks keep recording; only alert
+belongs in a visible maintenance window; `all` is capped at 24 hours unless
+forced, `--force` or `force=true`). Checks keep recording; only alert
 transitions are muted, picked up on the next tick. The ids are monitor ids
 or the `listen_id` of a watched [peer](../peers/) (by default its `id`), so
 `hora silence hora-b 30m "rebooting hora-b"` mutes that peer's dead-man
-alert. The HTTP endpoint **strictly requires** `server.auth_token`, sent as
+alert. The HTTP endpoint **strictly requires** `server.admin_token`, sent as
 `Authorization: Bearer`; unknown ids are rejected so a typo'd hook fails
-loudly instead of silencing nothing. Expired silences are swept
-automatically.
+loudly instead of silencing nothing. A silence set over HTTP is told to
+every channel, so a leaked token cannot switch alerting off unnoticed.
+Expired silences are swept automatically.
 
 ## Pushed alerts (from your own jobs)
 
@@ -231,7 +233,7 @@ Two things Hora does for you here:
   structured.
 
 Authenticate with the monitor's `push_token` (`X-Push-Token`) or
-`server.auth_token` (`Authorization: Bearer`). See the
+`server.admin_token` (`Authorization: Bearer`). See the
 [API reference](../../reference/api/#post-apimonitorsidalert) for the full
 request/response shape.
 
@@ -274,17 +276,17 @@ hora announce clear
 ```
 
 ```sh
-curl -X POST -H "Authorization: Bearer $TOK" \
+curl -X POST -H "Authorization: Bearer $HORA_ADMIN_TOKEN" \
   "https://status.example.com/api/announce?title=Fibre+incident&severity=warning&until=4h"
-curl -X DELETE -H "Authorization: Bearer $TOK" "https://status.example.com/api/announce"
+curl -X DELETE -H "Authorization: Bearer $HORA_ADMIN_TOKEN" "https://status.example.com/api/announce"
 ```
 
 `--until` (a duration like `4h`, or a time of day like `18:00`, UTC, the
 next occurrence) auto-expires the banner, so the classic stale "incident
 ongoing" banner three days later cannot happen by default. The API's
 `until` takes the same two forms (`until=4h` or `until=18:00`). The API
-requires `server.auth_token` and the banner shows immediately (the summary
-cache is busted on write).
+requires `server.admin_token`, the banner shows immediately (the summary
+cache is busted on write), and every channel is told.
 
 A title that starts with `list` or `clear` needs `--` before it:
 `hora announce -- "clear skies tonight"`. Without it, `hora announce clear`

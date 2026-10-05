@@ -62,6 +62,19 @@ fn validate_routes(
 
 pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
     validate_token("server.auth_token", config.server.auth_token.as_ref())?;
+    validate_token("server.admin_token", config.server.admin_token.as_ref())?;
+    // The admin token must not double as a read token: those travel in URLs.
+    if let Some(admin) = &config.server.admin_token {
+        anyhow::ensure!(
+            config.server.auth_token.as_ref() != Some(admin)
+                && !config
+                    .server
+                    .group_tokens
+                    .values()
+                    .any(|token| token == admin),
+            "server.admin_token must differ from server.auth_token and every group token"
+        );
+    }
     for (group, token) in &config.server.group_tokens {
         validate_token(&format!("server.group_tokens[{group:?}]"), Some(token))?;
         // A token for a group no monitor belongs to guards nothing - that is

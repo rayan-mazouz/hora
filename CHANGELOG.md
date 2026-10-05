@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a peer with `expect_every_secs` but no `listen_token`, now fails the
   load; `allow_unauthenticated_push = true` on the item accepts the id
   alone on an isolated network, with a warning at every load.
+- **Operator writes need `server.admin_token`.** `server.auth_token`
+  travels in URLs to show private monitors, and it could also silence
+  every alert for 7 days or pin a fake "all good" banner. It now only
+  reads. Silence, announce, event and alert (without the monitor's
+  `push_token`) take `server.admin_token` as `Authorization: Bearer`, and
+  are closed without one; it must differ from the read tokens.
+  `hora top --admin-token` (or `HORA_ADMIN_TOKEN`) sends it for its
+  actions.
+- **Silences and announcements are told to every channel** when set
+  through the API, as a `Hora` alert that the silence does not mute.
+- **Silencing `all` is capped at 24 hours** unless forced
+  (`force=true`, `hora silence all 2d --force`).
 - **Write endpoints take their token from a header only.** `?token=` on
   `/api/push`, `/api/monitors/{id}/alert`, `/api/silence`, `/api/announce`
   and `/api/event` answers 401; send `X-Push-Token` or

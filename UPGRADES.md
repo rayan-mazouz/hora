@@ -16,6 +16,11 @@ the new binary against your config before you roll out:
 - **A push monitor needs a `push_token`, a watched peer a `listen_token`.**
   Add one, or set `allow_unauthenticated_push = true` on the item if it
   lives on an isolated network.
+- **Operator writes need `server.admin_token`.** `server.auth_token` no
+  longer silences, announces, records events or posts alerts. Add an
+  `admin_token` (different from `auth_token`) and use it in deploy hooks
+  and `hora top --admin-token`; without one, those endpoints answer 401.
+  Silencing `all` past 24 hours needs `force=true` (`--force` on the CLI).
 - **Writes no longer accept `?token=`.** Jobs calling
   `/api/push/{id}?token=...` get 401: send `-H "X-Push-Token: ..."`.
   Scripts calling silence, announce, event or alert with `?token=` send

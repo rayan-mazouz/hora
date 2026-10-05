@@ -138,8 +138,9 @@ pub(crate) fn print_help() {
     println!("                      One-shot ad-hoc probe; --confirm asks the peers their verdict");
     println!("  test-alert [id]     Send a test down + recovered through the configured");
     println!("                      channels (all of them, or the routed ones of monitor [id])");
-    println!("  silence <ids> <for> [reason]  Mute alerts for monitors (comma-separated ids");
-    println!("                      or 'all') for a duration like 10m or 1h30m (max 7d)");
+    println!("  silence <ids> <for> [reason] [--force]  Mute alerts for monitors");
+    println!("                      (comma-separated ids or 'all') for a duration like 10m");
+    println!("                      or 1h30m (max 7d; 'all' past 24h needs --force)");
     println!("  silence list        Show the active silences");
     println!("  announce <title> [body] [--severity s] [--until 4h|18:00]");
     println!("                      Pin a public banner on the status page");
@@ -147,8 +148,9 @@ pub(crate) fn print_help() {
     println!("                      ('hora announce -- clear ...' pins a title starting");
     println!("                      with list or clear)");
     println!("  silence clear       Remove every silence");
-    println!("  top [--url U] [--token T] [--interval S]");
-    println!("                      Live terminal dashboard over the JSON API");
+    println!("  top [--url U] [--token T] [--admin-token A] [--interval S]");
+    println!("                      Live terminal dashboard over the JSON API (its");
+    println!("                      silence and announce actions need --admin-token)");
     println!("  digest              Print the weekly digest (a dry run of [digest])");
     println!("  report [YYYY-MM]    Print the monthly SLA report (default: last month;");
     println!("                      the printable page is /report/YYYY-MM)");

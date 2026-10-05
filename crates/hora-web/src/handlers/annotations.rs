@@ -6,9 +6,10 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use hora_core::db::{self};
+use hora_core::notifications::{AlertSeverity, Event};
 
 use crate::AppState;
-use crate::auth::Operator;
+use crate::auth::Admin;
 use crate::error::AppError;
 use hora_core::MAX_EVENT_TITLE_CHARS;
 use hora_core::announce::{self, Announcement};
@@ -50,13 +51,13 @@ pub(crate) struct AnnounceResponse {
     responses(
         (status = 200, description = "Announcement pinned to the status page", body = AnnounceResponse),
         (status = 400, description = "Empty title, unknown severity or unparseable duration"),
-        (status = 401, description = "Missing or wrong token, or no auth_token configured")
+        (status = 401, description = "Missing or wrong token, or no admin_token configured")
     )
 )]
 pub(crate) async fn announce(
     State(state): State<AppState>,
     // Publishing to every visitor is an operator action, like /api/silence.
-    _operator: Operator,
+    _admin: Admin,
     Query(query): Query<AnnounceQuery>,
 ) -> Result<Json<AnnounceResponse>, AppError> {
     let severity = match query.severity.as_deref() {
@@ -86,6 +87,11 @@ pub(crate) async fn announce(
         severity = %announcement.severity,
         "announcement pinned via API"
     );
+    spawn_notice(
+        &state,
+        AlertSeverity::Info,
+        format!("announcement pinned: {}", announcement.title),
+    );
     Ok(Json(AnnounceResponse { id, until }))
 }
 
@@ -101,12 +107,12 @@ pub(crate) struct AnnounceClearResponse {
     security(("bearer" = [])),
     responses(
         (status = 200, description = "Every ad-hoc announcement removed", body = AnnounceClearResponse),
-        (status = 401, description = "Missing or wrong token, or no auth_token configured")
+        (status = 401, description = "Missing or wrong token, or no admin_token configured")
     )
 )]
 pub(crate) async fn announce_clear(
     State(state): State<AppState>,
-    _operator: Operator,
+    _admin: Admin,
 ) -> Result<Json<AnnounceClearResponse>, AppError> {
     let cleared = db::clear_announcements(&state.store, Utc::now().timestamp()).await?;
     state.refresh_now().await;
@@ -135,14 +141,14 @@ pub(crate) struct EventResponse {
     responses(
         (status = 200, description = "Event marker recorded", body = EventResponse),
         (status = 400, description = "Empty title"),
-        (status = 401, description = "Missing or wrong token, or no auth_token configured")
+        (status = 401, description = "Missing or wrong token, or no admin_token configured")
     )
 )]
 pub(crate) async fn post_event(
     State(state): State<AppState>,
     // Recording a change marker is an operator action, same gesture as a
     // silence.
-    _operator: Operator,
+    _admin: Admin,
     Query(query): Query<EventQuery>,
 ) -> Result<Json<EventResponse>, AppError> {
     let title = hora_core::bounded(&query.title, MAX_EVENT_TITLE_CHARS);
@@ -165,6 +171,9 @@ pub(crate) struct SilenceQuery {
     duration: String,
     #[serde(default)]
     reason: Option<String>,
+    /// Allow silencing every monitor for longer than 24 hours.
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
@@ -180,22 +189,23 @@ pub(crate) struct SilenceResponse {
     path = "/api/silence",
     params(
         ("monitors" = String, Query, description = "Comma-separated monitor ids, or `all`"),
-        ("duration" = String, Query, description = "How long to mute (e.g. 10m, 1h30m; max 7d)"),
-        ("reason" = Option<String>, Query, description = "Optional note recorded with the silence")
+        ("duration" = String, Query, description = "How long to mute (e.g. 10m, 1h30m; max 7d, and 24h for `all` without `force`)"),
+        ("reason" = Option<String>, Query, description = "Optional note recorded with the silence"),
+        ("force" = Option<bool>, Query, description = "Allow silencing `all` for longer than 24h")
     ),
     security(("bearer" = [])),
     responses(
         (status = 200, description = "Alerts muted until the returned time", body = SilenceResponse),
-        (status = 400, description = "Unparseable duration or empty monitor list"),
-        (status = 401, description = "Missing or wrong token, or no auth_token configured"),
+        (status = 400, description = "Unparseable duration, empty monitor list, or `all` past 24h without `force`"),
+        (status = 401, description = "Missing or wrong token, or no admin_token configured"),
         (status = 404, description = "Unknown monitor id")
     )
 )]
 pub(crate) async fn silence(
     State(state): State<AppState>,
     // Muting alerts is an operator action: it strictly requires the
-    // configured viewer token.
-    Operator { config }: Operator,
+    // configured admin token.
+    Admin { config }: Admin,
     Query(query): Query<SilenceQuery>,
 ) -> Result<Json<SilenceResponse>, AppError> {
     let silenced = silence::apply(
@@ -204,17 +214,43 @@ pub(crate) async fn silence(
         &query.monitors,
         &query.duration,
         query.reason.as_deref(),
+        query.force,
     )
     .await
     .map_err(|err| match err {
         SilenceError::InvalidDuration => {
             AppError::BadRequest("invalid duration (use e.g. 10m, 1h30m; max 7d)")
         }
+        SilenceError::BlanketTooLong => AppError::BadRequest(
+            "silencing all monitors is capped at 24h (add force=true to go up to 7d)",
+        ),
         SilenceError::NoIds => AppError::BadRequest("no monitor ids given"),
         SilenceError::UnknownId(_) => AppError::NotFound("unknown monitor id"),
         SilenceError::Database(err) => AppError::Internal(err.into()),
     })?;
+    tracing::info!(monitors = ?silenced.ids, until = silenced.until, "alerts silenced via API");
+    spawn_notice(&state, AlertSeverity::Warning, silenced.notice());
     let (monitors, until) = (silenced.ids, silenced.until);
-    tracing::info!(monitors = ?monitors, until, "alerts silenced via API");
     Ok(Json(SilenceResponse { monitors, until }))
+}
+
+/// Tell every channel about an operator write made through the API, so a
+/// leaked admin token cannot mute alerting or pin a banner unnoticed. Sent
+/// straight to the channels: a silence never mutes it.
+fn spawn_notice(state: &AppState, severity: AlertSeverity, title: String) {
+    let notifier = state.notifier.clone();
+    tokio::spawn(async move {
+        notifier
+            .load_full()
+            .dispatch(
+                Event::Alert {
+                    monitor: "Hora",
+                    severity,
+                    title: &title,
+                    message: "set through the API",
+                },
+                None,
+            )
+            .await;
+    });
 }

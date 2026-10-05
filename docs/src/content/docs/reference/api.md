@@ -24,10 +24,10 @@ Editor...) at it.
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
 | `POST /api/push/{id}` | Record a heartbeat for a push monitor or a watched peer. |
 | `POST /api/monitors/{id}/alert` | Push an ad-hoc alert to a monitor's channels (a producer's own failure); records a timeline line, never changes the monitor's status. |
-| `POST /api/silence` | Mute alerts ad hoc (deploy hook). Requires `server.auth_token`. |
-| `POST /api/event` | Record an event marker ("deploy api v2.3"), correlated into incidents. Requires `server.auth_token`. |
+| `POST /api/silence` | Mute alerts ad hoc (deploy hook). Requires `server.admin_token`. |
+| `POST /api/event` | Record an event marker ("deploy api v2.3"), correlated into incidents. Requires `server.admin_token`. |
 | `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
-| `POST /api/announce` | Pin a public status-page banner (`DELETE` clears); auto-expiry via `until`, a duration (`4h`) or a UTC time of day (`18:00`). Requires `server.auth_token`. |
+| `POST /api/announce` | Pin a public status-page banner (`DELETE` clears); auto-expiry via `until`, a duration (`4h`) or a UTC time of day (`18:00`). Requires `server.admin_token`. |
 | `POST /api/peer/probe` | [Multi-vantage confirmation](../../guides/peers/#multi-vantage-confirmation) between nodes: probe a target *from this node's own config* and answer with the verdict. Requires the requesting peer's `listen_token`. |
 | `GET /api/peer/monitors?from=<peer-id>` | The mesh exchange behind `hora peers diff` and the per-vantage view: this node's probeable monitors with its own view of each. Same peer authentication as `/api/peer/probe`. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge. |
@@ -37,11 +37,12 @@ Editor...) at it.
 
 ## Authentication
 
-Hora knows three kinds of token, each sent in a header:
+Hora knows four kinds of token, each sent in a header:
 
 | Token | Header | Opens |
 | --- | --- | --- |
-| `server.auth_token` (operator) | `Authorization: Bearer <token>` | Private monitors on every read view; announce, silence, event and alert writes. |
+| `server.auth_token` (operator, read) | `Authorization: Bearer <token>` | Private monitors on every read view. No write. |
+| `server.admin_token` (operator, write) | `Authorization: Bearer <token>` | Announce, silence, event and alert writes. Header only. |
 | A monitor's `push_token` | `X-Push-Token: <token>` | `POST /api/push/{id}` and `POST /api/monitors/{id}/alert` for that monitor. |
 | A group token | `Authorization: Bearer <token>` | `/status/{group}` and `/report/{month}?group=` with that group's full detail. |
 
@@ -87,7 +88,7 @@ timeline (shown on `/history`), and **never** marks the monitor down: status
 stays driven by probes/heartbeats alone.
 
 Authenticate with the monitor's own `push_token` as an `X-Push-Token` header,
-or with `server.auth_token` as `Authorization: Bearer`. The endpoint is closed unless one of those is configured and matches.
+or with `server.admin_token` as `Authorization: Bearer`. The endpoint is closed unless one of those is configured and matches.
 
 ```sh
 curl -fsS -X POST \
@@ -106,7 +107,7 @@ JSON body: `severity` (`info` default, `warning`, `error`, `critical`),
 (optional map, folded into the message). Answers **202 Accepted** with
 `{"status":"dispatched","id":…}`; a 400 on an empty title or unknown severity,
 401 on a missing or wrong credential (also for an unknown id), and 404 for
-an unknown id only with the operator token.
+an unknown id only with the admin token.
 
 **Severity → priority.** On backends that have a native priority - ntfy,
 Pushover, Gotify - the severity maps onto it (so `critical` pages louder than
@@ -126,25 +127,28 @@ dispatch every alert.
 Mute alerts for some monitors ad hoc - made for CI deploy hooks:
 
 ```sh
-curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
+curl -fsS -X POST -H "Authorization: Bearer $HORA_ADMIN_TOKEN" \
   "https://status.example.com/api/silence?monitors=api,web&duration=10m&reason=deploy"
 ```
 
 `monitors` is a comma-separated list of monitor ids or watched peers'
 `listen_id`s, or `all` (silences mute peer-watch alerts too); `duration` looks like
-`10m` / `1h30m` (max 7 days); `reason` is optional. **Strictly requires
-`server.auth_token`** - muting alerts is an operator action, so without a
+`10m` / `1h30m` (max 7 days; `all` is capped at 24 hours unless
+`force=true`); `reason` is optional. **Strictly requires
+`server.admin_token`** - muting alerts is an operator action, so without a
 configured token the endpoint is closed. Unknown ids answer 404 (a typo'd
 hook fails loudly), an unparseable duration 400. Checks keep recording; only
-alerting is muted.
+alerting is muted. Every channel is told ("alerts for api, web silenced
+until ..."), as a `Hora` alert that the silence itself does not mute.
 
 ## `POST /api/announce`
 
 Pin a public banner on the status page; `DELETE /api/announce` clears them
-all. Requires `server.auth_token`.
+all. Requires `server.admin_token`. Every channel is told when a banner is
+pinned.
 
 ```sh
-curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
+curl -fsS -X POST -H "Authorization: Bearer $HORA_ADMIN_TOKEN" \
   "https://status.example.com/api/announce?title=Fibre+incident&body=ETA+6pm&severity=warning&until=18:00"
 ```
 

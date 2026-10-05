@@ -40,8 +40,15 @@ rate_limit_burst = 30
 # but URLs end up in browser history and intermediary logs). It gates the full
 # view on the status page, /api/summary, /api/monitors/{id}/latency, /metrics,
 # /history and /history.atom; without it those endpoints only show public
-# monitors. Read live: a change applies on the next reload.
+# monitors. It only reads: no write endpoint accepts it. Read live: a change
+# applies on the next reload.
 # auth_token = "${HORA_AUTH_TOKEN}"
+# Token for the operator writes: POST /api/silence, /api/announce (and DELETE),
+# /api/event, and /api/monitors/{id}/alert without the monitor's push_token.
+# Sent as `Authorization: Bearer <token>` only, never in a URL; it must differ
+# from auth_token and the group tokens. Unset = those endpoints are closed.
+# Every silence and announcement made through the API is told to every channel.
+# admin_token = "${HORA_ADMIN_TOKEN}"
 # Per-group viewer tokens for the /status/{group} pages (lightweight
 # multi-tenancy): the token reveals the FULL view of its group - private
 # monitors included - and nothing else. Also accepted by the group-scoped

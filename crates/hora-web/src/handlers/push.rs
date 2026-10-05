@@ -11,7 +11,7 @@ use hora_core::db::{self};
 use hora_core::notifications::{AlertSeverity, Event};
 use hora_core::status::CheckStatus;
 
-use crate::auth::{bearer_is_operator, ct_eq, push_token};
+use crate::auth::{bearer_is_admin, ct_eq, push_token};
 use crate::error::AppError;
 use crate::flood;
 use crate::{AppState, MAX_ALERT_DEDUP_CHARS, MAX_ALERT_TAG_CHARS, MAX_ALERT_TAGS};
@@ -156,8 +156,8 @@ pub(crate) struct AlertResponse {
     responses(
         (status = 202, description = "Alert dispatched to the monitor's channels (or coalesced)", body = AlertResponse),
         (status = 400, description = "Empty title or unknown severity"),
-        (status = 401, description = "Missing/wrong X-Push-Token and no matching server.auth_token (also for an unknown monitor)"),
-        (status = 404, description = "Unknown monitor (operator token only)")
+        (status = 401, description = "Missing/wrong X-Push-Token and no matching server.admin_token (also for an unknown monitor)"),
+        (status = 404, description = "Unknown monitor (admin token only)")
     )
 )]
 pub(crate) async fn post_alert(
@@ -170,19 +170,19 @@ pub(crate) async fn post_alert(
     let monitor = config.find_monitor(&id);
 
     // Authenticate with the monitor's own push_token (X-Push-Token) or the
-    // global token (Authorization: Bearer).
+    // admin token (Authorization: Bearer).
     // Dispatching to channels can flood, so - unlike a read-only view - the
     // endpoint stays closed unless a credential is configured and matches.
-    // Without the operator token an unknown id answers the same 401 as a
+    // Without the admin token an unknown id answers the same 401 as a
     // known one, so the endpoint cannot be used to probe private monitor ids.
     let item_token_ok = monitor
         .and_then(|monitor| monitor.push_token.as_ref())
         .is_some_and(|expected| {
             push_token(&headers).is_some_and(|token| ct_eq(token, expected.as_ref()))
         });
-    if !item_token_ok && !bearer_is_operator(config, &headers) {
+    if !item_token_ok && !bearer_is_admin(config, &headers) {
         return Err(AppError::Unauthorized(
-            "alerting requires the monitor's push_token (X-Push-Token) or server.auth_token",
+            "alerting requires the monitor's push_token (X-Push-Token) or server.admin_token",
         ));
     }
     let monitor = monitor.ok_or(AppError::NotFound("unknown monitor"))?;

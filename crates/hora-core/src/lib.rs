@@ -45,6 +45,9 @@ pub const SECONDS_PER_DAY: i64 = 86_400;
 /// status page.
 pub const MAX_SILENCE_SECS: u64 = 7 * 24 * 3600;
 
+/// Longest silence of every monitor at once without `force`: 24 hours.
+pub const MAX_BLANKET_SILENCE_SECS: u64 = 24 * 3600;
+
 // Caps on free text written through the HTTP API, the CLI or `hora top`, so a
 // record looks the same whichever door it came in through and a buggy hook or
 // producer cannot bloat the database. Counted in characters.

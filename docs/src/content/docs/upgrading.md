@@ -69,6 +69,8 @@ with the new binary first.
   channel.
 - **A push monitor needs a `push_token`, a watched peer a `listen_token`**,
   or `allow_unauthenticated_push = true` on an isolated network.
+- **Operator writes need `server.admin_token`**: `server.auth_token` only
+  reads now. Silencing `all` past 24 hours needs `force=true`.
 - **Writes no longer accept `?token=`**: send `X-Push-Token` (push, alert)
   or `Authorization: Bearer` (silence, announce, event, alert). See
   [Authentication](../reference/api/#authentication).

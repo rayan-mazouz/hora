@@ -2412,3 +2412,30 @@ fn watched_peer_needs_a_listen_token_unless_opted_out() {
         "{error}"
     );
 }
+
+#[test]
+fn admin_token_must_differ_from_the_read_tokens() {
+    let config = |admin: &str| {
+        format!(
+            r#"
+                [page]
+                [server]
+                auth_token = "read-read-read-read"
+                admin_token = "{admin}"
+                [server.group_tokens]
+                App = "group-group-group-1"
+                [[monitors]]
+                id = "web"
+                name = "Web"
+                target = "https://example.com"
+                interval_secs = 60
+                group = "App"
+            "#
+        )
+    };
+    load(&config("admin-admin-admin-1")).expect("a distinct admin token loads");
+    for reused in ["read-read-read-read", "group-group-group-1"] {
+        let error = load(&config(reused)).unwrap_err().to_string();
+        assert!(error.contains("server.admin_token must differ"), "{error}");
+    }
+}

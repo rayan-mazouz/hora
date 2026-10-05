@@ -74,10 +74,10 @@ hora event list                      # the recent markers
 hora event -- "list view redesign"   # a title that starts with 'list'
 ```
 
-or over HTTP from CI (requires `server.auth_token`):
+or over HTTP from CI (requires `server.admin_token`):
 
 ```sh
-curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
+curl -fsS -X POST -H "Authorization: Bearer $HORA_ADMIN_TOKEN" \
   "https://status.example.com/api/event?title=deploy+api+v2.3"
 ```
 

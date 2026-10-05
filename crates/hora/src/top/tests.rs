@@ -8,29 +8,32 @@ use super::*;
 
 #[test]
 fn args_parse_flags_and_fall_back() {
-    let (url, token, interval) = parse_args(&[
+    let args = parse_args(&[
         "--url".to_owned(),
         "https://s.example".to_owned(),
         "--token".to_owned(),
         "tok".to_owned(),
+        "--admin-token".to_owned(),
+        "admin".to_owned(),
         "--interval".to_owned(),
         "2".to_owned(),
     ])
     .expect("parse");
-    assert_eq!(url, "https://s.example");
-    assert_eq!(token.as_deref(), Some("tok"));
-    assert_eq!(interval, Duration::from_secs(2));
+    assert_eq!(args.url, "https://s.example");
+    assert_eq!(args.token.as_deref(), Some("tok"));
+    assert_eq!(args.admin_token.as_deref(), Some("admin"));
+    assert_eq!(args.interval, Duration::from_secs(2));
 
     // Unknown flags fail loudly; a zero interval is clamped.
     assert!(parse_args(&["--nope".to_owned()]).is_err());
-    let (_, _, interval) = parse_args(&[
+    let args = parse_args(&[
         "--url".to_owned(),
         "https://s".to_owned(),
         "--interval".to_owned(),
         "0".to_owned(),
     ])
     .expect("parse");
-    assert_eq!(interval, Duration::from_secs(1));
+    assert_eq!(args.interval, Duration::from_secs(1));
 }
 
 #[test]
@@ -90,6 +93,7 @@ fn api_at(url: String) -> Api {
         client: hora_core::http::client(None).expect("client"),
         url,
         token: Some("tok".to_owned()),
+        admin_token: Some("admin".to_owned()),
     }
 }
 
@@ -278,19 +282,19 @@ async fn fetch_errors_carry_the_http_status() {
         _ => panic!("expected a refused action"),
     }
 
-    // Without a token, an action is refused before any request.
+    // Without the admin token, an action is refused before any request.
     let (tx, _results) = mpsc::channel(8);
-    let mut anonymous = Fetcher::new(
+    let mut reader = Fetcher::new(
         Api {
-            token: None,
+            admin_token: None,
             ..api_at(url)
         },
         tx,
     );
-    let refused = anonymous
+    let refused = reader
         .action(silence_action("web", "10m").expect("action"))
-        .expect_err("needs a token");
-    assert!(refused.contains("needs a token"));
+        .expect_err("needs the admin token");
+    assert!(refused.contains("needs the admin token"));
 }
 
 #[test]

@@ -122,22 +122,21 @@ impl FromRequestParts<AppState> for Viewer {
     }
 }
 
-/// Whether the request carries `server.auth_token` as `Authorization: Bearer`.
-/// Writes take their credential from a header only: a `?token=` ends up in
-/// access logs, proxies and browser history.
-pub(crate) fn bearer_is_operator(config: &Config, headers: &HeaderMap) -> bool {
-    matches(bearer(headers), config.server.auth_token.as_ref())
+/// Whether the request carries `server.admin_token` as `Authorization:
+/// Bearer`. Writes take their credential from a header only: a `?token=` ends
+/// up in access logs, proxies and browser history.
+pub(crate) fn bearer_is_admin(config: &Config, headers: &HeaderMap) -> bool {
+    matches(bearer(headers), config.server.admin_token.as_ref())
 }
 
-/// An operator action (announce, silence, event): requires the configured
-/// `server.auth_token` as `Authorization: Bearer`. Without one configured the
-/// endpoint is closed - unlike the read-only views, where "no token" just
-/// means "everything is public".
-pub(crate) struct Operator {
+/// An operator write (announce, silence, event): requires the configured
+/// `server.admin_token` as `Authorization: Bearer`. Without one configured the
+/// endpoint is closed. `server.auth_token` only reads.
+pub(crate) struct Admin {
     pub(crate) config: Arc<Config>,
 }
 
-impl FromRequestParts<AppState> for Operator {
+impl FromRequestParts<AppState> for Admin {
     type Rejection = AppError;
 
     fn from_request_parts(
@@ -145,11 +144,11 @@ impl FromRequestParts<AppState> for Operator {
         state: &AppState,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         let config = state.config.borrow().clone();
-        std::future::ready(if bearer_is_operator(&config, &parts.headers) {
+        std::future::ready(if bearer_is_admin(&config, &parts.headers) {
             Ok(Self { config })
         } else {
             Err(AppError::Unauthorized(
-                "this endpoint requires server.auth_token and a matching token",
+                "this endpoint requires server.admin_token as Authorization: Bearer",
             ))
         })
     }

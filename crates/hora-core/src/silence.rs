@@ -4,14 +4,45 @@
 use crate::db::Store;
 
 use crate::config::Config;
-use crate::{MAX_SILENCE_REASON_CHARS, MAX_SILENCE_SECS, bounded, db, parse_duration};
+use crate::{
+    MAX_BLANKET_SILENCE_SECS, MAX_SILENCE_REASON_CHARS, MAX_SILENCE_SECS, bounded, db, fmt,
+    parse_duration,
+};
 
-/// The ids a silence was recorded for (`["*"]` for every monitor), and when it
-/// expires (unix epoch seconds, UTC).
+/// The ids a silence was recorded for (`["*"]` for every monitor), when it
+/// expires (unix epoch seconds, UTC), and the reason recorded with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Silenced {
     pub ids: Vec<String>,
     pub until: i64,
+    pub reason: Option<String>,
+}
+
+impl Silenced {
+    /// What was silenced: `all monitors`, or the ids.
+    #[must_use]
+    pub fn target(&self) -> String {
+        if self.ids == ["*"] {
+            "all monitors".to_owned()
+        } else {
+            self.ids.join(", ")
+        }
+    }
+
+    /// The sentence the channels receive about this silence.
+    #[must_use]
+    pub fn notice(&self) -> String {
+        let reason = self
+            .reason
+            .as_deref()
+            .map(|reason| format!(" ({reason})"))
+            .unwrap_or_default();
+        format!(
+            "alerts for {} silenced until {}{reason}",
+            self.target(),
+            fmt::utc(self.until)
+        )
+    }
 }
 
 /// Why a silence was refused.
@@ -19,6 +50,9 @@ pub struct Silenced {
 pub enum SilenceError {
     /// Not a positive duration, or longer than [`MAX_SILENCE_SECS`].
     InvalidDuration,
+    /// Every monitor for longer than [`MAX_BLANKET_SILENCE_SECS`], without
+    /// `force`.
+    BlanketTooLong,
     /// An empty id list.
     NoIds,
     /// An id that is neither a configured monitor nor a watched peer.
@@ -31,6 +65,9 @@ impl std::fmt::Display for SilenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidDuration => f.write_str("invalid duration (use e.g. 10m, 1h30m; max 7d)"),
+            Self::BlanketTooLong => {
+                f.write_str("silencing all monitors is capped at 24h (force it to go up to 7d)")
+            }
             Self::NoIds => f.write_str("no monitor ids given"),
             Self::UnknownId(id) => write!(f, "unknown monitor id {id:?}"),
             Self::Database(err) => write!(f, "recording the silence failed: {err}"),
@@ -48,8 +85,9 @@ impl std::error::Error for SilenceError {
 }
 
 /// Mute alerts for `ids` (comma-separated monitor ids, or `all` / `*` for
-/// every monitor) for `duration` (`10m`, `1h30m`; at most 7 days), with an
-/// optional `reason` (trimmed, capped at [`MAX_SILENCE_REASON_CHARS`]).
+/// every monitor) for `duration` (`10m`, `1h30m`; at most 7 days, and at most
+/// 24 hours for every monitor unless `force`), with an optional `reason`
+/// (trimmed, capped at [`MAX_SILENCE_REASON_CHARS`]).
 ///
 /// Every id is checked first, so a typo'd deploy hook fails loudly instead of
 /// silencing nothing: a configured monitor id, or the listen id of a watched
@@ -65,11 +103,15 @@ pub async fn apply(
     ids: &str,
     duration: &str,
     reason: Option<&str>,
+    force: bool,
 ) -> Result<Silenced, SilenceError> {
     let duration_secs = parse_duration(duration)
         .filter(|secs| *secs <= MAX_SILENCE_SECS)
         .ok_or(SilenceError::InvalidDuration)?;
     let ids = resolve_ids(config, ids)?;
+    if ids == ["*"] && duration_secs > MAX_BLANKET_SILENCE_SECS && !force {
+        return Err(SilenceError::BlanketTooLong);
+    }
     let reason = reason
         .map(|reason| bounded(reason, MAX_SILENCE_REASON_CHARS))
         .filter(|reason| !reason.is_empty());
@@ -79,7 +121,7 @@ pub async fn apply(
     db::insert_silences(store, &ids, until, reason.as_deref())
         .await
         .map_err(SilenceError::Database)?;
-    Ok(Silenced { ids, until })
+    Ok(Silenced { ids, until, reason })
 }
 
 /// The validated id list: `["*"]` for `all` / `*`, otherwise every listed id,
@@ -167,11 +209,11 @@ mod tests {
         let store = Store::in_memory().await;
         let config = config();
         assert!(matches!(
-            apply(&store, &config, "api", "8d", None).await,
+            apply(&store, &config, "api", "8d", None, false).await,
             Err(SilenceError::InvalidDuration)
         ));
         assert!(matches!(
-            apply(&store, &config, "api,typo", "10m", None).await,
+            apply(&store, &config, "api,typo", "10m", None, false).await,
             Err(SilenceError::UnknownId(_))
         ));
         // Nothing was written by the refused calls.
@@ -179,7 +221,7 @@ mod tests {
         assert!(db::active_silences(&store, now).await.unwrap().is_empty());
 
         let long = "é".repeat(MAX_SILENCE_REASON_CHARS + 50);
-        let silenced = apply(&store, &config, "api", "10m", Some(&long))
+        let silenced = apply(&store, &config, "api", "10m", Some(&long), false)
             .await
             .unwrap();
         assert_eq!(silenced.ids, ["api"]);
@@ -190,5 +232,32 @@ mod tests {
             Some(MAX_SILENCE_REASON_CHARS)
         );
         assert!(db::is_silenced(&store, "api", now).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_blanket_silence_past_a_day_needs_force() {
+        let store = Store::in_memory().await;
+        let config = config();
+        assert!(matches!(
+            apply(&store, &config, "all", "2d", None, false).await,
+            Err(SilenceError::BlanketTooLong)
+        ));
+        apply(&store, &config, "all", "1d", None, false)
+            .await
+            .expect("a day is allowed");
+        apply(&store, &config, "api", "2d", None, false)
+            .await
+            .expect("the cap is for all monitors only");
+        let silenced = apply(&store, &config, "all", "2d", Some("move"), true)
+            .await
+            .expect("forced");
+        assert!(
+            silenced
+                .notice()
+                .starts_with("alerts for all monitors silenced until ")
+                && silenced.notice().ends_with(" (move)"),
+            "{}",
+            silenced.notice()
+        );
     }
 }

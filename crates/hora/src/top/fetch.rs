@@ -130,16 +130,24 @@ impl FetchError {
 pub(super) struct Api {
     pub(super) client: reqwest::Client,
     pub(super) url: String,
+    /// Sent on the reads.
     pub(super) token: Option<String>,
+    /// Sent on the actions.
+    pub(super) admin_token: Option<String>,
 }
 
 impl Api {
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        token: Option<&str>,
+    ) -> reqwest::RequestBuilder {
         let request = self
             .client
             .request(method, format!("{}{path}", self.url.trim_end_matches('/')))
             .timeout(REQUEST_TIMEOUT);
-        match &self.token {
+        match token {
             Some(token) => request.bearer_auth(token),
             None => request,
         }
@@ -165,7 +173,7 @@ impl Api {
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, FetchError> {
-        Self::send(self.request(reqwest::Method::GET, path))
+        Self::send(self.request(reqwest::Method::GET, path, self.token.as_deref()))
             .await?
             .json::<T>()
             .await
@@ -266,11 +274,14 @@ impl Fetcher {
     }
 
     /// Send an action in the background. Refused up front (with the notice
-    /// to show) without a token, or while the previous action is in flight.
+    /// to show) without the admin token, or while the previous action is in
+    /// flight.
     pub(super) fn action(&mut self, action: Action) -> Result<(), String> {
-        if self.api.token.is_none() {
+        if self.api.admin_token.is_none() {
             return Err(
-                "this action needs a token: run hora top --token ... (or HORA_TOKEN)".to_owned(),
+                "this action needs the admin token: run hora top --admin-token ... \
+                 (or HORA_ADMIN_TOKEN)"
+                    .to_owned(),
             );
         }
         if in_flight(self.action.as_ref()) {
@@ -279,7 +290,7 @@ impl Fetcher {
         let (api, tx) = (self.api.clone(), self.tx.clone());
         self.action = Some(tokio::spawn(async move {
             let request = api
-                .request(action.method, action.path)
+                .request(action.method, action.path, api.admin_token.as_deref())
                 .query(&action.params);
             let outcome = Api::send(request)
                 .await

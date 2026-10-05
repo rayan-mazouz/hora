@@ -351,8 +351,14 @@ pub struct Server {
     pub rate_limit_burst: u32,
     /// Token required to view private monitors (those with `public = false`).
     /// Sent as `Authorization: Bearer <token>` or `?token=` query parameter.
+    /// Read-only: it opens no write endpoint.
     #[serde(default)]
     pub auth_token: Option<Secret>,
+    /// Token for the operator writes (silence, announce, event, alert), sent
+    /// as `Authorization: Bearer <token>` only. Unset = those endpoints are
+    /// closed.
+    #[serde(default)]
+    pub admin_token: Option<Secret>,
     /// Per-group viewer tokens for the `/status/{group}` pages (lightweight
     /// multi-tenancy): a token here reveals the *full* view of its group -
     /// private monitors included - and nothing else. The global `auth_token`

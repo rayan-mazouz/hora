@@ -33,6 +33,7 @@ async fn test_app_with_vantage(
             [page]
             [server]
             auth_token = "0123456789abcdef"
+            admin_token = "admin-admin-admin-1"
             [server.group_tokens]
             App = "appappappappapp1"
             [health]
@@ -107,16 +108,21 @@ fn push(uri: &str) -> Request<Body> {
         .expect("request")
 }
 
-/// The test app's `server.auth_token`.
-const OPERATOR_TOKEN: &str = "0123456789abcdef";
+/// The test app's `server.admin_token`.
+const ADMIN_TOKEN: &str = "admin-admin-admin-1";
 
-/// `request`, carrying the operator token as `Authorization: Bearer`.
-fn as_operator(mut request: Request<Body>) -> Request<Body> {
+/// `request`, carrying `token` as `Authorization: Bearer`.
+fn with_bearer(mut request: Request<Body>, token: &str) -> Request<Body> {
     request.headers_mut().insert(
         header::AUTHORIZATION,
-        header::HeaderValue::from_str(&format!("Bearer {OPERATOR_TOKEN}")).expect("header"),
+        header::HeaderValue::from_str(&format!("Bearer {token}")).expect("header"),
     );
     request
+}
+
+/// `request`, carrying the admin token as `Authorization: Bearer`.
+fn as_admin(request: Request<Body>) -> Request<Body> {
+    with_bearer(request, ADMIN_TOKEN)
 }
 
 /// `request`, carrying `token` as `X-Push-Token`.

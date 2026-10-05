@@ -99,7 +99,7 @@ async fn push_rejects_wrong_peer_token() {
 }
 
 /// A JSON POST to the alert endpoint, with an optional `X-Push-Token` (the
-/// item token) and/or `Authorization: Bearer` (the global token).
+/// item token) and/or `Authorization: Bearer` (the admin token).
 fn alert(uri: &str, body: &str, push_token: Option<&str>, bearer: Option<&str>) -> Request<Body> {
     let mut builder = Request::builder()
         .method("POST")
@@ -122,11 +122,11 @@ async fn writes_refuse_a_query_token() {
     for request in [
         push("/api/push/beat?token=s3cret"),
         push("/api/push/peer-x?token=peertok"),
-        push("/api/event?title=deploy&token=0123456789abcdef"),
-        push("/api/silence?monitors=web&duration=10m&token=0123456789abcdef"),
-        push("/api/announce?title=x&token=0123456789abcdef"),
+        push("/api/event?title=deploy&token=admin-admin-admin-1"),
+        push("/api/silence?monitors=web&duration=10m&token=admin-admin-admin-1"),
+        push("/api/announce?title=x&token=admin-admin-admin-1"),
         alert(
-            "/api/monitors/web/alert?token=0123456789abcdef",
+            "/api/monitors/web/alert?token=admin-admin-admin-1",
             r#"{"title":"deploy started"}"#,
             None,
             None,
@@ -176,8 +176,8 @@ async fn alert_dispatches_with_item_token_and_records_it() {
 }
 
 #[tokio::test]
-async fn alert_accepts_global_auth_token_for_a_non_push_monitor() {
-    // "web" is an HTTP monitor with no push_token: the global token
+async fn alert_accepts_the_admin_token_for_a_non_push_monitor() {
+    // "web" is an HTTP monitor with no push_token: the admin token
     // authorizes, as a Bearer header.
     let res = test_app()
         .await
@@ -185,7 +185,7 @@ async fn alert_accepts_global_auth_token_for_a_non_push_monitor() {
             "/api/monitors/web/alert",
             r#"{"title":"deploy started"}"#,
             None,
-            Some("0123456789abcdef"),
+            Some(ADMIN_TOKEN),
         ))
         .await
         .unwrap();
@@ -230,7 +230,7 @@ async fn alert_does_not_reveal_which_ids_exist() {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri}");
         assert_eq!(
             body_text(res).await,
-            "alerting requires the monitor's push_token (X-Push-Token) or server.auth_token",
+            "alerting requires the monitor's push_token (X-Push-Token) or server.admin_token",
             "{uri}"
         );
     }
@@ -244,7 +244,7 @@ async fn alert_unknown_monitor_is_404() {
             "/api/monitors/nope/alert",
             r#"{"title":"x"}"#,
             None,
-            Some("0123456789abcdef"),
+            Some(ADMIN_TOKEN),
         ))
         .await
         .unwrap();
@@ -309,14 +309,14 @@ async fn alert_coalesces_a_repeated_dedup_key() {
 #[tokio::test]
 async fn alert_history_respects_public_and_private_visibility() {
     let (app, _pool) = test_app_with_pool().await;
-    // A public monitor's alert ("web" has no push_token: global token).
+    // A public monitor's alert ("web" has no push_token: admin token).
     let res = app
         .clone()
         .oneshot(alert(
             "/api/monitors/web/alert",
             r#"{"severity":"warning","title":"web alert","message":"web detail"}"#,
             None,
-            Some("0123456789abcdef"),
+            Some(ADMIN_TOKEN),
         ))
         .await
         .unwrap();
@@ -328,7 +328,7 @@ async fn alert_history_respects_public_and_private_visibility() {
             "/api/monitors/intra/alert",
             r#"{"severity":"error","title":"intra alert","message":"intra detail"}"#,
             None,
-            Some("0123456789abcdef"),
+            Some(ADMIN_TOKEN),
         ))
         .await
         .unwrap();
