@@ -205,6 +205,7 @@ mod tests {
                 .map(|&(target, status, p50_ms)| PeerMonitor {
                     kind: Kind::Tcp,
                     target: target.to_owned(),
+                    checks: String::new(),
                     status: serde_json::from_value(serde_json::json!(status)).unwrap(),
                     p50_ms,
                 })

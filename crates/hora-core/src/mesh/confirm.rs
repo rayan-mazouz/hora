@@ -13,7 +13,8 @@
 //! 2. **Never a proxy.** The responder (`hora-web`'s `/api/peer/probe`)
 //!    only probes targets present in *its own* configuration, so a leaked
 //!    token cannot turn a peer into an SSRF relay. Both nodes must know the
-//!    monitor - which pairs naturally with sharing the config in git.
+//!    monitor, and check it the same way ([`check_fingerprint`]) - which
+//!    pairs naturally with sharing the config in git.
 //! 3. **Only an explicit contradiction quiets a down.** When every peer that
 //!    answered sees the target up, the down is local-only: it goes to
 //!    `alerts.notify_unconfirmed` (or is only recorded) instead of the
@@ -24,7 +25,7 @@
 use std::time::Duration;
 
 use super::wire::{ProbeRequest, ProbeResponse};
-use crate::config::{Config, Kind, Monitor};
+use crate::config::{Config, Kind, Monitor, MonitorKind};
 
 /// Hard per-peer deadline for one confirmation probe. The responder bounds
 /// its own probe by the monitor's timeout; this is the requester's backstop,
@@ -52,6 +53,59 @@ pub(crate) enum Verdict {
     /// The peer answered, but does not watch this target (404). Counts for
     /// nothing either - but it is not an unreachable peer.
     NotWatched,
+}
+
+/// A hash of what decides a monitor's verdict beyond its kind and target: the
+/// expected status, the keyword, JSON and number assertions, the request
+/// header names and the body cap of an http check, the record type and pinned
+/// answer of a dns check, and `dual_stack`. A peer answers a confirmation
+/// probe only for a monitor with the same fingerprint: one checking the same
+/// URL without this node's keyword would see an error page served with a 200
+/// as up. Hashed, so header names and expected values stay on each node.
+#[must_use]
+pub fn check_fingerprint(monitor: &Monitor) -> String {
+    let parts: Vec<String> = match &monitor.spec {
+        MonitorKind::Http(http) => {
+            let mut header_names: Vec<String> = http
+                .headers
+                .keys()
+                .map(|name| name.to_ascii_lowercase())
+                .collect();
+            header_names.sort();
+            vec![
+                format!("expected_status={:?}", http.expected_status),
+                format!("headers={header_names:?}"),
+                format!(
+                    "keyword={:?}",
+                    http.keyword
+                        .as_ref()
+                        .map(|keyword| (&keyword.text, keyword.invert))
+                ),
+                format!(
+                    "json={:?}",
+                    http.json
+                        .as_ref()
+                        .map(|json| (json.query.raw(), &json.expected))
+                ),
+                format!(
+                    "number={:?}",
+                    http.number
+                        .as_ref()
+                        .map(|number| (number.regex.raw(), number.min, number.max))
+                ),
+                format!("max_body_kb={:?}", http.max_body_kb),
+                format!("dual_stack={}", http.dual_stack),
+            ]
+        }
+        MonitorKind::Tcp(tcp) => vec![format!("dual_stack={}", tcp.dual_stack)],
+        MonitorKind::Icmp(icmp) => vec![format!("dual_stack={}", icmp.dual_stack)],
+        MonitorKind::Dns(dns) => vec![
+            format!("record={:?}", dns.record),
+            format!("expected={:?}", dns.expected),
+        ],
+        MonitorKind::Push(_) | MonitorKind::Exec(_) => Vec::new(),
+    };
+    crate::cert::sha256_hex(parts.join("\n").as_bytes())
 }
 
 /// Whether multi-vantage confirmation applies to this monitor under this
@@ -166,6 +220,7 @@ async fn peer_verdicts(
         from,
         kind: monitor.kind(),
         target: monitor.target().to_owned(),
+        checks: check_fingerprint(monitor),
     };
     let probes = peers.iter().map(|(name, url, token)| {
         let request = &request;
@@ -459,6 +514,7 @@ mod tests {
             from: "hora-a".to_owned(),
             kind: Kind::Tcp,
             target: "db.example.com:5432".to_owned(),
+            checks: "abc".to_owned(),
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"kind\":\"tcp\""), "{json}");
@@ -467,5 +523,45 @@ mod tests {
 
         let response: ProbeResponse = serde_json::from_str(r#"{"up":false}"#).unwrap();
         assert!(!response.up && response.error.is_none());
+    }
+
+    #[test]
+    fn the_fingerprint_follows_the_assertions_not_the_rest() {
+        let config = crate::config::parse(
+            r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "plain"
+                name = "Plain"
+                target = "https://example.com/health"
+                interval_secs = 60
+                [[monitors]]
+                id = "slower"
+                name = "Slower"
+                target = "https://example.com/health"
+                interval_secs = 300
+                timeout_secs = 20
+                [[monitors]]
+                id = "keyword"
+                name = "Keyword"
+                target = "https://example.com/health"
+                interval_secs = 60
+                keyword = "OK"
+                [[monitors]]
+                id = "inverted"
+                name = "Inverted"
+                target = "https://example.com/health"
+                interval_secs = 60
+                keyword = "OK"
+                keyword_invert = true
+            "#,
+        )
+        .expect("config");
+        let fingerprint = |id: &str| check_fingerprint(config.find_monitor(id).expect(id));
+        assert_eq!(fingerprint("plain"), fingerprint("slower"));
+        assert_ne!(fingerprint("plain"), fingerprint("keyword"));
+        assert_ne!(fingerprint("keyword"), fingerprint("inverted"));
+        assert_eq!(fingerprint("plain").len(), 64);
     }
 }

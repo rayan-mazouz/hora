@@ -44,6 +44,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A peer checking a target differently no longer quiets a down.** A
+  confirmation probe matched on kind and target only, and the peer probed
+  with its own assertions: with `keyword = "OK"` here and none there, an
+  error page served with a 200 was "seen UP by hora-b" and the down went
+  unsent. The request now carries a hash of the monitor's assertions, and
+  a peer whose monitor hashes differently answers like one that does not
+  watch the target. `hora peers diff` lists such monitors as "checked
+  differently".
+
 - **`hora check` shows the warnings.** They were dropped: a config with a
   short token printed only "valid". Each
   warning is now printed on stderr and counted in the verdict

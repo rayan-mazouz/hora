@@ -89,8 +89,8 @@ pub struct PeerSeen {
 
 // --- Peer API (/api/peer/*) --------------------------------------------------
 
-/// What one node asks another to probe. The responder matches `kind` +
-/// `target` against its own monitors and refuses anything else.
+/// What one node asks another to probe. The responder matches `kind`,
+/// `target` and `checks` against its own monitors and refuses anything else.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProbeRequest {
     /// The requesting node's `[health].id`; the responder authenticates it
@@ -98,6 +98,10 @@ pub struct ProbeRequest {
     pub from: String,
     pub kind: Kind,
     pub target: String,
+    /// The requester's [`check_fingerprint`](super::confirm::check_fingerprint)
+    /// for this monitor: the responder only answers for a monitor it checks
+    /// the same way.
+    pub checks: String,
 }
 
 /// The vantage's verdict on one probe.
@@ -123,6 +127,9 @@ pub struct PeerMonitors {
 pub struct PeerMonitor {
     pub kind: Kind,
     pub target: String,
+    /// That node's [`check_fingerprint`](super::confirm::check_fingerprint)
+    /// for the monitor.
+    pub checks: String,
     /// `up` | `degraded` | `down` | `unknown`, from that node's view.
     pub status: MonitorState,
     /// That node's 24h median latency to the target, when it has one.

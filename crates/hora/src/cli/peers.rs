@@ -1,15 +1,18 @@
 //! `hora peers`: compare this node's monitors with each peer's.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::Context as _;
 use hora_core::config;
 
 use super::{CliError, usage};
 
-/// `hora peers diff`: compare this node's probeable monitors (kind + target)
-/// with each peer's, over the authenticated `/api/peer/monitors` exchange.
-/// `confirm_with_peers` only works on monitors both nodes know, and nothing
-/// else verifies that alignment - this does, and exits non-zero on any drift
-/// or unreachable peer so it can gate a config deploy.
+/// `hora peers diff`: compare this node's probeable monitors (kind + target,
+/// and how each is checked) with each peer's, over the authenticated
+/// `/api/peer/monitors` exchange. `confirm_with_peers` only works on monitors
+/// both nodes know and check the same way, and nothing else verifies that
+/// alignment - this does, and exits non-zero on any drift or unreachable peer
+/// so it can gate a config deploy.
 pub(crate) async fn peers(args: &[String]) -> Result<(), CliError> {
     if args.first().map(String::as_str) != Some("diff") {
         return Err(usage("Usage: hora peers diff"));
@@ -33,22 +36,24 @@ pub(crate) async fn peers(args: &[String]) -> Result<(), CliError> {
         ));
     }
 
-    let local: std::collections::BTreeSet<(String, String)> = config
-        .monitors
-        .iter()
-        .filter(|monitor| {
-            !matches!(
-                monitor.kind(),
-                hora_core::config::Kind::Push | hora_core::config::Kind::Exec
-            )
-        })
-        .map(|monitor| {
-            (
-                monitor.kind().as_str().to_owned(),
-                monitor.target().to_owned(),
-            )
-        })
-        .collect();
+    let local: Targets = targets(
+        config
+            .monitors
+            .iter()
+            .filter(|monitor| {
+                !matches!(
+                    monitor.kind(),
+                    hora_core::config::Kind::Push | hora_core::config::Kind::Exec
+                )
+            })
+            .map(|monitor| {
+                (
+                    monitor.kind().as_str().to_owned(),
+                    monitor.target().to_owned(),
+                    hora_core::mesh::confirm::check_fingerprint(monitor),
+                )
+            }),
+    );
 
     let client = hora_core::http::client(None).context("building HTTP client")?;
     let mut drift = false;
@@ -72,34 +77,61 @@ pub(crate) async fn peers(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Each (kind, target) with the fingerprints of the monitors checking it.
+type Targets = BTreeMap<(String, String), BTreeSet<String>>;
+
+fn targets(monitors: impl Iterator<Item = (String, String, String)>) -> Targets {
+    let mut targets = Targets::new();
+    for (kind, target, checks) in monitors {
+        targets.entry((kind, target)).or_default().insert(checks);
+    }
+    targets
+}
+
 /// Print one peer's diff against the local monitor set; `true` means drift
 /// (or an unreachable peer - a mesh you cannot ask is a mesh out of sync).
 fn print_peer_diff(
     peer_name: &str,
-    local: &std::collections::BTreeSet<(String, String)>,
+    local: &Targets,
     answer: Option<&hora_core::mesh::wire::PeerMonitors>,
 ) -> bool {
     let Some(answer) = answer else {
         println!("{peer_name}: UNREACHABLE (or refused the exchange)");
         return true;
     };
-    let remote: std::collections::BTreeSet<(String, String)> = answer
-        .monitors
-        .iter()
-        .map(|monitor| (monitor.kind.as_str().to_owned(), monitor.target.clone()))
+    let remote = targets(answer.monitors.iter().map(|monitor| {
+        (
+            monitor.kind.as_str().to_owned(),
+            monitor.target.clone(),
+            monitor.checks.clone(),
+        )
+    }));
+    let missing: Vec<_> = local
+        .keys()
+        .filter(|key| !remote.contains_key(*key))
         .collect();
-    let missing: Vec<_> = local.difference(&remote).collect();
-    let extra: Vec<_> = remote.difference(local).collect();
-    if missing.is_empty() && extra.is_empty() {
+    let extra: Vec<_> = remote
+        .keys()
+        .filter(|key| !local.contains_key(*key))
+        .collect();
+    let different: Vec<_> = local
+        .iter()
+        .filter(|(key, checks)| remote.get(*key).is_some_and(|theirs| theirs != *checks))
+        .map(|(key, _)| key)
+        .collect();
+    if missing.is_empty() && extra.is_empty() && different.is_empty() {
         println!("{peer_name}: in sync ({} monitors)", remote.len());
         return false;
     }
     println!("{peer_name}: DRIFT");
     for (kind, target) in missing {
-        println!("  missing there: {kind} {target}");
+        println!("  missing there:        {kind} {target}");
     }
     for (kind, target) in extra {
-        println!("  only there:    {kind} {target}");
+        println!("  only there:           {kind} {target}");
+    }
+    for (kind, target) in different {
+        println!("  checked differently:  {kind} {target}");
     }
     true
 }

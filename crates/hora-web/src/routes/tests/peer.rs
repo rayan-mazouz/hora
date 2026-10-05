@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// A probe request body from hora-a for `kind` + `target`, checked the way
+/// [`vantage_config`]'s tcp monitor is.
+fn probe_body(kind: &str, target: &str) -> String {
+    let config = hora_core::config::parse(&vantage_config(9)).expect("config");
+    let checks = hora_core::mesh::confirm::check_fingerprint(&config.monitors[0]);
+    format!(r#"{{"from":"hora-a","kind":"{kind}","target":"{target}","checks":"{checks}"}}"#)
+}
+
 fn probe_request(body: &str, token: Option<&str>) -> Request<Body> {
     let mut builder = Request::builder()
         .method("POST")
@@ -18,7 +26,7 @@ fn probe_request(body: &str, token: Option<&str>) -> Request<Body> {
 async fn peer_probe_authenticates_strictly() {
     let service = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = service.local_addr().unwrap().port();
-    let body = format!(r#"{{"from":"hora-a","kind":"tcp","target":"127.0.0.1:{port}"}}"#);
+    let body = probe_body("tcp", &format!("127.0.0.1:{port}"));
 
     // Wrong token, missing token, unknown peer: all 401, indistinguishable.
     for (from, token) in [
@@ -44,8 +52,8 @@ async fn peer_probe_refuses_targets_outside_its_config() {
     // The SSRF guard: an authenticated peer asking for an arbitrary target
     // (or the right target under another kind) gets a 404, never a probe.
     for body in [
-        r#"{"from":"hora-a","kind":"tcp","target":"169.254.169.254:80"}"#.to_owned(),
-        format!(r#"{{"from":"hora-a","kind":"http","target":"127.0.0.1:{port}"}}"#),
+        probe_body("tcp", "169.254.169.254:80"),
+        probe_body("http", &format!("127.0.0.1:{port}")),
     ] {
         let res = app_from(&vantage_config(port))
             .await
@@ -57,13 +65,62 @@ async fn peer_probe_refuses_targets_outside_its_config() {
 }
 
 #[tokio::test]
+async fn peer_probe_refuses_a_target_it_checks_differently() {
+    // Same URL, but the requester also asserts a keyword: this node's plain
+    // check would see an error page served with a 200 as up, and quiet a
+    // real down. It answers 404, like a target it does not watch.
+    let responder = r#"
+        [page]
+        [server]
+        [health]
+        id = "hora-b"
+        [[peers]]
+        id = "hora-a"
+        name = "A"
+        expect_every_secs = 60
+        listen_token = "tok-a-to-b-16char"
+        [[monitors]]
+        id = "app"
+        name = "App"
+        target = "https://app.example.com/health"
+        interval_secs = 60
+    "#;
+    let requester = hora_core::config::parse(&responder.replace(
+        "interval_secs = 60\n    ",
+        "interval_secs = 60\n        keyword = \"OK\"\n    ",
+    ))
+    .expect("config");
+    let monitor = requester.find_monitor("app").expect("app");
+    assert!(
+        matches!(&monitor.spec, hora_core::config::MonitorKind::Http(http) if http.keyword.is_some())
+    );
+    let body = serde_json::to_string(&hora_core::mesh::wire::ProbeRequest {
+        from: "hora-a".to_owned(),
+        kind: monitor.kind(),
+        target: monitor.target().to_owned(),
+        checks: hora_core::mesh::confirm::check_fingerprint(monitor),
+    })
+    .unwrap();
+    let res = app_from(responder)
+        .await
+        .oneshot(probe_request(&body, Some("tok-a-to-b-16char")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        body_text(res).await,
+        "target checked differently in this node's configuration"
+    );
+}
+
+#[tokio::test]
 async fn peer_probe_refuses_exec_and_push_kinds() {
     // Every exec monitor has the same empty target: answering would run
     // one of this node's local checks for another node's monitor (or
     // answer a bogus "down"). Refused outright, before any matching.
     let config = vantage_config(9);
     for kind in ["exec", "push"] {
-        let body = format!(r#"{{"from":"hora-a","kind":"{kind}","target":""}}"#);
+        let body = probe_body(kind, "");
         let res = app_from(&config)
             .await
             .oneshot(probe_request(&body, Some("tok-a-to-b-16char")))
@@ -77,7 +134,7 @@ async fn peer_probe_refuses_exec_and_push_kinds() {
 async fn peer_probe_reports_its_own_vantage() {
     let service = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = service.local_addr().unwrap().port();
-    let body = format!(r#"{{"from":"hora-a","kind":"tcp","target":"127.0.0.1:{port}"}}"#);
+    let body = probe_body("tcp", &format!("127.0.0.1:{port}"));
     let config = vantage_config(port);
 
     // Service listening: up from this vantage.

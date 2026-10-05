@@ -21,7 +21,7 @@ use crate::error::AppError;
         (status = 200, description = "This vantage's verdict on the target", body = hora_core::mesh::wire::ProbeResponse),
         (status = 400, description = "Exec and push monitors are not network probes"),
         (status = 401, description = "Unknown requesting peer, or missing/wrong X-Push-Token"),
-        (status = 404, description = "The target is not in this node's configuration")
+        (status = 404, description = "The target is not in this node's configuration, or is checked differently")
     )
 )]
 pub(crate) async fn peer_probe(
@@ -45,13 +45,24 @@ pub(crate) async fn peer_probe(
 
     // The SSRF guard: only targets present in THIS node's configuration are
     // probed - a peer is a vantage point, never a proxy. The matched
-    // monitor's own settings (timeout, assertions, proxy) drive the probe.
-    let monitor = config
+    // monitor's own settings (timeout, assertions, proxy) drive the probe,
+    // so it must check the target the same way as the requester's: a weaker
+    // check here would contradict a real down there.
+    let same_target: Vec<&hora_core::config::Monitor> = config
         .monitors
         .iter()
-        .find(|monitor| monitor.kind() == request.kind && monitor.target() == request.target)
-        .ok_or(AppError::NotFound(
+        .filter(|monitor| monitor.kind() == request.kind && monitor.target() == request.target)
+        .collect();
+    if same_target.is_empty() {
+        return Err(AppError::NotFound(
             "target not in this node's configuration",
+        ));
+    }
+    let monitor = same_target
+        .into_iter()
+        .find(|monitor| hora_core::mesh::confirm::check_fingerprint(monitor) == request.checks)
+        .ok_or(AppError::NotFound(
+            "target checked differently in this node's configuration",
         ))?;
 
     // Single attempt (no retries): the requester wants a fast vantage check,
@@ -139,6 +150,7 @@ pub(crate) async fn peer_monitors(
             hora_core::mesh::wire::PeerMonitor {
                 kind: monitor.kind(),
                 target: monitor.target().to_owned(),
+                checks: hora_core::mesh::confirm::check_fingerprint(monitor),
                 status: view.map_or(MonitorState::Unknown, |view| view.status),
                 p50_ms: view.and_then(|view| view.p50_ms),
             }

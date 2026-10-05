@@ -9,6 +9,11 @@ procedure (pull the new image, recreate the container, history lives on the
 No migration. Some configs that loaded no longer do; run `hora check` with
 the new binary against your config before you roll out:
 
+- **Upgrade every node of a mesh together.** A confirmation probe now
+  carries the monitor's check fingerprint, and a node only answers for a
+  monitor checked the same way. Across versions, peers do not confirm each
+  other's downs (the alert goes out as unconfirmed) until both run the new
+  release. `hora peers diff` lists monitors checked differently.
 - **An unset `${VAR}` fails the load**, naming the key and the variable
   (it expanded to `""`). Set the variable, or write `${VAR:-}` where an
   empty value is meant.

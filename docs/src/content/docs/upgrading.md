@@ -63,6 +63,10 @@ older binary refuses keys it does not know.
 No migration, but some configs that loaded no longer do: run `hora check`
 with the new binary first.
 
+- **Upgrade every node of a mesh together.** Until both run the new
+  release, peers do not confirm each other's downs (alerts go out as
+  unconfirmed). A peer only confirms a monitor it checks the same way:
+  `hora peers diff` lists the ones checked differently.
 - **An unset `${VAR}` fails the load**, naming the key and the variable.
   Set it, or write `${VAR:-}` where an empty value is meant.
 - **An empty channel secret fails the load** instead of disabling the

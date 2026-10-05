@@ -292,9 +292,12 @@ hora timeline --days 30
 ## `hora peers diff`
 
 Compares this node's probeable monitors (kind and target; push and exec
-monitors have none) with each peer's, over the authenticated mesh exchange.
+monitors have none) with each peer's, over the authenticated mesh exchange,
+and lists the ones both have but check differently ("checked differently":
+another keyword, status or assertion).
 [Multi-vantage confirmation](../../guides/peers/#multi-vantage-confirmation)
-only works for monitors both nodes know, and this is what checks it. Exits
+only works for monitors both nodes know and check the same way, and this is
+what checks it. Exits
 non-zero on any difference or an unreachable peer, so it can gate a config
 deploy. Needs `[health].id` and peers with a `ping_url`.
 

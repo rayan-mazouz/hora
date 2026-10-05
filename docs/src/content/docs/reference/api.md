@@ -28,7 +28,7 @@ Editor...) at it.
 | `POST /api/event` | Record an event marker ("deploy api v2.3"), correlated into incidents. Requires `server.admin_token`. |
 | `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
 | `POST /api/announce` | Pin a public status-page banner (`DELETE` clears); auto-expiry via `until`, a duration (`4h`) or a UTC time of day (`18:00`). Requires `server.admin_token`. |
-| `POST /api/peer/probe` | [Multi-vantage confirmation](../../guides/peers/#multi-vantage-confirmation) between nodes: probe a target *from this node's own config* and answer with the verdict. Requires the requesting peer's `listen_token`. |
+| `POST /api/peer/probe` | [Multi-vantage confirmation](../../guides/peers/#multi-vantage-confirmation) between nodes: probe a target *from this node's own config*, checked the same way as the requester's, and answer with the verdict. Requires the requesting peer's `listen_token`. |
 | `GET /api/peer/monitors?from=<peer-id>` | The mesh exchange behind `hora peers diff` and the per-vantage view: this node's probeable monitors with its own view of each. Same peer authentication as `/api/peer/probe`. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge. |
 | `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge. |

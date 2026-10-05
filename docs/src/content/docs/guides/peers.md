@@ -141,6 +141,15 @@ proxy) - never an arbitrary target, so a leaked token cannot turn a peer
 into an SSRF relay. Both nodes must therefore know the monitor, which pairs
 naturally with sharing the config in git.
 
+The monitor must also be **checked the same way** on both nodes: the
+request carries a hash of what decides the verdict (expected status,
+keyword and its inversion, JSON and number assertions, request header
+names, body cap, DNS record type and expected answer, `dual_stack`). A
+responder whose monitor hashes differently answers like one that does not
+watch the target. Otherwise a peer checking the URL without your
+`keyword = "OK"` would see an error page served with a 200 as up, and
+quiet a real down. Timeouts, intervals and proxies may differ.
+
 ### Failure behaviour
 
 Strictly fail-open, by construction: peers being slow, unreachable, behind a
@@ -165,8 +174,8 @@ hora peers diff
 ```
 
 It lists, per peer, the monitors (kind and target) that only one side has,
-and exits non-zero on any difference or an unreachable peer, so it can gate
-a config deploy in CI.
+and the ones both have but check differently, and exits non-zero on any
+difference or an unreachable peer, so it can gate a config deploy in CI.
 
 ## External receivers
 
